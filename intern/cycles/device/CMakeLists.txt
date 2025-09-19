@@ -4,6 +4,10 @@
 
 set(INC
   ..
+  ../integrator
+  ../kernel
+  ../manifold
+  ../scene
 )
 
 set(INC_SYS )
