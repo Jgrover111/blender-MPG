@@ -43,6 +43,7 @@ if(WITH_CYCLES_MANIFOLD)
   list(APPEND SRC_CPU
           ../manifold/mpg.cpp
           ../manifold/mpg_pdf.cpp
+          ../manifold/mpg_pgl_summary.cpp
           ../manifold/mpg_seed.cpp
           ../manifold/mpg_solve.cpp
   )

@@ -40,6 +40,7 @@ struct GuideSummary {
   float3 mean_dir = zero_float3();
   float peak_weight = 0.0f;
   float kappa = 0.0f;
+  float rbar = 0.0f;
 };
 
 CCL_NAMESPACE_END
