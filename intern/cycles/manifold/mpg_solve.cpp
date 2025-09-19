@@ -4,6 +4,16 @@
 
 #include "manifold/mpg_solve.h"
 
+#include "kernel/bvh/bvh.h"
+#include "kernel/bvh/util.h"
+#include "kernel/closure/bsdf_microfacet.h"
+#include "kernel/geom/motion_triangle.h"
+#include "kernel/geom/object.h"
+#include "kernel/geom/shader_data.h"
+#include "kernel/geom/triangle.h"
+#include "kernel/svm/types.h"
+#include "kernel/types.h"
+
 #include "util/math_matrix.h"
 
 #include <cfloat>
@@ -11,44 +21,61 @@
 CCL_NAMESPACE_BEGIN
 
 namespace {
-struct SpecularEval {
-  float3 point;
-  float3 normal;
-  float3 dir_ds;
-  float3 dir_sl;
-  float distance_ds;
-  float distance_sl;
-  float3 dXdu;
-  float3 dXdv;
-  float3 dNdu;
-  float3 dNdv;
-  float3 residual;
-  bool tir = false;
+struct SpecularSurfaceGeometry {
+  float3 verts[3];
+  float3 normals[3];
+  float3 dPdu;
+  float3 dPdv;
 };
 
-float3 combine_vertex_normals(const MpgSeedRay &seed, const float u, const float v)
+struct SpecularParameters {
+  bool is_refraction = false;
+  float base_eta = 1.0f;
+};
+
+struct SpecularEval {
+  float3 point = zero_float3();
+  float3 normal = zero_float3();
+  float3 dir_ds = zero_float3();
+  float3 dir_sl = zero_float3();
+  float distance_ds = 0.0f;
+  float distance_sl = 0.0f;
+  float3 dXdu = zero_float3();
+  float3 dXdv = zero_float3();
+  float3 dNdu = zero_float3();
+  float3 dNdv = zero_float3();
+  float3 residual = zero_float3();
+  float cos_theta_i = 0.0f;
+  float cos_theta_t = 0.0f;
+  float eta = 1.0f;
+  bool tir = false;
+  bool refractive = false;
+};
+
+float3 combine_vertex_normals(const SpecularSurfaceGeometry &geometry, const float u, const float v)
 {
   const float w = 1.0f - u - v;
-  float3 n = seed.tri_n0 * w + seed.tri_n1 * u + seed.tri_n2 * v;
+  float3 n = geometry.normals[0] * w + geometry.normals[1] * u + geometry.normals[2] * v;
   if (is_zero(n)) {
-    return normalize(seed.tri_n0);
+    return normalize(cross(geometry.dPdu, geometry.dPdv));
   }
   return normalize(n);
 }
 
-float3 compute_normal_derivative(const MpgSeedRay &seed,
+float3 compute_normal_derivative(const SpecularSurfaceGeometry &geometry,
                                  const float u,
                                  const float v,
                                  const float3 &normal,
                                  const bool du)
 {
   const float w = 1.0f - u - v;
-  const float3 raw = seed.tri_n0 * w + seed.tri_n1 * u + seed.tri_n2 * v;
+  const float3 raw = geometry.normals[0] * w + geometry.normals[1] * u + geometry.normals[2] * v;
   const float norm_raw = len(raw);
   if (norm_raw == 0.0f) {
     return zero_float3();
   }
-  const float3 d_raw = du ? (seed.tri_n1 - seed.tri_n0) : (seed.tri_n2 - seed.tri_n0);
+  const float3 d_raw = du ? (geometry.normals[1] - geometry.normals[0]) :
+                           (geometry.normals[2] - geometry.normals[0]);
   const float3 projection = normal * dot(normal, d_raw);
   return (d_raw - projection) / norm_raw;
 }
@@ -95,19 +122,38 @@ float3 refract_dir(const float3 &dir_in,
 
 float3 compute_specular(const float3 &dir_ds,
                         const float3 &normal,
-                        const bool is_refraction,
-                        const float eta,
+                        const SpecularParameters &params,
                         bool &tir,
                         float &cos_theta_i,
-                        float &cos_theta_t)
+                        float &cos_theta_t,
+                        float &eta_used)
 {
-  if (!is_refraction) {
+  if (!params.is_refraction) {
     tir = false;
-    cos_theta_i = dot(-dir_ds, normal);
+    cos_theta_i = fabsf(dot(-dir_ds, normal));
     cos_theta_t = cos_theta_i;
+    eta_used = 1.0f;
     return reflect_dir(dir_ds, normal);
   }
-  return refract_dir(dir_ds, normal, eta, tir, cos_theta_i, cos_theta_t);
+
+  float3 oriented_normal = normal;
+  float eta = fmaxf(params.base_eta, 1e-6f);
+  if (dot(-dir_ds, normal) < 0.0f) {
+    oriented_normal = -normal;
+    eta = 1.0f / eta;
+  }
+
+  float3 dir = refract_dir(dir_ds, oriented_normal, eta, tir, cos_theta_i, cos_theta_t);
+  eta_used = eta;
+  if (tir) {
+    cos_theta_i = fabsf(cos_theta_i);
+    cos_theta_t = 0.0f;
+    return dir;
+  }
+
+  cos_theta_i = fabsf(cos_theta_i);
+  cos_theta_t = fabsf(cos_theta_t);
+  return dir;
 }
 
 float3 derivative_normalized(const float3 &vector, const float3 &d_vector)
@@ -122,29 +168,112 @@ float3 derivative_normalized(const float3 &vector, const float3 &d_vector)
 
 void evaluate_specular(const ShadingPoint &D,
                        const MpgSeedRay &seed,
+                       const SpecularSurfaceGeometry &geometry,
+                       const SpecularParameters &params,
                        const float u,
                        const float v,
                        SpecularEval &eval)
 {
   const float w = 1.0f - u - v;
-  eval.point = seed.tri_v0 * w + seed.tri_v1 * u + seed.tri_v2 * v;
-  eval.dXdu = seed.tri_v1 - seed.tri_v0;
-  eval.dXdv = seed.tri_v2 - seed.tri_v0;
+  eval.point = geometry.verts[0] * w + geometry.verts[1] * u + geometry.verts[2] * v;
+  eval.dXdu = geometry.dPdu;
+  eval.dXdv = geometry.dPdv;
   eval.dir_ds = eval.point - D.position;
   eval.distance_ds = len(eval.dir_ds);
-  eval.dir_ds = (eval.distance_ds > 0.0f) ? (eval.dir_ds / eval.distance_ds) : make_float3(0.0f, 0.0f, 1.0f);
+  eval.dir_ds = (eval.distance_ds > 0.0f) ? (eval.dir_ds / eval.distance_ds) :
+                                           make_float3(0.0f, 0.0f, 1.0f);
 
   eval.dir_sl = seed.emitter_position - eval.point;
   eval.distance_sl = len(eval.dir_sl);
-  eval.dir_sl = (eval.distance_sl > 0.0f) ? (eval.dir_sl / eval.distance_sl) : make_float3(0.0f, 0.0f, 1.0f);
+  eval.dir_sl = (eval.distance_sl > 0.0f) ? (eval.dir_sl / eval.distance_sl) :
+                                           make_float3(0.0f, 0.0f, 1.0f);
 
-  eval.normal = combine_vertex_normals(seed, u, v);
-  eval.dNdu = compute_normal_derivative(seed, u, v, eval.normal, true);
-  eval.dNdv = compute_normal_derivative(seed, u, v, eval.normal, false);
+  eval.normal = combine_vertex_normals(geometry, u, v);
+  eval.dNdu = compute_normal_derivative(geometry, u, v, eval.normal, true);
+  eval.dNdv = compute_normal_derivative(geometry, u, v, eval.normal, false);
 
-  float cos_theta_i = 0.0f, cos_theta_t = 0.0f;
-  eval.residual = eval.dir_sl -
-                  compute_specular(-eval.dir_ds, eval.normal, seed.is_refraction, seed.eta, eval.tir, cos_theta_i, cos_theta_t);
+  float cos_theta_i = 0.0f, cos_theta_t = 0.0f, eta = 1.0f;
+  const float3 spec_dir = compute_specular(
+      -eval.dir_ds, eval.normal, params, eval.tir, cos_theta_i, cos_theta_t, eta);
+  eval.refractive = params.is_refraction;
+  eval.eta = eta;
+  eval.cos_theta_i = cos_theta_i;
+  eval.cos_theta_t = cos_theta_t;
+  eval.residual = eval.dir_sl - spec_dir;
+}
+
+SpecularParameters specular_parameters_from_closure(const ShaderClosure &bsdf)
+{
+  SpecularParameters params;
+  params.is_refraction = CLOSURE_IS_REFRACTION(bsdf.type) || CLOSURE_IS_GLASS(bsdf.type);
+  if (params.is_refraction) {
+    const MicrofacetBsdf *microfacet = reinterpret_cast<const MicrofacetBsdf *>(&bsdf);
+    params.base_eta = fmaxf(microfacet->ior, 1e-6f);
+  }
+  return params;
+}
+
+bool load_surface_geometry(KernelGlobals kg,
+                           const ShaderData &sd,
+                           const MpgSeedRay &seed,
+                           SpecularSurfaceGeometry &geometry)
+{
+  if (seed.object == OBJECT_NONE || seed.prim < 0) {
+    return false;
+  }
+
+  const int object = seed.object;
+  const int prim = seed.prim;
+  const int object_flag = kernel_data_fetch(object_flag, object);
+
+  if (object_flag & SD_OBJECT_MOTION) {
+    motion_triangle_vertices_and_normals(kg, object, prim, sd.time, geometry.verts, geometry.normals);
+  }
+  else {
+    triangle_vertices_and_normals(kg, prim, geometry.verts, geometry.normals);
+  }
+
+  ShaderData object_sd = {};
+  object_sd.object = object;
+  object_sd.object_flag = object_flag;
+  shader_setup_object_transforms(kg, &object_sd, sd.time);
+
+  if (!(object_flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+    object_position_transform_auto(kg, &object_sd, &geometry.verts[0]);
+    object_position_transform_auto(kg, &object_sd, &geometry.verts[1]);
+    object_position_transform_auto(kg, &object_sd, &geometry.verts[2]);
+    object_normal_transform_auto(kg, &object_sd, &geometry.normals[0]);
+    object_normal_transform_auto(kg, &object_sd, &geometry.normals[1]);
+    object_normal_transform_auto(kg, &object_sd, &geometry.normals[2]);
+  }
+
+  geometry.dPdu = geometry.verts[1] - geometry.verts[0];
+  geometry.dPdv = geometry.verts[2] - geometry.verts[0];
+  return true;
+}
+
+float compute_visibility(KernelGlobals kg,
+                         const ShaderData &sd,
+                         const MpgSeedRay &seed,
+                         const SpecularEval &eval)
+{
+  if (eval.distance_sl <= 0.0f) {
+    return 0.0f;
+  }
+
+  Ray shadow_ray;
+  shadow_ray.P = ray_offset(eval.point, eval.normal);
+  shadow_ray.D = eval.dir_sl;
+  shadow_ray.tmin = 0.0f;
+  shadow_ray.tmax = fmaxf(eval.distance_sl - 1e-4f, 0.0f);
+  shadow_ray.time = sd.time;
+  shadow_ray.self.prim = seed.prim;
+  shadow_ray.self.object = seed.object;
+  shadow_ray.self.light_prim = PRIM_NONE;
+  shadow_ray.self.light_object = OBJECT_NONE;
+
+  const bool occluded = scene_intersect_shadow(kg, &shadow_ray, PATH_RAY_SHADOW);
+  return occluded ? 0.0f : 1.0f;
 }
 
 float3 derivative_specular_reflection(const float3 &dir_in,
@@ -179,49 +308,44 @@ float3 derivative_specular_refraction(const float3 &dir_in,
 
 void compute_jacobian(const ShadingPoint &D,
                       const MpgSeedRay &seed,
+                      const SpecularSurfaceGeometry &geometry,
                       const SpecularEval &eval,
                       float3 J[2])
 {
-  const float3 d_dir_ds_du = derivative_normalized(eval.point - D.position, eval.dXdu);
-  const float3 d_dir_ds_dv = derivative_normalized(eval.point - D.position, eval.dXdv);
+  const float3 d_dir_ds_du = derivative_normalized(eval.point - D.position, geometry.dPdu);
+  const float3 d_dir_ds_dv = derivative_normalized(eval.point - D.position, geometry.dPdv);
 
-  const float3 d_dir_sl_du = -derivative_normalized(seed.emitter_position - eval.point, -eval.dXdu);
-  const float3 d_dir_sl_dv = -derivative_normalized(seed.emitter_position - eval.point, -eval.dXdv);
-
-  float cos_theta_i = 0.0f, cos_theta_t = 0.0f;
-  bool tir = false;
-  const float3 spec_dir =
-      compute_specular(-eval.dir_ds, eval.normal, seed.is_refraction, seed.eta, tir, cos_theta_i, cos_theta_t);
-  const float sin_theta_i = sqrtf(fmaxf(0.0f, 1.0f - cos_theta_i * cos_theta_i));
-  const float sin_theta_t = sqrtf(fmaxf(0.0f, 1.0f - cos_theta_t * cos_theta_t));
+  const float3 d_dir_sl_du = -derivative_normalized(seed.emitter_position - eval.point, -geometry.dPdu);
+  const float3 d_dir_sl_dv = -derivative_normalized(seed.emitter_position - eval.point, -geometry.dPdv);
 
   float3 d_spec_du, d_spec_dv;
-  if (!seed.is_refraction) {
+  if (!eval.refractive) {
     d_spec_du = derivative_specular_reflection(-eval.dir_ds, -d_dir_ds_du, eval.normal, eval.dNdu);
     d_spec_dv = derivative_specular_reflection(-eval.dir_ds, -d_dir_ds_dv, eval.normal, eval.dNdv);
   }
   else {
+    const float sin_theta_i = sqrtf(fmaxf(0.0f, 1.0f - eval.cos_theta_i * eval.cos_theta_i));
+    const float sin_theta_t = sqrtf(fmaxf(0.0f, 1.0f - eval.cos_theta_t * eval.cos_theta_t));
     d_spec_du = derivative_specular_refraction(-eval.dir_ds,
                                                -d_dir_ds_du,
                                                eval.normal,
                                                eval.dNdu,
-                                               seed.eta,
-                                               cos_theta_i,
-                                               cos_theta_t,
+                                               eval.eta,
+                                               eval.cos_theta_i,
+                                               eval.cos_theta_t,
                                                sin_theta_i,
                                                sin_theta_t);
     d_spec_dv = derivative_specular_refraction(-eval.dir_ds,
                                                -d_dir_ds_dv,
                                                eval.normal,
                                                eval.dNdv,
-                                               seed.eta,
-                                               cos_theta_i,
-                                               cos_theta_t,
+                                               eval.eta,
+                                               eval.cos_theta_i,
+                                               eval.cos_theta_t,
                                                sin_theta_i,
                                                sin_theta_t);
   }
 
-  (void)spec_dir;
   J[0] = d_dir_sl_du - d_spec_du;
   J[1] = d_dir_sl_dv - d_spec_dv;
 }
@@ -285,8 +409,6 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
                              RNGState &rng_state,
                              MpgSolverOutput &result)
 {
-  (void)kg;
-  (void)bsdf;
   (void)rng_state;
 
   result = MpgSolverOutput();
@@ -294,6 +416,13 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   if (seed.prim < 0 || seed.object < 0) {
     return false;
   }
+
+  SpecularSurfaceGeometry geometry;
+  if (!load_surface_geometry(kg, sd, seed, geometry)) {
+    return false;
+  }
+
+  const SpecularParameters params = specular_parameters_from_closure(bsdf);
 
   float u = clamp(seed.bary_u, 1e-4f, 1.0f - 1e-4f);
   float v = clamp(seed.bary_v, 1e-4f, 1.0f - 1e-4f);
@@ -306,7 +435,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   const ShadingPoint shading_point = shading_point_from_shader_data(sd);
 
   SpecularEval eval;
-  evaluate_specular(shading_point, seed, u, v, eval);
+  evaluate_specular(shading_point, seed, geometry, params, u, v, eval);
   if (eval.tir) {
     return false;
   }
@@ -319,7 +448,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     }
 
     float3 J_cols[2];
-    compute_jacobian(shading_point, seed, eval, J_cols);
+    compute_jacobian(shading_point, seed, geometry, eval, J_cols);
 
     float2 delta;
     if (!solve_step(J_cols[0], J_cols[1], eval.residual, delta)) {
@@ -337,7 +466,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     project_barycentrics(new_u, new_v);
 
     SpecularEval new_eval;
-    evaluate_specular(shading_point, seed, new_u, new_v, new_eval);
+    evaluate_specular(shading_point, seed, geometry, params, new_u, new_v, new_eval);
     if (new_eval.tir) {
       trust_radius *= 0.5f;
       if (trust_radius < 1e-6f) {
@@ -391,11 +520,10 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   result.dNdv = eval.dNdv;
   result.u = u;
   result.v = v;
-  result.visibility = seed.visibility;
+  result.visibility = compute_visibility(kg, sd, seed, eval);
   result.wi = normalize(eval.point - shading_point.position);
   result.object = seed.object;
   result.prim = seed.prim;
-  result.light = seed.light;
 
   const float area_element = len(cross(eval.dXdu, eval.dXdv));
   const float cos_theta = fabsf(dot(eval.normal, -result.wi));

@@ -38,7 +38,6 @@ struct ClosureBSDF {
 
 struct MpgSeedRay {
   float3 direction = zero_float3();
-  LightSample light = {};
   float seed_pdf = 0.0f;
   float emitter_pdf = 0.0f;
   float3 emitter_position = zero_float3();
@@ -48,15 +47,6 @@ struct MpgSeedRay {
   int prim = -1;
   float bary_u = 0.0f;
   float bary_v = 0.0f;
-  float3 tri_v0 = zero_float3();
-  float3 tri_v1 = zero_float3();
-  float3 tri_v2 = zero_float3();
-  float3 tri_n0 = zero_float3();
-  float3 tri_n1 = zero_float3();
-  float3 tri_n2 = zero_float3();
-  bool is_refraction = false;
-  float eta = 1.0f;
-  float visibility = 0.0f;
 };
 
 struct MpgSolverOutput {
@@ -78,7 +68,6 @@ struct MpgSolverOutput {
   float visibility = 1.0f;
   int object = -1;
   int prim = -1;
-  LightSample light = {};
 };
 
 CCL_NAMESPACE_END
