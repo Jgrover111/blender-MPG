@@ -841,6 +841,17 @@ void *CCL_python_module_init()
     PyModule_AddObjectRef(mod, "with_path_guiding", Py_False);
   }
 
+#ifdef WITH_CYCLES_MANIFOLD
+  if (ccl::guiding_supported()) {
+    PyModule_AddObjectRef(mod, "with_manifold_path_guiding", Py_True);
+  }
+  else {
+    PyModule_AddObjectRef(mod, "with_manifold_path_guiding", Py_False);
+  }
+#else
+  PyModule_AddObjectRef(mod, "with_manifold_path_guiding", Py_False);
+#endif
+
 #ifdef WITH_EMBREE
   PyModule_AddObjectRef(mod, "with_embree", Py_True);
 #else  /* WITH_EMBREE */

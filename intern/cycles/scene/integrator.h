@@ -56,6 +56,14 @@ class Integrator : public Node {
   NODE_SOCKET_API(GuidingDirectionalSamplingType, guiding_directional_sampling_type);
   NODE_SOCKET_API(float, guiding_roughness_threshold);
 
+#ifdef WITH_CYCLES_MANIFOLD
+  NODE_SOCKET_API(bool, manifold_guiding_enable);
+  NODE_SOCKET_API(int, manifold_max_bounces);
+  NODE_SOCKET_API(int, manifold_iters);
+  NODE_SOCKET_API(float, manifold_gate_weight);
+  NODE_SOCKET_API(float, manifold_gate_kappa);
+#endif
+
   NODE_SOCKET_API(bool, caustics_reflective)
   NODE_SOCKET_API(bool, caustics_refractive)
   NODE_SOCKET_API(float, filter_glossy)

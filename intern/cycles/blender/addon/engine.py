@@ -169,6 +169,11 @@ def with_path_guiding():
     return _cycles.with_path_guiding
 
 
+def with_manifold_path_guiding():
+    import _cycles
+    return getattr(_cycles, "with_manifold_path_guiding", False)
+
+
 def system_info():
     import _cycles
     return _cycles.system_info()

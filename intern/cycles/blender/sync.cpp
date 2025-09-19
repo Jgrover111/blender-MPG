@@ -514,6 +514,14 @@ void BlenderSync::sync_integrator(BL::ViewLayer &b_view_layer,
     integrator->set_guiding_roughness_threshold(get_float(cscene, "guiding_roughness_threshold"));
   }
 
+#ifdef WITH_CYCLES_MANIFOLD
+  integrator->set_manifold_guiding_enable(get_boolean(cscene, "manifold_guiding_enable"));
+  integrator->set_manifold_max_bounces(get_int(cscene, "manifold_max_bounces"));
+  integrator->set_manifold_iters(get_int(cscene, "manifold_iters"));
+  integrator->set_manifold_gate_weight(get_float(cscene, "manifold_gate_weight"));
+  integrator->set_manifold_gate_kappa(get_float(cscene, "manifold_gate_kappa"));
+#endif
+
   DenoiseParams denoise_params = get_denoise_params(
       b_scene, b_view_layer, background, denoise_device_info);
 

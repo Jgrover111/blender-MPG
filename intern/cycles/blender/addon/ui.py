@@ -404,6 +404,19 @@ class CYCLES_RENDER_PT_sampling_path_guiding(CyclesButtonsPanel, Panel):
             if render_area > tile_area and render_size_x <= 8192 and render_size_y <= 8192:
                 layout.label(text="May work poorly with render tiling", icon='INFO')
 
+        from . import engine
+        if getattr(engine, "with_manifold_path_guiding", lambda: False)():
+            layout.separator()
+            col = layout.column()
+            col.label(text="Manifold Path Guiding (CPU, Experimental)")
+            col.prop(cscene, "manifold_guiding_enable", text="Enable")
+
+            sub = col.column()
+            sub.active = cscene.manifold_guiding_enable
+            sub.prop(cscene, "manifold_max_bounces")
+            sub.prop(cscene, "manifold_iters")
+            sub.prop(cscene, "manifold_gate_weight")
+            sub.prop(cscene, "manifold_gate_kappa")
 
 class CYCLES_RENDER_PT_sampling_path_guiding_debug(CyclesDebugButtonsPanel, Panel):
     bl_label = "Debug"

@@ -227,6 +227,14 @@ KERNEL_STRUCT_MEMBER(integrator, int, use_volume_guiding)
 KERNEL_STRUCT_MEMBER(integrator, int, use_guiding_direct_light)
 KERNEL_STRUCT_MEMBER(integrator, int, use_guiding_mis_weights)
 
+#ifdef WITH_CYCLES_MANIFOLD
+KERNEL_STRUCT_MEMBER(integrator, int, manifold_guiding_enable)
+KERNEL_STRUCT_MEMBER(integrator, int, manifold_max_bounces)
+KERNEL_STRUCT_MEMBER(integrator, int, manifold_max_iterations)
+KERNEL_STRUCT_MEMBER(integrator, float, manifold_gate_weight)
+KERNEL_STRUCT_MEMBER(integrator, float, manifold_gate_kappa)
+#endif
+
 /* Padding. */
 KERNEL_STRUCT_MEMBER(integrator, int, pad1)
 KERNEL_STRUCT_MEMBER(integrator, int, pad2)
