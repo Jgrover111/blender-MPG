@@ -5,6 +5,7 @@
 #pragma once
 
 #include "manifold/mpg.h"
+#include "manifold/mpg_types.h"
 #include "manifold/mpg_seed.h"
 
 CCL_NAMESPACE_BEGIN

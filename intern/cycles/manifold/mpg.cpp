@@ -4,9 +4,15 @@
 
 #include "manifold/mpg.h"
 
+#include "manifold/mpg_types.h"
+
 #include "manifold/mpg_pdf.h"
 #include "manifold/mpg_seed.h"
 #include "manifold/mpg_solve.h"
+
+#include "kernel/device/cpu/globals.h"
+#include "kernel/integrator/path_state.h"
+#include "kernel/types.h"
 
 #include <cfloat>
 
@@ -234,12 +240,12 @@ int Lights::num_emitters() const
 
 /* \} */
 
-MpgResult mpg_try_connect(const ShadingPoint &D,
-                          const ClosureBSDF &bsdf,
-                          const Lights &lights,
-                          const GuideSummary &g,
-                          const MpgOptions &opt,
-                          RNG &rng)
+static MpgResult mpg_try_connect_impl(const ShadingPoint &D,
+                                      const ClosureBSDF &bsdf,
+                                      const Lights &lights,
+                                      const GuideSummary &g,
+                                      const MpgOptions &opt,
+                                      RNG &rng)
 {
   MpgResult result;
   if (opt.max_bounces <= 0) {
@@ -266,6 +272,39 @@ MpgResult mpg_try_connect(const ShadingPoint &D,
   result.pdf = pdf;
   result.visibility = solution.visibility;
   return result;
+}
+
+MpgResult mpg_try_connect(KernelGlobals kg,
+                          const ShaderData &sd,
+                          const ShaderClosure &bsdf,
+                          const GuideSummary &g,
+                          const MpgOptions &opt,
+                          RNGState &rng_state)
+{
+  (void)kg;
+  (void)bsdf;
+
+  ShadingPoint shading_point;
+  shading_point.position = sd.P;
+  shading_point.geometric_normal = sd.Ng;
+  shading_point.shading_normal = sd.N;
+  shading_point.wo = -sd.wi;
+  shading_point.time = sd.time;
+
+  ClosureBSDF closure;
+  closure.type = ClosureBSDF::Type::Reflection;
+  closure.eta = 1.0f;
+  closure.normal = is_zero(sd.N) ? shading_point.shading_normal : normalize(sd.N);
+  make_orthonormals(closure.normal, closure.tangent, closure.bitangent);
+
+  Lights lights;
+
+  const uint64_t seed = ((uint64_t)rng_state.rng_pixel << 32) ^
+                        ((uint64_t)rng_state.sample << 16) ^
+                        (uint64_t)rng_state.rng_offset;
+  RNG rng(seed);
+
+  return mpg_try_connect_impl(shading_point, closure, lights, g, opt, rng);
 }
 
 CCL_NAMESPACE_END
