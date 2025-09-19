@@ -20,6 +20,10 @@
 
 #ifdef WITH_CYCLES_MANIFOLD
 #  include "manifold/mpg.h"
+#  if !defined(__KERNEL_GPU__)
+#    include "BLI_rand.h"
+#    include "manifold/mpg_pgl_summary.h"
+#  endif
 #endif
 
 #include "kernel/integrator/guiding.h"
@@ -28,6 +32,7 @@
 #include "kernel/integrator/volume_stack.h"
 
 #include "kernel/types.h"
+#include "util/hash.h"
 #include "util/math_intersect.h"
 
 CCL_NAMESPACE_BEGIN
@@ -472,6 +477,36 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   }
 
   /* BSDF closure, sample direction. */
+#ifdef WITH_CYCLES_MANIFOLD
+#  if !defined(__KERNEL_GPU__)
+  ccl_attr_maybe_unused GuideSummary manifold_summary;
+  ccl_attr_maybe_unused bool manifold_guiding_ready = false;
+#    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
+  if ((kernel_data.integrator.manifold_guiding_enable != 0) &&
+      (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) &&
+      INTEGRATOR_STATE(state, guiding, use_surface_guiding))
+  {
+    if (kg->opgl_surface_sampling_distribution && kg->manifold_rng) {
+      const uint seed = hash_uint3(rng_state->rng_pixel,
+                                   uint(rng_state->sample),
+                                   rng_state->rng_offset);
+      BLI_rng_srandom(kg->manifold_rng.get(), seed);
+      if (pgl_estimate_summary(*kg->opgl_surface_sampling_distribution,
+                               sd->Ng,
+                               *kg->manifold_rng,
+                               manifold_summary))
+      {
+        manifold_guiding_ready = true;
+      }
+    }
+  }
+  if ((kernel_data.integrator.manifold_guiding_enable != 0) && !manifold_guiding_ready) {
+    /* Skip manifold guiding when the OpenPGL summary is unreliable. */
+  }
+#    endif
+#  endif
+#endif
+
   float bsdf_pdf = 0.0f;
   float unguided_bsdf_pdf = 0.0f;
   BsdfEval bsdf_eval ccl_optional_struct_init;
