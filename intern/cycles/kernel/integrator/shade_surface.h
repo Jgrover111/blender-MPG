@@ -18,6 +18,10 @@
 
 #include "kernel/integrator/mnee.h"
 
+#ifdef WITH_CYCLES_MANIFOLD
+#  include "manifold/mpg.h"
+#endif
+
 #include "kernel/integrator/guiding.h"
 #include "kernel/integrator/shadow_linking.h"
 #include "kernel/integrator/subsurface.h"
@@ -786,6 +790,16 @@ ccl_device int integrate_surface(KernelGlobals kg,
     /* Load random number state. */
     RNGState rng_state;
     path_state_rng_load(state, &rng_state);
+
+#ifdef WITH_CYCLES_MANIFOLD
+    ccl_attr_maybe_unused const bool manifold_guiding_enabled =
+        (kernel_data.integrator.manifold_guiding_enable != 0);
+    ccl_attr_maybe_unused MpgOptions manifold_options;
+    manifold_options.max_bounces = kernel_data.integrator.manifold_max_bounces;
+    manifold_options.max_iters = kernel_data.integrator.manifold_max_iterations;
+    manifold_options.gate_w = kernel_data.integrator.manifold_gate_weight;
+    manifold_options.gate_kappa = kernel_data.integrator.manifold_gate_kappa;
+#endif
 
 #if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
     if (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) {
