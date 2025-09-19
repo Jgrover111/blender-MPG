@@ -28,6 +28,14 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
+  if (CLOSURE_IS_DELTA(bsdf.type)) {
+    return result;
+  }
+
+  if (g.peak_weight < opt.gate_w || g.kappa < opt.gate_kappa) {
+    return result;
+  }
+
   MpgSeedRay seed;
   if (!mpg_generate_seed(kg, sd, bsdf, g, opt, rng_state, seed)) {
     return result;

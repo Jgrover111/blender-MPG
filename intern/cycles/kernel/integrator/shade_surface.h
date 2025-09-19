@@ -482,7 +482,10 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   ccl_attr_maybe_unused GuideSummary manifold_summary;
   ccl_attr_maybe_unused bool manifold_guiding_ready = false;
 #    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
-  if ((kernel_data.integrator.manifold_guiding_enable != 0) &&
+  const bool bsdf_is_delta = CLOSURE_IS_DELTA(sc->type);
+
+  if (!bsdf_is_delta &&
+      (kernel_data.integrator.manifold_guiding_enable != 0) &&
       (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) &&
       INTEGRATOR_STATE(state, guiding, use_surface_guiding))
   {
@@ -496,7 +499,11 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                *kg->manifold_rng,
                                manifold_summary))
       {
-        manifold_guiding_ready = true;
+        if (manifold_summary.peak_weight >= kernel_data.integrator.manifold_gate_weight &&
+            manifold_summary.kappa >= kernel_data.integrator.manifold_gate_kappa)
+        {
+          manifold_guiding_ready = true;
+        }
       }
     }
   }
