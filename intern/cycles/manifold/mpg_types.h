@@ -4,10 +4,9 @@
 
 #pragma once
 
-#include "util/math.h"
-#include "util/vector.h"
+#include "kernel/light/common.h"
 
-#include <random>
+#include "util/math.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -37,65 +36,49 @@ struct ClosureBSDF {
   }
 };
 
-class RNG {
- public:
-  explicit RNG(uint64_t seed = 0);
-
-  float uniform_float();
-  float2 uniform_float2();
-  float3 uniform_direction();
-
- private:
-  std::mt19937_64 engine_;
-  std::uniform_real_distribution<float> dist_;
+struct MpgSeedRay {
+  float3 direction = zero_float3();
+  LightSample light = {};
+  float seed_pdf = 0.0f;
+  float emitter_pdf = 0.0f;
+  float3 emitter_position = zero_float3();
+  float3 emitter_normal = zero_float3();
+  int emitter_shader = -1;
+  int object = -1;
+  int prim = -1;
+  float bary_u = 0.0f;
+  float bary_v = 0.0f;
+  float3 tri_v0 = zero_float3();
+  float3 tri_v1 = zero_float3();
+  float3 tri_v2 = zero_float3();
+  float3 tri_n0 = zero_float3();
+  float3 tri_n1 = zero_float3();
+  float3 tri_n2 = zero_float3();
+  bool is_refraction = false;
+  float eta = 1.0f;
+  float visibility = 0.0f;
 };
 
-class Lights {
- public:
-  struct SpecularTriangle {
-    float3 v0;
-    float3 v1;
-    float3 v2;
-    float3 n0;
-    float3 n1;
-    float3 n2;
-    float eta;
-    bool is_refraction;
-    bool enabled;
-
-    float3 normal(const float u, const float v) const;
-    float3 position(const float u, const float v) const;
-    float3 dXdu() const;
-    float3 dXdv() const;
-  };
-
-  struct Emitter {
-    float3 position;
-    float3 normal;
-    float area;
-    bool enabled;
-  };
-
-  void add_specular_triangle(const SpecularTriangle &tri);
-  void add_emitter(const Emitter &emitter);
-
-  bool intersect_specular(const float3 &origin,
-                          const float3 &direction,
-                          int &triangle_index,
-                          float &t,
-                          float &u,
-                          float &v) const;
-
-  bool sample_emitter(RNG &rng, int &index, float3 &position, float3 &normal, float &pdf) const;
-
-  const SpecularTriangle &triangle(const int index) const;
-  const Emitter &emitter(const int index) const;
-  int num_triangles() const;
-  int num_emitters() const;
-
- private:
-  vector<SpecularTriangle> triangles_;
-  vector<Emitter> emitters_;
+struct MpgSolverOutput {
+  bool success = false;
+  float3 wi = zero_float3();
+  float3 specular_point = zero_float3();
+  float3 specular_normal = zero_float3();
+  float3 dir_ds = zero_float3();
+  float3 dir_sl = zero_float3();
+  float distance_ds = 0.0f;
+  float distance_sl = 0.0f;
+  float3 dXdu = zero_float3();
+  float3 dXdv = zero_float3();
+  float3 dNdu = zero_float3();
+  float3 dNdv = zero_float3();
+  float u = 0.0f;
+  float v = 0.0f;
+  float jacobian = 0.0f;
+  float visibility = 1.0f;
+  int object = -1;
+  int prim = -1;
+  LightSample light = {};
 };
 
 CCL_NAMESPACE_END

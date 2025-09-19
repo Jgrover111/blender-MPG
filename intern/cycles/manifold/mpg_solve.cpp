@@ -6,6 +6,8 @@
 
 #include "util/math_matrix.h"
 
+#include <cfloat>
+
 CCL_NAMESPACE_BEGIN
 
 namespace {
@@ -24,29 +26,29 @@ struct SpecularEval {
   bool tir = false;
 };
 
-float3 combine_vertex_normals(const Lights::SpecularTriangle &tri, const float u, const float v)
+float3 combine_vertex_normals(const MpgSeedRay &seed, const float u, const float v)
 {
   const float w = 1.0f - u - v;
-  float3 n = tri.n0 * w + tri.n1 * u + tri.n2 * v;
+  float3 n = seed.tri_n0 * w + seed.tri_n1 * u + seed.tri_n2 * v;
   if (is_zero(n)) {
-    return normalize(tri.n0);
+    return normalize(seed.tri_n0);
   }
   return normalize(n);
 }
 
-float3 compute_normal_derivative(const Lights::SpecularTriangle &tri,
+float3 compute_normal_derivative(const MpgSeedRay &seed,
                                  const float u,
                                  const float v,
                                  const float3 &normal,
                                  const bool du)
 {
   const float w = 1.0f - u - v;
-  const float3 raw = tri.n0 * w + tri.n1 * u + tri.n2 * v;
+  const float3 raw = seed.tri_n0 * w + seed.tri_n1 * u + seed.tri_n2 * v;
   const float norm_raw = len(raw);
   if (norm_raw == 0.0f) {
     return zero_float3();
   }
-  const float3 d_raw = du ? (tri.n1 - tri.n0) : (tri.n2 - tri.n0);
+  const float3 d_raw = du ? (seed.tri_n1 - seed.tri_n0) : (seed.tri_n2 - seed.tri_n0);
   const float3 projection = normal * dot(normal, d_raw);
   return (d_raw - projection) / norm_raw;
 }
@@ -119,15 +121,15 @@ float3 derivative_normalized(const float3 &vector, const float3 &d_vector)
 }
 
 void evaluate_specular(const ShadingPoint &D,
-                       const Lights::SpecularTriangle &tri,
                        const MpgSeedRay &seed,
                        const float u,
                        const float v,
                        SpecularEval &eval)
 {
-  eval.point = tri.position(u, v);
-  eval.dXdu = tri.dXdu();
-  eval.dXdv = tri.dXdv();
+  const float w = 1.0f - u - v;
+  eval.point = seed.tri_v0 * w + seed.tri_v1 * u + seed.tri_v2 * v;
+  eval.dXdu = seed.tri_v1 - seed.tri_v0;
+  eval.dXdv = seed.tri_v2 - seed.tri_v0;
   eval.dir_ds = eval.point - D.position;
   eval.distance_ds = len(eval.dir_ds);
   eval.dir_ds = (eval.distance_ds > 0.0f) ? (eval.dir_ds / eval.distance_ds) : make_float3(0.0f, 0.0f, 1.0f);
@@ -136,9 +138,9 @@ void evaluate_specular(const ShadingPoint &D,
   eval.distance_sl = len(eval.dir_sl);
   eval.dir_sl = (eval.distance_sl > 0.0f) ? (eval.dir_sl / eval.distance_sl) : make_float3(0.0f, 0.0f, 1.0f);
 
-  eval.normal = combine_vertex_normals(tri, u, v);
-  eval.dNdu = compute_normal_derivative(tri, u, v, eval.normal, true);
-  eval.dNdv = compute_normal_derivative(tri, u, v, eval.normal, false);
+  eval.normal = combine_vertex_normals(seed, u, v);
+  eval.dNdu = compute_normal_derivative(seed, u, v, eval.normal, true);
+  eval.dNdv = compute_normal_derivative(seed, u, v, eval.normal, false);
 
   float cos_theta_i = 0.0f, cos_theta_t = 0.0f;
   eval.residual = eval.dir_sl -
@@ -176,7 +178,6 @@ float3 derivative_specular_refraction(const float3 &dir_in,
 }
 
 void compute_jacobian(const ShadingPoint &D,
-                      const Lights::SpecularTriangle &tri,
                       const MpgSeedRay &seed,
                       const SpecularEval &eval,
                       float3 J[2])
@@ -220,6 +221,7 @@ void compute_jacobian(const ShadingPoint &D,
                                                sin_theta_t);
   }
 
+  (void)spec_dir;
   J[0] = d_dir_sl_du - d_spec_du;
   J[1] = d_dir_sl_dv - d_spec_dv;
 }
@@ -262,22 +264,34 @@ void project_barycentrics(float &u, float &v)
   v = bary.y;
 }
 
+ShadingPoint shading_point_from_shader_data(const ShaderData &sd)
+{
+  ShadingPoint shading_point;
+  shading_point.position = sd.P;
+  shading_point.geometric_normal = sd.Ng;
+  shading_point.shading_normal = sd.N;
+  shading_point.wo = -sd.wi;
+  shading_point.time = sd.time;
+  return shading_point;
+}
+
 }  // namespace
 
-bool mpg_solve_single_bounce(const ShadingPoint &D,
-                             const ClosureBSDF &bsdf,
-                             const Lights &lights,
+bool mpg_solve_single_bounce(KernelGlobals kg,
+                             const ShaderData &sd,
+                             const ShaderClosure &bsdf,
                              const MpgSeedRay &seed,
                              const MpgOptions &options,
-                             RNG &rng,
+                             RNGState &rng_state,
                              MpgSolverOutput &result)
 {
-  if (seed.triangle_index < 0 || seed.triangle_index >= lights.num_triangles()) {
-    return false;
-  }
+  (void)kg;
+  (void)bsdf;
+  (void)rng_state;
 
-  const Lights::SpecularTriangle &tri = lights.triangle(seed.triangle_index);
-  if (!tri.enabled) {
+  result = MpgSolverOutput();
+
+  if (seed.prim < 0 || seed.object < 0) {
     return false;
   }
 
@@ -289,8 +303,10 @@ bool mpg_solve_single_bounce(const ShadingPoint &D,
   float prev_residual = FLT_MAX;
   int increase_counter = 0;
 
+  const ShadingPoint shading_point = shading_point_from_shader_data(sd);
+
   SpecularEval eval;
-  evaluate_specular(D, tri, seed, u, v, eval);
+  evaluate_specular(shading_point, seed, u, v, eval);
   if (eval.tir) {
     return false;
   }
@@ -303,7 +319,7 @@ bool mpg_solve_single_bounce(const ShadingPoint &D,
     }
 
     float3 J_cols[2];
-    compute_jacobian(D, tri, seed, eval, J_cols);
+    compute_jacobian(shading_point, seed, eval, J_cols);
 
     float2 delta;
     if (!solve_step(J_cols[0], J_cols[1], eval.residual, delta)) {
@@ -321,7 +337,7 @@ bool mpg_solve_single_bounce(const ShadingPoint &D,
     project_barycentrics(new_u, new_v);
 
     SpecularEval new_eval;
-    evaluate_specular(D, tri, seed, new_u, new_v, new_eval);
+    evaluate_specular(shading_point, seed, new_u, new_v, new_eval);
     if (new_eval.tir) {
       trust_radius *= 0.5f;
       if (trust_radius < 1e-6f) {
@@ -376,7 +392,10 @@ bool mpg_solve_single_bounce(const ShadingPoint &D,
   result.u = u;
   result.v = v;
   result.visibility = seed.visibility;
-  result.wi = normalize(eval.point - D.position);
+  result.wi = normalize(eval.point - shading_point.position);
+  result.object = seed.object;
+  result.prim = seed.prim;
+  result.light = seed.light;
 
   const float area_element = len(cross(eval.dXdu, eval.dXdv));
   const float cos_theta = fabsf(dot(eval.normal, -result.wi));
