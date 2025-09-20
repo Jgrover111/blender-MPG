@@ -14,6 +14,8 @@
 #include "kernel/integrator/path_state.h"
 #include "kernel/types.h"
 
+#include <cfloat>
+
 CCL_NAMESPACE_BEGIN
 
 MpgResult mpg_try_connect(KernelGlobals kg,
@@ -51,11 +53,19 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
+  LightSample light_sample = seed.light_sample;
+  if (!is_zero(solution.dir_sl)) {
+    light_sample.D = normalize(solution.dir_sl);
+  }
+  if (light_sample.t != FLT_MAX) {
+    light_sample.t = solution.distance_sl;
+  }
+
   result.success = true;
   result.wi = solution.wi;
   result.pdf = pdf;
   result.visibility = solution.visibility;
-  result.light = seed.light_sample;
+  result.light = light_sample;
   return result;
 }
 
