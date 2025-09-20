@@ -565,7 +565,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   manifold_options.gate_w = kernel_data.integrator.manifold_gate_weight;
   manifold_options.gate_kappa = kernel_data.integrator.manifold_gate_kappa;
   ccl_attr_maybe_unused const bool manifold_guiding_enabled =
-    (kernel_data.integrator.manifold_guiding_enable != 0);
+      (kernel_data.integrator.manifold_guiding_enable != 0);
 #    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
   const bool bsdf_is_delta = (CLOSURE_IS_BSDF_SINGULAR(sc->type) &&
                               !CLOSURE_IS_RAY_PORTAL(sc->type));
@@ -578,22 +578,17 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       const uint seed = hash_uint3(rng_state->rng_pixel,
                                    uint(rng_state->sample),
                                    rng_state->rng_offset);
+
       if (pgl_estimate_summary(*kg->opgl_surface_sampling_distribution,
                                sd->Ng,
                                seed,
-                               manifold_summary))
+                               manifold_summary) &&
+          manifold_summary.peak_weight >= kernel_data.integrator.manifold_gate_weight &&
+          manifold_summary.kappa >= kernel_data.integrator.manifold_gate_kappa)
       {
-        if (manifold_summary.rbar > 1.0e-3f &&
-            manifold_summary.peak_weight >= kernel_data.integrator.manifold_gate_weight &&
-            manifold_summary.kappa >= kernel_data.integrator.manifold_gate_kappa)
-        {
-          manifold_guiding_ready = true;
-        }
+        manifold_guiding_ready = true;
       }
     }
-  }
-  if (manifold_guiding_enabled && !manifold_guiding_ready) {
-    /* Skip manifold guiding when the OpenPGL summary is unreliable. */
   }
 
   if (manifold_guiding_enabled && manifold_guiding_ready) {
@@ -664,20 +659,20 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
              * must not affect the MIS weight. */
             const float denominator = weighted_bsdf_pdf + weighted_guided_pdf + mpg_result.pdf;
 
-          if (denominator > 0.0f && isfinite_safe(denominator)) {
-            const float mis_weight = mpg_result.pdf / denominator;
+            if (denominator > 0.0f && isfinite_safe(denominator)) {
+              const float mis_weight = mpg_result.pdf / denominator;
+              const float visibility_weight = mpg_result.visibility * mis_weight / mpg_result.pdf;
+              bsdf_eval_mul(&mpg_bsdf_eval, light_eval * visibility_weight);
 
-            const float visibility_weight = mpg_result.visibility * mis_weight / mpg_result.pdf;
-            bsdf_eval_mul(&mpg_bsdf_eval, light_eval * visibility_weight);
+              const Spectrum mpg_contribution =
+                  INTEGRATOR_STATE(state, path, throughput) * bsdf_eval_sum(&mpg_bsdf_eval);
 
-            const Spectrum mpg_contribution =
-                INTEGRATOR_STATE(state, path, throughput) * bsdf_eval_sum(&mpg_bsdf_eval);
-
-            surface_write_manifold_direct_light(kg,
-                                                state,
-                                                mpg_contribution,
-                                                mpg_light.group,
-                                                render_buffer);
+              surface_write_manifold_direct_light(kg,
+                                                  state,
+                                                  mpg_contribution,
+                                                  mpg_light.group,
+                                                  render_buffer);
+            }
           }
         }
       }
