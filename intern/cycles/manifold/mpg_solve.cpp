@@ -448,6 +448,36 @@ void compute_jacobian(const ShadingPoint &D,
   J[1] = d_dir_sl_dv - d_spec_dv;
 }
 
+bool compute_residual_matrix(const ShadingPoint &D,
+                             const MpgSeedRay &seed,
+                             const SpecularSurfaceGeometry &geometry,
+                             const SpecularEval &eval,
+                             float matrix[2][2])
+{
+  float3 J[2];
+  compute_jacobian(D, seed, geometry, eval, J);
+
+  if (!isfinite_safe(eval.dir_sl.x) || !isfinite_safe(eval.dir_sl.y) || !isfinite_safe(eval.dir_sl.z)) {
+    return false;
+  }
+
+  const float dir_len_sq = len_squared(eval.dir_sl);
+  if (!isfinite_safe(dir_len_sq) || !(dir_len_sq > 0.0f)) {
+    return false;
+  }
+
+  float3 tangent_u, tangent_v;
+  make_orthonormals(eval.dir_sl, &tangent_u, &tangent_v);
+
+  matrix[0][0] = dot(tangent_u, J[0]);
+  matrix[0][1] = dot(tangent_u, J[1]);
+  matrix[1][0] = dot(tangent_v, J[0]);
+  matrix[1][1] = dot(tangent_v, J[1]);
+
+  return isfinite_safe(matrix[0][0]) && isfinite_safe(matrix[0][1]) &&
+         isfinite_safe(matrix[1][0]) && isfinite_safe(matrix[1][1]);
+}
+
 bool solve_step(const float3 &J0,
                 const float3 &J1,
                 const float3 &residual,
@@ -627,13 +657,30 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   result.object = seed.object;
   result.prim = seed.prim;
 
+  float residual_matrix[2][2];
+  if (!compute_residual_matrix(shading_point, seed, geometry, eval, residual_matrix)) {
+    return false;
+  }
+
+  const float determinant =
+      residual_matrix[0][0] * residual_matrix[1][1] - residual_matrix[0][1] * residual_matrix[1][0];
+  if (!isfinite_safe(determinant) || determinant <= 0.0f) {
+    return false;
+  }
+
   const float area_element = len(cross(eval.dXdu, eval.dXdv));
   const float cos_theta = fabsf(dot(eval.normal, -result.wi));
   const float dist2 = fmaxf(result.distance_ds * result.distance_ds, 1e-8f);
   if (area_element <= 0.0f || cos_theta <= 0.0f) {
     return false;
   }
-  result.jacobian = area_element * cos_theta / dist2;
+
+  const float area_to_solid = area_element * cos_theta / dist2;
+  if (!isfinite_safe(area_to_solid) || area_to_solid <= 0.0f) {
+    return false;
+  }
+
+  result.jacobian = fabsf(determinant) * area_to_solid;
 
   return true;
 }

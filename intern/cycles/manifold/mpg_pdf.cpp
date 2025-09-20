@@ -55,16 +55,9 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
     return false;
   }
 
-  /* The solver's Jacobian already carries |dX/du x dX/dv| * spec_geo_term / distance_ds^2.
-   * Factor the geometry term out so each component of the final solid-angle pdf is explicit. */
-  const float surface_jacobian = solution.jacobian / spec_geo_term;
-  if (!isfinite_safe(surface_jacobian) || surface_jacobian <= 0.0f) {
-    return false;
-  }
-
   /* Compose the solid-angle pdf used in MIS with BSDF/guided/NEE:
-   *   p = p_seed(ω_d) * p_light(ω_l) * |dX/du x dX/dv| / r_ds^2 * spec_geo_term */
-  pdf = seed.seed_pdf * light_pdf_solid * surface_jacobian * spec_geo_term;
+  *   p = p_seed(ω_d) * p_light(ω_l) * |det dF/duv| * |dX/du x dX/dv| / r_ds^2 */
+  pdf = seed.seed_pdf * light_pdf_solid * solution.jacobian;
   if (!isfinite_safe(pdf) || pdf <= 0.0f) {
     pdf = 0.0f;
     return false;
