@@ -7,6 +7,8 @@
 #include "kernel/bvh/bvh.h"
 #include "kernel/bvh/util.h"
 #include "kernel/closure/bsdf_microfacet.h"
+#include "kernel/integrator/state.h"
+#include "kernel/integrator/surface_shader.h"
 #include "kernel/geom/motion_triangle.h"
 #include "kernel/geom/object.h"
 #include "kernel/geom/shader_data.h"
@@ -202,15 +204,111 @@ void evaluate_specular(const ShadingPoint &D,
   eval.residual = eval.dir_sl - spec_dir;
 }
 
-SpecularParameters specular_parameters_from_closure(const ShaderClosure &bsdf)
+bool specular_parameters_from_surface(KernelGlobals kg,
+                                      const ShaderData &sd,
+                                      const SpecularSurfaceGeometry &geometry,
+                                      const MpgSeedRay &seed,
+                                      const float u,
+                                      const float v,
+                                      SpecularParameters &params)
 {
-  SpecularParameters params;
-  params.is_refraction = CLOSURE_IS_REFRACTION(bsdf.type) || CLOSURE_IS_GLASS(bsdf.type);
-  if (params.is_refraction) {
-    const MicrofacetBsdf *microfacet = reinterpret_cast<const MicrofacetBsdf *>(&bsdf);
-    params.base_eta = fmaxf(microfacet->ior, 1e-6f);
+params = SpecularParameters();
+
+  const float w = 1.0f - u - v;
+  const float3 spec_point = geometry.verts[0] * w + geometry.verts[1] * u + geometry.verts[2] * v;
+  float3 ray_dir = spec_point - sd.P;
+  const float distance = len(ray_dir);
+  if (!(distance > 1e-6f)) {
+    return false;
   }
-  return params;
+  ray_dir /= distance;
+
+  Ray ray;
+  ray.P = sd.P;
+  ray.D = ray_dir;
+  ray.tmin = 0.0f;
+  ray.tmax = distance;
+  ray.time = sd.time;
+  ray.self.prim = sd.prim;
+  ray.self.object = sd.object;
+  ray.self.light_prim = PRIM_NONE;
+  ray.self.light_object = OBJECT_NONE;
+
+  Intersection isect;
+  isect.t = distance;
+  isect.u = u;
+  isect.v = v;
+  isect.prim = seed.prim;
+  isect.object = seed.object;
+  const int object_flag = kernel_data_fetch(object_flag, seed.object);
+  isect.type = (object_flag & SD_OBJECT_MOTION) ? PRIMITIVE_MOTION_TRIANGLE : PRIMITIVE_TRIANGLE;
+
+  ShaderData spec_sd = {};
+  shader_setup_from_ray(kg, &spec_sd, &ray, &isect);
+
+  const ConstIntegratorState integrator_state = nullptr;
+  surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
+      kg, integrator_state, &spec_sd, nullptr, PATH_RAY_DIFFUSE, true);
+
+  const MicrofacetBsdf *reflection_microfacet = nullptr;
+  const MicrofacetBsdf *refraction_microfacet = nullptr;
+
+  for (int i = 0; i < spec_sd.num_closure; ++i) {
+    const ShaderClosure *closure = &spec_sd.closure[i];
+    if (!CLOSURE_IS_BSDF(closure->type)) {
+      continue;
+    }
+    if (!(closure->sample_weight > 0.0f)) {
+      continue;
+    }
+
+    const bool closure_is_refraction = CLOSURE_IS_REFRACTION(closure->type) ||
+                                       CLOSURE_IS_GLASS(closure->type);
+    const bool closure_is_reflection = (closure->type == CLOSURE_BSDF_MICROFACET_GGX_ID ||
+                                        closure->type == CLOSURE_BSDF_MICROFACET_BECKMANN_ID ||
+                                        closure->type == CLOSURE_BSDF_MICROFACET_MULTI_GGX_ID);
+    if (!(closure_is_refraction || closure_is_reflection)) {
+      continue;
+    }
+
+    const MicrofacetBsdf *microfacet = reinterpret_cast<const MicrofacetBsdf *>(closure);
+    const float roughness_sq = microfacet->alpha_x * microfacet->alpha_y;
+    if (roughness_sq > BSDF_ROUGHNESS_SQ_THRESH) {
+      continue;
+    }
+
+    if (closure_is_refraction) {
+      refraction_microfacet = microfacet;
+      break;
+    }
+
+    if (reflection_microfacet == nullptr) {
+      reflection_microfacet = microfacet;
+    }
+  }
+
+  const MicrofacetBsdf *microfacet = refraction_microfacet ? refraction_microfacet :
+                                                                  reflection_microfacet;
+  if (microfacet == nullptr) {
+    return false;
+  }
+
+  params.is_refraction = (microfacet == refraction_microfacet);
+  if (params.is_refraction) {
+    float eta = microfacet->ior;
+    if (fabsf(eta) <= 1e-6f) {
+      return false;
+    }
+    if (spec_sd.flag & SD_BACKFACING) {
+      eta = 1.0f / eta;
+    }
+    params.base_eta = fabsf(eta);
+  }
+  else {
+    params.base_eta = 1.0f;
+  }
+
+  return true;
 }
 
 bool load_surface_geometry(KernelGlobals kg,
@@ -410,6 +508,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
                              MpgSolverOutput &result)
 {
   (void)rng_state;
+  (void)bsdf;
 
   result = MpgSolverOutput();
 
@@ -422,11 +521,14 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     return false;
   }
 
-  const SpecularParameters params = specular_parameters_from_closure(bsdf);
-
   float u = clamp(seed.bary_u, 1e-4f, 1.0f - 1e-4f);
   float v = clamp(seed.bary_v, 1e-4f, 1.0f - 1e-4f);
   project_barycentrics(u, v);
+
+  SpecularParameters params;
+  if (!specular_parameters_from_surface(kg, sd, geometry, seed, u, v, params)) {
+    return false;
+  }
 
   float trust_radius = 0.25f;
   float prev_residual = FLT_MAX;
