@@ -643,9 +643,13 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
           }
 #      endif
 
-          const float nee_pdf = (kernel_data.integrator.use_direct_light != 0) ? mpg_light.pdf :
-                                                                          0.0f;
-          const float denominator = weighted_bsdf_pdf + weighted_guided_pdf + nee_pdf + mpg_result.pdf;
+          const float ccl_attr_maybe_unused nee_pdf =
+              (kernel_data.integrator.use_direct_light != 0) ? mpg_light.pdf : 0.0f;
+          /* The MPG direction is defined in solid angle at the shading point. Only include
+           * techniques that can generate mpg_result.wi in the MIS denominator. The light PDF
+           * (nee_pdf) lives in area measure and is still used for emission evaluation, but it
+           * must not affect the MIS weight. */
+          const float denominator = weighted_bsdf_pdf + weighted_guided_pdf + mpg_result.pdf;
 
           if (denominator > 0.0f && isfinite_safe(denominator)) {
             const float mis_weight = mpg_result.pdf / denominator;
