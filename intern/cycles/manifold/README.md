@@ -17,8 +17,10 @@ same measure.
 * Seeding depends on OpenPGL `GuideSummary` parameters and jitters the dominant guided
   direction. Seeds are rejected when no specular triangle is intersected or when lights
   cannot provide a deterministic endpoint.
-* The proposal PDF multiplies the seed density, emitter sampling pdf, and the solver
-  Jacobian. If any component cannot be evaluated exactly the code reports failure.
+* The proposal PDF multiplies the seed density, the light's solid-angle pdf at the
+  shading point, the solver's surface Jacobian `|dX/du × dX/dv| / r_ds²`, and the
+  specular cosine term. All components are evaluated explicitly so MIS combines in
+  the same solid-angle measure as BSDF, guided, and NEE samples.
 
 ## Extending the module
 

@@ -30,10 +30,6 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
     return false;
   }
 
-  if (!isfinite_safe(seed.light_sample.pdf) || seed.light_sample.pdf <= 0.0f) {
-    return false;
-  }
-
   if (!isfinite_safe(solution.jacobian) || solution.jacobian <= 0.0f) {
     return false;
   }
@@ -49,22 +45,26 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
     return false;
   }
 
-  const float distance_sl_sq = solution.distance_sl * solution.distance_sl;
-  if (!isfinite_safe(distance_sl_sq) || distance_sl_sq <= 0.0f) {
-    return false;
-  }
-
-  const float emitter_area_pdf = seed.light_sample.pdf * cos_light / distance_sl_sq;
-  if (!isfinite_safe(emitter_area_pdf) || emitter_area_pdf <= 0.0f) {
-    return false;
-  }
-
   const float spec_geo_term = fabsf(dot(solution.specular_normal, -solution.wi));
   if (!isfinite_safe(spec_geo_term) || spec_geo_term <= 0.0f) {
     return false;
   }
 
-  pdf = seed.seed_pdf * emitter_area_pdf * solution.jacobian;
+  const float light_pdf_solid = seed.light_sample.pdf;
+  if (!isfinite_safe(light_pdf_solid) || light_pdf_solid <= 0.0f) {
+    return false;
+  }
+
+  /* The solver's Jacobian already carries |dX/du x dX/dv| * spec_geo_term / distance_ds^2.
+   * Factor the geometry term out so each component of the final solid-angle pdf is explicit. */
+  const float surface_jacobian = solution.jacobian / spec_geo_term;
+  if (!isfinite_safe(surface_jacobian) || surface_jacobian <= 0.0f) {
+    return false;
+  }
+
+  /* Compose the solid-angle pdf used in MIS with BSDF/guided/NEE:
+   *   p = p_seed(ω_d) * p_light(ω_l) * |dX/du x dX/dv| / r_ds^2 * spec_geo_term */
+  pdf = seed.seed_pdf * light_pdf_solid * surface_jacobian * spec_geo_term;
   if (!isfinite_safe(pdf) || pdf <= 0.0f) {
     pdf = 0.0f;
     return false;
