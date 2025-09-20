@@ -568,7 +568,8 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   ccl_attr_maybe_unused const bool manifold_guiding_enabled =
     (kernel_data.integrator.manifold_guiding_enable != 0);
 #    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
-  const bool bsdf_is_delta = CLOSURE_IS_DELTA(sc->type);
+  const bool bsdf_is_delta = (CLOSURE_IS_BSDF_SINGULAR(sc->type) &&
+                              !CLOSURE_IS_RAY_PORTAL(sc->type));
 
   if (!bsdf_is_delta && manifold_guiding_enabled &&
       (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) &&
