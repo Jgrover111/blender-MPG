@@ -405,7 +405,7 @@ class CYCLES_RENDER_PT_sampling_path_guiding(CyclesButtonsPanel, Panel):
                 layout.label(text="May work poorly with render tiling", icon='INFO')
 
         from . import engine
-        if getattr(engine, "with_manifold_path_guiding", lambda: False)():
+        if engine.with_manifold_path_guiding():
             layout.separator()
             col = layout.column()
             col.label(text="Manifold Path Guiding (CPU, Experimental)")

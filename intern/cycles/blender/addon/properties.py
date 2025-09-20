@@ -758,7 +758,7 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=0.05,
     )
 
-    if getattr(engine, "with_manifold_path_guiding", lambda: False)():
+    if engine.with_manifold_path_guiding():
         manifold_guiding_enable: BoolProperty(
             name="Manifold Path Guiding",
             description="Enable manifold path guiding for specular caustic connections",

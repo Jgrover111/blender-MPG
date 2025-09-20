@@ -169,9 +169,26 @@ def with_path_guiding():
     return _cycles.with_path_guiding
 
 
+_manifold_path_guiding_support = None
+
+
+def _ensure_manifold_path_guiding_support():
+    global _manifold_path_guiding_support
+
+    if _manifold_path_guiding_support is None:
+        try:
+            import _cycles
+        except ImportError:
+            _manifold_path_guiding_support = False
+        else:
+            _manifold_path_guiding_support = getattr(
+                _cycles, "with_manifold_path_guiding", False)
+
+    return _manifold_path_guiding_support
+
+
 def with_manifold_path_guiding():
-    import _cycles
-    return getattr(_cycles, "with_manifold_path_guiding", False)
+    return _ensure_manifold_path_guiding_support()
 
 
 def system_info():
