@@ -16,8 +16,6 @@
 #include "kernel/svm/types.h"
 #include "kernel/types.h"
 
-#include "util/math_matrix.h"
-
 #include <cfloat>
 
 CCL_NAMESPACE_BEGIN
