@@ -12,6 +12,7 @@
 
 #include "kernel/device/cpu/globals.h"
 #include "kernel/integrator/path_state.h"
+#include "kernel/svm/types.h"
 #include "kernel/types.h"
 
 #include <cfloat>
@@ -30,7 +31,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
-  if (CLOSURE_IS_DELTA(bsdf.type)) {
+  if (CLOSURE_IS_BSDF_SINGULAR(bsdf.type) && !CLOSURE_IS_RAY_PORTAL(bsdf.type)) {
     return result;
   }
 
