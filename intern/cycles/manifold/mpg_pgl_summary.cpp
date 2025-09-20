@@ -6,17 +6,36 @@
 
 #if defined(WITH_PATH_GUIDING)
 
-#  include "BLI_rand.h"
-
 #  include <openpgl/cpp/SurfaceSamplingDistribution.h>
 
 #  include <algorithm>
 #  include <cmath>
 #  include <vector>
 
+#  include "util/hash.h"
+
 CCL_NAMESPACE_BEGIN
 
 namespace {
+
+class HashSequence2D {
+public:
+  explicit HashSequence2D(const uint32_t seed) : seed_(seed), counter_(0)
+  {
+  }
+
+  float2 next()
+  {
+    const uint32_t idx = counter_++;
+    const uint32_t hash_x = hash_uint3(seed_, idx, 0u);
+    const uint32_t hash_y = hash_uint3(seed_, idx, 1u);
+    return make_float2(uint_to_float_excl(hash_x), uint_to_float_excl(hash_y));
+  }
+
+private:
+  uint32_t seed_;
+  uint32_t counter_;
+};
 
 inline float3 safe_normalize_or_zero(const float3 &v, float &length)
 {
@@ -70,7 +89,7 @@ inline float estimate_kappa_from_rbar(const float rbar)
 
 bool pgl_estimate_summary(const OpenPGLSurfaceDistribution &dist_world,
                           const float3 &Ng_world,
-                          RNG &rng,
+                          uint32_t rng_seed,
                           GuideSummary &out,
                           int n_samples,
                           float cone_half_angle_rad)
@@ -90,12 +109,14 @@ bool pgl_estimate_summary(const OpenPGLSurfaceDistribution &dist_world,
   std::vector<float3> samples;
   samples.reserve(n_samples);
 
+  HashSequence2D rng(rng_seed);
   const int max_attempts = std::max(n_samples * 8, n_samples);
   int attempts = 0;
   while ((int)samples.size() < n_samples && attempts < max_attempts) {
     attempts++;
-    const pgl_point2f sample_uv = {BLI_rng_get_float(&rng), BLI_rng_get_float(&rng)};
-    const pgl_vec3f dir = dist_world.Sample(sample_uv);
+    const float2 sample_uv = rng.next();
+    const pgl_point2f sample = {sample_uv.x, sample_uv.y};
+    const pgl_vec3f dir = dist_world.Sample(sample);
     const float3 direction = make_float3(dir.x, dir.y, dir.z);
 
     if (!isfinite(direction.x) || !isfinite(direction.y) || !isfinite(direction.z)) {

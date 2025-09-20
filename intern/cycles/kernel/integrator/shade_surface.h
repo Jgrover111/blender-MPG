@@ -21,7 +21,6 @@
 #ifdef WITH_CYCLES_MANIFOLD
 #  include "manifold/mpg.h"
 #  if !defined(__KERNEL_GPU__)
-#    include "BLI_rand.h"
 #    include "manifold/mpg_pgl_summary.h"
 #  endif
 #endif
@@ -575,14 +574,13 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) &&
       INTEGRATOR_STATE(state, guiding, use_surface_guiding))
   {
-    if (kg->opgl_surface_sampling_distribution && kg->manifold_rng) {
+    if (kg->opgl_surface_sampling_distribution) {
       const uint seed = hash_uint3(rng_state->rng_pixel,
                                    uint(rng_state->sample),
                                    rng_state->rng_offset);
-      BLI_rng_srandom(kg->manifold_rng.get(), seed);
       if (pgl_estimate_summary(*kg->opgl_surface_sampling_distribution,
                                sd->Ng,
-                               *kg->manifold_rng,
+                               seed,
                                manifold_summary))
       {
         if (manifold_summary.rbar > 1.0e-3f &&

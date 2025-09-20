@@ -17,19 +17,9 @@
 #include "util/texture.h"  // IWYU pragma: keep
 #include "util/unique_ptr.h"
 
-#ifdef WITH_CYCLES_MANIFOLD
-struct RNG;
-#endif
-
 CCL_NAMESPACE_BEGIN
 
 struct OSLGlobals;
-
-#ifdef WITH_CYCLES_MANIFOLD
-struct BLIManifoldRngDeleter {
-  void operator()(::RNG *rng) const;
-};
-#endif
 
 /* On the CPU, we pass along the struct KernelGlobals to nearly everywhere in
  * the kernel, to access constant data. These are all stored as flat arrays.
@@ -93,10 +83,6 @@ struct ThreadKernelGlobalsCPU : public KernelGlobalsCPU {
   unique_ptr<openpgl::cpp::PathSegmentStorage> opgl_path_segment_storage;
   unique_ptr<openpgl::cpp::SurfaceSamplingDistribution> opgl_surface_sampling_distribution;
   unique_ptr<openpgl::cpp::VolumeSamplingDistribution> opgl_volume_sampling_distribution;
-#endif
-
-#ifdef WITH_CYCLES_MANIFOLD
-  unique_ptr<::RNG, BLIManifoldRngDeleter> manifold_rng;
 #endif
 
  protected:

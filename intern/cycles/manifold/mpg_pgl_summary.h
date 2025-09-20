@@ -8,7 +8,7 @@
 
 #include "util/math.h"
 
-struct RNG;
+#include <cstdint>
 
 #if defined(WITH_PATH_GUIDING)
 namespace openpgl {
@@ -26,7 +26,7 @@ CCL_NAMESPACE_BEGIN
 
 bool pgl_estimate_summary(const OpenPGLSurfaceDistribution &dist_world,
                           const float3 &Ng_world,
-                          RNG &rng,
+                          uint32_t rng_seed,
                           GuideSummary &out,
                           int n_samples = 128,
                           float cone_half_angle_rad = (10.0f * (M_PI_F / 180.0f)));
