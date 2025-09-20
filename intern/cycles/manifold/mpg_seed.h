@@ -14,6 +14,8 @@ bool mpg_generate_seed(KernelGlobals kg,
                        const ShaderClosure &bsdf,
                        const GuideSummary &guide,
                        const MpgOptions &options,
+                       const uint32_t path_flag,
+                       const int bounce,
                        const RNGState &rng_state,
                        MpgSeedRay &seed);
 

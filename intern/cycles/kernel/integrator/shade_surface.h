@@ -599,9 +599,17 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   }
 
   if (manifold_guiding_enabled && manifold_guiding_ready) {
+    const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+    const int bounce = INTEGRATOR_STATE(state, path, bounce);
     RNGState manifold_rng_state = *rng_state;
-    MpgResult mpg_result =
-        mpg_try_connect(kg, *sd, *sc, manifold_summary, manifold_options, manifold_rng_state);
+    MpgResult mpg_result = mpg_try_connect(kg,
+                                           *sd,
+                                           *sc,
+                                           manifold_summary,
+                                           manifold_options,
+                                           path_flag,
+                                           bounce,
+                                           manifold_rng_state);
 
     if (mpg_result.success &&
         mpg_result.pdf > 0.0f &&

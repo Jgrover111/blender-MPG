@@ -24,6 +24,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
                           const ShaderClosure &bsdf,
                           const GuideSummary &g,
                           const MpgOptions &opt,
+                          const uint32_t path_flag,
+                          const int bounce,
                           RNGState &rng_state)
 {
   MpgResult result;
@@ -45,7 +47,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   }
 
   MpgSeedRay seed;
-  if (!mpg_generate_seed(kg, sd, bsdf, g, opt, rng_state, seed)) {
+  if (!mpg_generate_seed(kg, sd, bsdf, g, opt, path_flag, bounce, rng_state, seed)) {
     return result;
   }
 
@@ -66,13 +68,16 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     light_sample.pdf /= pdf_selection;
   }
 
-  uint32_t path_flag = PATH_RAY_DIFFUSE;
+  uint32_t updated_path_flag = path_flag;
   if (solution.is_refraction) {
-    path_flag |= PATH_RAY_MIS_HAD_TRANSMISSION;
+    updated_path_flag |= PATH_RAY_MIS_HAD_TRANSMISSION;
   }
 
-  light_sample_update(
-    kg, &light_sample, solution.specular_point, solution.specular_normal, path_flag);
+  light_sample_update(kg,
+                      &light_sample,
+                      solution.specular_point,
+                      solution.specular_normal,
+                      updated_path_flag);
 
   result.success = true;
   result.wi = solution.wi;

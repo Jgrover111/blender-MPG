@@ -41,6 +41,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
                           const ShaderClosure &bsdf,
                           const GuideSummary &g,
                           const MpgOptions &opt,
+                          const uint32_t path_flag,
+                          const int bounce,
                           RNGState &rng_state);
 
 CCL_NAMESPACE_END

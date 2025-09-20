@@ -6,6 +6,7 @@
 
 #include "kernel/bvh/bvh.h"
 #include "kernel/bvh/util.h"
+#include "kernel/light/light.h"
 #include "kernel/sample/mapping.h"
 #include "kernel/svm/types.h"
 
@@ -21,6 +22,8 @@ bool mpg_generate_seed(KernelGlobals kg,
                        const ShaderClosure &bsdf,
                        const GuideSummary &guide,
                        const MpgOptions &options,
+                       const uint32_t path_flag,
+                       const int bounce,
                        const RNGState &rng_state,
                        MpgSeedRay &seed)
 {
@@ -93,10 +96,10 @@ bool mpg_generate_seed(KernelGlobals kg,
                                   sd.time,
                                   sd.P,
                                   sd.N,
-                                  sd.object,
+                                  light_link_receiver_nee(kg, &sd),
                                   sd.flag,
-                                  0,
-                                  PATH_RAY_DIFFUSE,
+                                  bounce,
+                                  path_flag,
                                   &light_sample))
   {
     return false;
