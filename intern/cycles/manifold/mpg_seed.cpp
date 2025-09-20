@@ -28,7 +28,7 @@ bool mpg_generate_seed(KernelGlobals kg,
 
   (void)bsdf;
 
-  if (guide.peak_weight < options.gate_w || guide.kappa < options.gate_kappa) {
+  if (guide.rbar <= 1.0e-3f || guide.peak_weight < options.gate_w || guide.kappa < options.gate_kappa) {
     return false;
   }
 

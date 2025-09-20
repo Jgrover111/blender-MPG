@@ -32,7 +32,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
-  if (g.peak_weight < opt.gate_w || g.kappa < opt.gate_kappa) {
+  if (g.rbar <= 1.0e-3f || g.peak_weight < opt.gate_w || g.kappa < opt.gate_kappa) {
     return result;
   }
 
