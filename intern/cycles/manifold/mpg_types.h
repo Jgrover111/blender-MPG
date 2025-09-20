@@ -39,10 +39,7 @@ struct ClosureBSDF {
 struct MpgSeedRay {
   float3 direction = zero_float3();
   float seed_pdf = 0.0f;
-  float emitter_pdf = 0.0f;
-  float3 emitter_position = zero_float3();
-  float3 emitter_normal = zero_float3();
-  int emitter_shader = -1;
+  LightSample light_sample = {};
   int object = -1;
   int prim = -1;
   float bary_u = 0.0f;

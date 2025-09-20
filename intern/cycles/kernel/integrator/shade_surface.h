@@ -37,6 +37,84 @@
 
 CCL_NAMESPACE_BEGIN
 
+#ifdef WITH_CYCLES_MANIFOLD
+ccl_device_inline void surface_write_manifold_direct_light(KernelGlobals kg,
+                                                           IntegratorState state,
+                                                           Spectrum contribution,
+                                                           const int lightgroup,
+                                                           ccl_global float *ccl_restrict
+                                                               render_buffer)
+{
+  if (is_zero(contribution)) {
+    return;
+  }
+
+  film_clamp_light(kg, &contribution, INTEGRATOR_STATE(state, path, bounce));
+
+  ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
+  const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+  const int sample = INTEGRATOR_STATE(state, path, sample);
+
+  film_write_combined_pass(kg, path_flag, sample, contribution, buffer);
+
+#ifdef __PASSES__
+  if (kernel_data.film.light_pass_flag & PASS_ANY) {
+    if (path_flag & PATH_RAY_SHADOW_CATCHER_HIT) {
+      return;
+    }
+
+    if (lightgroup != LIGHTGROUP_NONE && kernel_data.film.pass_lightgroup != PASS_UNUSED) {
+      film_write_pass_spectrum(buffer + kernel_data.film.pass_lightgroup + 3 * lightgroup,
+                               contribution);
+    }
+
+    Spectrum pass_contribution = contribution;
+    int pass_offset = PASS_UNUSED;
+
+    if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) {
+      if (path_flag & PATH_RAY_SURFACE_PASS) {
+        const Spectrum diffuse_weight = INTEGRATOR_STATE(state, path, pass_diffuse_weight);
+        const Spectrum glossy_weight = INTEGRATOR_STATE(state, path, pass_glossy_weight);
+
+        const int glossy_pass_offset = ((INTEGRATOR_STATE(state, path, bounce) == 1) ?
+                                            kernel_data.film.pass_glossy_direct :
+                                            kernel_data.film.pass_glossy_indirect);
+        if (glossy_pass_offset != PASS_UNUSED) {
+          film_write_pass_spectrum(
+              buffer + glossy_pass_offset, glossy_weight * contribution);
+        }
+
+        const int transmission_pass_offset = ((INTEGRATOR_STATE(state, path, bounce) == 1) ?
+                                                  kernel_data.film.pass_transmission_direct :
+                                                  kernel_data.film.pass_transmission_indirect);
+        if (transmission_pass_offset != PASS_UNUSED) {
+          const Spectrum transmission_weight = one_spectrum() - diffuse_weight - glossy_weight;
+          film_write_pass_spectrum(buffer + transmission_pass_offset,
+                                   transmission_weight * contribution);
+        }
+
+        pass_offset = (INTEGRATOR_STATE(state, path, bounce) == 1) ?
+                          kernel_data.film.pass_diffuse_direct :
+                          kernel_data.film.pass_diffuse_indirect;
+        if (pass_offset != PASS_UNUSED) {
+          pass_contribution *= diffuse_weight;
+        }
+      }
+      else if (path_flag & PATH_RAY_VOLUME_PASS) {
+        pass_offset = (INTEGRATOR_STATE(state, path, bounce) == 1) ?
+                          kernel_data.film.pass_volume_direct :
+                          kernel_data.film.pass_volume_indirect;
+      }
+    }
+
+    if (pass_offset != PASS_UNUSED) {
+      film_write_pass_spectrum(buffer + pass_offset, pass_contribution);
+    }
+  }
+#endif
+}
+#endif
+
 ccl_device_forceinline void integrate_surface_shader_setup(KernelGlobals kg,
                                                            ConstIntegratorState state,
                                                            ccl_private ShaderData *sd)
@@ -456,7 +534,8 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     KernelGlobals kg,
     IntegratorState state,
     ccl_private ShaderData *sd,
-    const ccl_private RNGState *rng_state)
+    const ccl_private RNGState *rng_state,
+    ccl_global float *ccl_restrict render_buffer)
 {
   /* Sample BSDF or BSSRDF. */
   if (!(sd->flag & (SD_BSDF | SD_BSSRDF))) {
@@ -481,6 +560,11 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 #  if !defined(__KERNEL_GPU__)
   ccl_attr_maybe_unused GuideSummary manifold_summary;
   ccl_attr_maybe_unused bool manifold_guiding_ready = false;
+  ccl_attr_maybe_unused MpgOptions manifold_options;
+  manifold_options.max_bounces = kernel_data.integrator.manifold_max_bounces;
+  manifold_options.max_iters = kernel_data.integrator.manifold_max_iterations;
+  manifold_options.gate_w = kernel_data.integrator.manifold_gate_weight;
+  manifold_options.gate_kappa = kernel_data.integrator.manifold_gate_kappa;
 #    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
   const bool bsdf_is_delta = CLOSURE_IS_DELTA(sc->type);
 
@@ -509,6 +593,75 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   }
   if ((kernel_data.integrator.manifold_guiding_enable != 0) && !manifold_guiding_ready) {
     /* Skip manifold guiding when the OpenPGL summary is unreliable. */
+  }
+
+    if (manifold_guiding_enabled && manifold_guiding_ready) {
+    RNGState manifold_rng_state = *rng_state;
+    MpgResult mpg_result =
+        mpg_try_connect(kg, *sd, *sc, manifold_summary, manifold_options, manifold_rng_state);
+
+    if (mpg_result.success && mpg_result.pdf > 0.0f && mpg_result.visibility > 0.0f) {
+      LightSample mpg_light = mpg_result.light;
+      ShaderDataCausticsStorage mpg_emission_sd_storage;
+      ccl_private ShaderData *mpg_emission_sd = AS_SHADER_DATA(&mpg_emission_sd_storage);
+      Spectrum light_eval = light_sample_shader_eval(kg, state, mpg_emission_sd, &mpg_light, sd->time);
+
+      if (!is_zero(light_eval)) {
+        BsdfEval mpg_bsdf_eval;
+        const float mpg_bsdf_pdf = surface_shader_bsdf_eval(
+            kg, state, sd, mpg_result.wi, &mpg_bsdf_eval, mpg_light.shader);
+
+        if (mpg_bsdf_pdf > 0.0f && !bsdf_eval_is_zero(&mpg_bsdf_eval)) {
+          float weighted_bsdf_pdf = 0.0f;
+          float weighted_guided_pdf = 0.0f;
+
+          float unguided_pdf = 0.0f;
+          {
+            BsdfEval mpg_pdf_eval;
+            bsdf_eval_init(&mpg_pdf_eval, zero_spectrum());
+            float unguided_pdfs[MAX_CLOSURE];
+            unguided_pdf = surface_shader_bsdf_eval_pdfs(
+                kg, sd, mpg_result.wi, &mpg_pdf_eval, unguided_pdfs, mpg_light.shader);
+          }
+
+          weighted_bsdf_pdf = unguided_pdf;
+
+#      if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
+          if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) &&
+              INTEGRATOR_STATE(state, guiding, use_surface_guiding))
+          {
+            const float guiding_sampling_prob = INTEGRATOR_STATE(
+                state, guiding, surface_guiding_sampling_prob);
+            const float bssrdf_sampling_prob = INTEGRATOR_STATE(
+                state, guiding, bssrdf_sampling_prob);
+            weighted_bsdf_pdf *= (1.0f - guiding_sampling_prob);
+            const float guiding_pdf = guiding_bsdf_pdf(kg, mpg_result.wi);
+            weighted_guided_pdf = guiding_sampling_prob * (1.0f - bssrdf_sampling_prob) * guiding_pdf;
+          }
+#      endif
+
+          const float nee_pdf = (kernel_data.integrator.use_direct_light != 0) ? mpg_light.pdf :
+                                                                          0.0f;
+          const float denominator = weighted_bsdf_pdf + weighted_guided_pdf + nee_pdf + mpg_result.pdf;
+
+          if (denominator > 0.0f && isfinite_safe(denominator)) {
+            const float mis_weight = mpg_result.pdf / denominator;
+
+            const float visibility_weight = mpg_result.visibility * mis_weight / mpg_result.pdf;
+            bsdf_eval_mul(&mpg_bsdf_eval, light_eval * visibility_weight);
+
+            const Spectrum mpg_contribution =
+                INTEGRATOR_STATE(state, path, throughput) * bsdf_eval_sum(&mpg_bsdf_eval);
+
+            surface_write_manifold_direct_light(kg,
+                                                state,
+                                                mpg_contribution,
+                                                mpg_light.group,
+                                                render_buffer);
+          }
+        }
+      }
+    }
   }
 #    endif
 #  endif
@@ -862,7 +1015,8 @@ ccl_device int integrate_surface(KernelGlobals kg,
 #endif
 
     PROFILING_EVENT(PROFILING_SHADE_SURFACE_INDIRECT_LIGHT);
-    continue_path_label = integrate_surface_bsdf_bssrdf_bounce(kg, state, &sd, &rng_state);
+    continue_path_label = integrate_surface_bsdf_bssrdf_bounce(
+        kg, state, &sd, &rng_state, render_buffer);
 #ifdef __VOLUME__
   }
   else {

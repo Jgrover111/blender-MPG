@@ -55,6 +55,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.wi = solution.wi;
   result.pdf = pdf;
   result.visibility = solution.visibility;
+  result.light = seed.light_sample;
   return result;
 }
 

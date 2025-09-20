@@ -108,11 +108,9 @@ bool mpg_generate_seed(KernelGlobals kg,
 
   seed.direction = seed_direction;
   seed.seed_pdf = seed_pdf;
-  seed.emitter_pdf = light_sample.pdf;
-  seed.emitter_shader = light_sample.shader;
-  seed.emitter_normal = make_float3(light_sample.Ng.x, light_sample.Ng.y, light_sample.Ng.z);
+  seed.light_sample = light_sample;
   const float light_distance = (light_sample.t == FLT_MAX) ? 1.0e6f : light_sample.t;
-  seed.emitter_position = sd.P + light_sample.D * light_distance;
+  seed.light_sample.P = sd.P + light_sample.D * light_distance;
 
   seed.object = isect.object;
   seed.prim = isect.prim;

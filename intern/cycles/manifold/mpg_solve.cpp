@@ -183,7 +183,7 @@ void evaluate_specular(const ShadingPoint &D,
   eval.dir_ds = (eval.distance_ds > 0.0f) ? (eval.dir_ds / eval.distance_ds) :
                                            make_float3(0.0f, 0.0f, 1.0f);
 
-  eval.dir_sl = seed.emitter_position - eval.point;
+  eval.dir_sl = seed.light_sample.P - eval.point;
   eval.distance_sl = len(eval.dir_sl);
   eval.dir_sl = (eval.distance_sl > 0.0f) ? (eval.dir_sl / eval.distance_sl) :
                                            make_float3(0.0f, 0.0f, 1.0f);
@@ -315,8 +315,8 @@ void compute_jacobian(const ShadingPoint &D,
   const float3 d_dir_ds_du = derivative_normalized(eval.point - D.position, geometry.dPdu);
   const float3 d_dir_ds_dv = derivative_normalized(eval.point - D.position, geometry.dPdv);
 
-  const float3 d_dir_sl_du = -derivative_normalized(seed.emitter_position - eval.point, -geometry.dPdu);
-  const float3 d_dir_sl_dv = -derivative_normalized(seed.emitter_position - eval.point, -geometry.dPdv);
+  const float3 d_dir_sl_du = -derivative_normalized(seed.light_sample.P - eval.point, -geometry.dPdu);
+  const float3 d_dir_sl_dv = -derivative_normalized(seed.light_sample.P - eval.point, -geometry.dPdv);
 
   float3 d_spec_du, d_spec_dv;
   if (!eval.refractive) {

@@ -30,7 +30,7 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
     return false;
   }
 
-  if (!isfinite_safe(seed.emitter_pdf) || seed.emitter_pdf <= 0.0f) {
+  if (!isfinite_safe(seed.light_sample.pdf) || seed.light_sample.pdf <= 0.0f) {
     return false;
   }
 
@@ -42,7 +42,9 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
     return false;
   }
 
-  const float cos_light = fabsf(dot(seed.emitter_normal, -solution.dir_sl));
+  const float3 emitter_normal = make_float3(
+      seed.light_sample.Ng.x, seed.light_sample.Ng.y, seed.light_sample.Ng.z);
+  const float cos_light = fabsf(dot(emitter_normal, -solution.dir_sl));
   if (!isfinite_safe(cos_light) || cos_light <= 0.0f) {
     return false;
   }
@@ -52,7 +54,7 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
     return false;
   }
 
-  const float emitter_area_pdf = seed.emitter_pdf * cos_light / distance_sl_sq;
+  const float emitter_area_pdf = seed.light_sample.pdf * cos_light / distance_sl_sq;
   if (!isfinite_safe(emitter_area_pdf) || emitter_area_pdf <= 0.0f) {
     return false;
   }
