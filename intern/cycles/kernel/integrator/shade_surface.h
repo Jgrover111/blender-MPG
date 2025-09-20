@@ -565,11 +565,12 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   manifold_options.max_iters = kernel_data.integrator.manifold_max_iterations;
   manifold_options.gate_w = kernel_data.integrator.manifold_gate_weight;
   manifold_options.gate_kappa = kernel_data.integrator.manifold_gate_kappa;
+  ccl_attr_maybe_unused const bool manifold_guiding_enabled =
+    (kernel_data.integrator.manifold_guiding_enable != 0);
 #    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
   const bool bsdf_is_delta = CLOSURE_IS_DELTA(sc->type);
 
-  if (!bsdf_is_delta &&
-      (kernel_data.integrator.manifold_guiding_enable != 0) &&
+  if (!bsdf_is_delta && manifold_guiding_enabled &&
       (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) &&
       INTEGRATOR_STATE(state, guiding, use_surface_guiding))
   {
@@ -592,11 +593,11 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       }
     }
   }
-  if ((kernel_data.integrator.manifold_guiding_enable != 0) && !manifold_guiding_ready) {
+  if (manifold_guiding_enabled && !manifold_guiding_ready) {
     /* Skip manifold guiding when the OpenPGL summary is unreliable. */
   }
 
-    if (manifold_guiding_enabled && manifold_guiding_ready) {
+  if (manifold_guiding_enabled && manifold_guiding_ready) {
     RNGState manifold_rng_state = *rng_state;
     MpgResult mpg_result =
         mpg_try_connect(kg, *sd, *sc, manifold_summary, manifold_options, manifold_rng_state);
