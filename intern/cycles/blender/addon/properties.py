@@ -766,8 +766,12 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         )
         manifold_max_bounces: IntProperty(
             name="Max Bounces",
-            description="Maximum number of specular bounces traced by manifold path guiding",
-            min=1, max=2,
+            description=(
+                "Maximum number of specular bounces traced by manifold path guiding. "
+                "Currently limited to a single specular bounce"
+            ),
+            min=1,
+            max=1,
             default=1,
         )
         manifold_iters: IntProperty(

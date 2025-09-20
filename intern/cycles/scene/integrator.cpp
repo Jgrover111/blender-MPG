@@ -280,7 +280,9 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   kintegrator->guiding_roughness_threshold = guiding_params.roughness_threshold;
 
 #ifdef WITH_CYCLES_MANIFOLD
-  const int clamped_manifold_bounces = clamp(manifold_max_bounces, 1, 2);
+  /* Multi-bounce manifold solving is not implemented yet. Keep the kernel-side option pinned
+   * to a single bounce so the UI cannot enable unsupported behavior. */
+  const int clamped_manifold_bounces = 1;
   const int clamped_manifold_iterations = max(manifold_iters, 1);
   const float clamped_gate_weight = clamp(manifold_gate_weight, 0.0f, 1.0f);
   const float clamped_gate_kappa = max(manifold_gate_kappa, 0.0f);

@@ -31,6 +31,11 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
+  /* Multi-bounce solving is not implemented yet. */
+  if (opt.max_bounces > 1) {
+    return result;
+  }
+
   if (CLOSURE_IS_BSDF_SINGULAR(bsdf.type) && !CLOSURE_IS_RAY_PORTAL(bsdf.type)) {
     return result;
   }
