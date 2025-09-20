@@ -603,7 +603,11 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     MpgResult mpg_result =
         mpg_try_connect(kg, *sd, *sc, manifold_summary, manifold_options, manifold_rng_state);
 
-    if (mpg_result.success && mpg_result.pdf > 0.0f && mpg_result.visibility > 0.0f) {
+    if (mpg_result.success &&
+        mpg_result.pdf > 0.0f &&
+        mpg_result.visibility > 0.0f &&
+        !is_zero(mpg_result.spec_weight))
+    {
       LightSample mpg_light = mpg_result.light;
       ShaderDataCausticsStorage mpg_emission_sd_storage;
       ccl_private ShaderData *mpg_emission_sd = AS_SHADER_DATA(&mpg_emission_sd_storage);
@@ -614,42 +618,45 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
         const float mpg_bsdf_pdf = surface_shader_bsdf_eval(
             kg, state, sd, mpg_result.wi, &mpg_bsdf_eval, mpg_light.shader);
 
-        if (mpg_bsdf_pdf > 0.0f && !bsdf_eval_is_zero(&mpg_bsdf_eval)) {
-          float weighted_bsdf_pdf = 0.0f;
-          float weighted_guided_pdf = 0.0f;
+        if (mpg_bsdf_pdf > 0.0f) {
+          bsdf_eval_mul(&mpg_bsdf_eval, mpg_result.spec_weight);
 
-          float unguided_pdf = 0.0f;
-          {
-            BsdfEval mpg_pdf_eval;
-            bsdf_eval_init(&mpg_pdf_eval, zero_spectrum());
-            float unguided_pdfs[MAX_CLOSURE];
-            unguided_pdf = surface_shader_bsdf_eval_pdfs(
-                kg, sd, mpg_result.wi, &mpg_pdf_eval, unguided_pdfs, mpg_light.shader);
-          }
+          if (!bsdf_eval_is_zero(&mpg_bsdf_eval)) {
+            float weighted_bsdf_pdf = 0.0f;
+            float weighted_guided_pdf = 0.0f;
 
-          weighted_bsdf_pdf = unguided_pdf;
+            float unguided_pdf = 0.0f;
+            {
+              BsdfEval mpg_pdf_eval;
+              bsdf_eval_init(&mpg_pdf_eval, zero_spectrum());
+              float unguided_pdfs[MAX_CLOSURE];
+              unguided_pdf = surface_shader_bsdf_eval_pdfs(
+                  kg, sd, mpg_result.wi, &mpg_pdf_eval, unguided_pdfs, mpg_light.shader);
+            }
+
+            weighted_bsdf_pdf = unguided_pdf;
 
 #      if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
-          if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) &&
-              INTEGRATOR_STATE(state, guiding, use_surface_guiding))
-          {
-            const float guiding_sampling_prob = INTEGRATOR_STATE(
-                state, guiding, surface_guiding_sampling_prob);
-            const float bssrdf_sampling_prob = INTEGRATOR_STATE(
-                state, guiding, bssrdf_sampling_prob);
-            weighted_bsdf_pdf *= (1.0f - guiding_sampling_prob);
-            const float guiding_pdf = guiding_bsdf_pdf(kg, mpg_result.wi);
-            weighted_guided_pdf = guiding_sampling_prob * (1.0f - bssrdf_sampling_prob) * guiding_pdf;
-          }
+            if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) &&
+                INTEGRATOR_STATE(state, guiding, use_surface_guiding))
+            {
+              const float guiding_sampling_prob = INTEGRATOR_STATE(
+                  state, guiding, surface_guiding_sampling_prob);
+              const float bssrdf_sampling_prob = INTEGRATOR_STATE(
+                  state, guiding, bssrdf_sampling_prob);
+              weighted_bsdf_pdf *= (1.0f - guiding_sampling_prob);
+              const float guiding_pdf = guiding_bsdf_pdf(kg, mpg_result.wi);
+              weighted_guided_pdf = guiding_sampling_prob * (1.0f - bssrdf_sampling_prob) * guiding_pdf;
+            }
 #      endif
 
-          const float ccl_attr_maybe_unused nee_pdf =
-              (kernel_data.integrator.use_direct_light != 0) ? mpg_light.pdf : 0.0f;
-          /* The MPG direction is defined in solid angle at the shading point. Only include
-           * techniques that can generate mpg_result.wi in the MIS denominator. The light PDF
-           * (nee_pdf) lives in area measure and is still used for emission evaluation, but it
-           * must not affect the MIS weight. */
-          const float denominator = weighted_bsdf_pdf + weighted_guided_pdf + mpg_result.pdf;
+            const float ccl_attr_maybe_unused nee_pdf =
+                (kernel_data.integrator.use_direct_light != 0) ? mpg_light.pdf : 0.0f;
+            /* The MPG direction is defined in solid angle at the shading point. Only include
+             * techniques that can generate mpg_result.wi in the MIS denominator. The light PDF
+             * (nee_pdf) lives in area measure and is still used for emission evaluation, but it
+             * must not affect the MIS weight. */
+            const float denominator = weighted_bsdf_pdf + weighted_guided_pdf + mpg_result.pdf;
 
           if (denominator > 0.0f && isfinite_safe(denominator)) {
             const float mis_weight = mpg_result.pdf / denominator;

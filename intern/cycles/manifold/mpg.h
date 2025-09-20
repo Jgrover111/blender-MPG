@@ -29,6 +29,7 @@ struct MpgResult {
   float3 wi = zero_float3();
   float pdf = 0.0f;
   float visibility = 0.0f;
+  Spectrum spec_weight = zero_spectrum();
   LightSample light = {};
 };
 

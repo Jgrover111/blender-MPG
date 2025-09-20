@@ -33,6 +33,12 @@ struct SpecularSurfaceGeometry {
 struct SpecularParameters {
   bool is_refraction = false;
   float base_eta = 1.0f;
+  bool has_microfacet = false;
+  MicrofacetBsdf microfacet = {};
+  FresnelDielectricTint fresnel_dielectric_tint = {};
+  FresnelConductor fresnel_conductor = {};
+  FresnelGeneralizedSchlick fresnel_generalized_schlick = {};
+  FresnelF82Tint fresnel_f82_tint = {};
 };
 
 struct SpecularEval {
@@ -53,6 +59,87 @@ struct SpecularEval {
   bool tir = false;
   bool refractive = false;
 };
+
+void copy_microfacet_to_parameters(const MicrofacetBsdf *microfacet, SpecularParameters &params)
+{
+  params.has_microfacet = (microfacet != nullptr);
+  if (!params.has_microfacet) {
+    return;
+  }
+
+  params.microfacet = *microfacet;
+  params.microfacet.fresnel = nullptr;
+
+  const MicrofacetFresnel fresnel_type = static_cast<MicrofacetFresnel>(microfacet->fresnel_type);
+  switch (fresnel_type) {
+    case MicrofacetFresnel::DIELECTRIC_TINT:
+      if (microfacet->fresnel != nullptr) {
+        params.fresnel_dielectric_tint = *reinterpret_cast<const FresnelDielectricTint *>(
+            microfacet->fresnel);
+        params.microfacet.fresnel = &params.fresnel_dielectric_tint;
+      }
+      break;
+    case MicrofacetFresnel::CONDUCTOR:
+      if (microfacet->fresnel != nullptr) {
+        params.fresnel_conductor = *reinterpret_cast<const FresnelConductor *>(microfacet->fresnel);
+        params.microfacet.fresnel = &params.fresnel_conductor;
+      }
+      break;
+    case MicrofacetFresnel::GENERALIZED_SCHLICK:
+      if (microfacet->fresnel != nullptr) {
+        params.fresnel_generalized_schlick =
+            *reinterpret_cast<const FresnelGeneralizedSchlick *>(microfacet->fresnel);
+        params.microfacet.fresnel = &params.fresnel_generalized_schlick;
+      }
+      break;
+    case MicrofacetFresnel::F82_TINT:
+      if (microfacet->fresnel != nullptr) {
+        params.fresnel_f82_tint = *reinterpret_cast<const FresnelF82Tint *>(microfacet->fresnel);
+        params.microfacet.fresnel = &params.fresnel_f82_tint;
+      }
+      break;
+    case MicrofacetFresnel::NONE:
+    case MicrofacetFresnel::DIELECTRIC:
+      /* No additional data to copy. */
+      break;
+  }
+}
+
+Spectrum evaluate_specular_weight(KernelGlobals kg,
+                                  const SpecularParameters &params,
+                                  const float3 &dir_ds,
+                                  const float3 &dir_sl)
+{
+  if (!params.has_microfacet) {
+    return zero_spectrum();
+  }
+
+  const MicrofacetBsdf &microfacet = params.microfacet;
+  const float cos_NI = dot(microfacet.N, dir_ds);
+  const float cos_NO = dot(microfacet.N, dir_sl);
+
+  if (!(fabsf(cos_NI) > 1e-6f && fabsf(cos_NO) > 1e-6f)) {
+    return zero_spectrum();
+  }
+
+  if (params.is_refraction) {
+    if (cos_NI * cos_NO >= 0.0f) {
+      return zero_spectrum();
+    }
+  }
+  else {
+    if (cos_NI * cos_NO <= 0.0f) {
+      return zero_spectrum();
+    }
+  }
+
+  Spectrum reflectance = zero_spectrum();
+  Spectrum transmittance = zero_spectrum();
+  microfacet_fresnel(kg, &microfacet, cos_NI, nullptr, &reflectance, &transmittance);
+
+  const Spectrum fresnel_weight = params.is_refraction ? transmittance : reflectance;
+  return microfacet.weight * fresnel_weight;
+}
 
 float3 combine_vertex_normals(const SpecularSurfaceGeometry &geometry, const float u, const float v)
 {
@@ -292,6 +379,8 @@ params = SpecularParameters();
   if (microfacet == nullptr) {
     return false;
   }
+
+  copy_microfacet_to_parameters(microfacet, params);
 
   params.is_refraction = (microfacet == refraction_microfacet);
   if (params.is_refraction) {
@@ -656,6 +745,11 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   result.wi = normalize(eval.point - shading_point.position);
   result.object = seed.object;
   result.prim = seed.prim;
+
+  result.spec_weight = evaluate_specular_weight(kg, params, result.dir_ds, result.dir_sl);
+  if (is_zero(result.spec_weight)) {
+    return false;
+  }
 
   float residual_matrix[2][2];
   if (!compute_residual_matrix(shading_point, seed, geometry, eval, residual_matrix)) {
