@@ -55,12 +55,19 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   }
 
   LightSample light_sample = seed.light_sample;
-  if (!is_zero(solution.dir_sl)) {
-    light_sample.D = normalize(solution.dir_sl);
+  const float pdf_selection = light_sample.pdf_selection;
+  if (pdf_selection != 0.0f) {
+    /* `light_sample_update` expects `ls->pdf` without the selection term. */
+    light_sample.pdf /= pdf_selection;
   }
-  if (light_sample.t != FLT_MAX) {
-    light_sample.t = solution.distance_sl;
+
+  uint32_t path_flag = PATH_RAY_DIFFUSE;
+  if (solution.is_refraction) {
+    path_flag |= PATH_RAY_MIS_HAD_TRANSMISSION;
   }
+
+  light_sample_update(
+    kg, &light_sample, solution.specular_point, solution.specular_normal, path_flag);
 
   result.success = true;
   result.wi = solution.wi;

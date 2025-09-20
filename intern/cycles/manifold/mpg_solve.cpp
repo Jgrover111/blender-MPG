@@ -745,6 +745,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   result.wi = normalize(eval.point - shading_point.position);
   result.object = seed.object;
   result.prim = seed.prim;
+  result.is_refraction = params.is_refraction;
 
   result.spec_weight = evaluate_specular_weight(kg, params, result.dir_ds, result.dir_sl);
   if (is_zero(result.spec_weight)) {

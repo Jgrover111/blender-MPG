@@ -55,6 +55,7 @@ struct MpgSolverOutput {
   float3 dir_sl = zero_float3();
   float distance_ds = 0.0f;
   float distance_sl = 0.0f;
+  bool is_refraction = false;
   Spectrum spec_weight = zero_spectrum();
   float3 dXdu = zero_float3();
   float3 dXdv = zero_float3();
