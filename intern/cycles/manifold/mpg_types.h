@@ -18,24 +18,6 @@ struct ShadingPoint {
   float time = 0.0f;
 };
 
-struct ClosureBSDF {
-  enum class Type {
-    Reflection,
-    Refraction,
-  };
-
-  Type type = Type::Reflection;
-  float eta = 1.0f;
-  float3 normal = zero_float3();
-  float3 tangent = zero_float3();
-  float3 bitangent = zero_float3();
-
-  bool is_refraction() const
-  {
-    return type == Type::Refraction;
-  }
-};
-
 struct MpgSeedRay {
   float3 direction = zero_float3();
   float seed_pdf = 0.0f;
