@@ -147,21 +147,30 @@ bool pgl_estimate_summary(const OpenPGLSurfaceDistribution &dist_world,
   mean /= float(count);
 
   float rbar = 0.0f;
-  const float3 mean_dir = safe_normalize_or_zero(mean, rbar);
+  float3 mean_dir = safe_normalize_or_zero(mean, rbar);
   if (rbar < 1.0e-3f) {
-    return false;
-  }
-
-  const float cone_cos = cosf(cone_half_angle_rad);
-  int in_cone = 0;
-  for (const float3 &d : samples) {
-    if (dot(d, mean_dir) >= cone_cos) {
-      in_cone++;
+    if (constrain_hemisphere) {
+      mean_dir = hemisphere_normal;
     }
+    else if (count > 0) {
+      mean_dir = samples[0];
+    }
+    rbar = max(rbar, 0.0f);
   }
 
-  const float peak_weight = float(in_cone) / float(count);
-  const float kappa = estimate_kappa_from_rbar(rbar);
+  float peak_weight = 0.0f;
+  if (!is_zero(mean_dir)) {
+    const float cone_cos = cosf(cone_half_angle_rad);
+    int in_cone = 0;
+    for (const float3 &d : samples) {
+      if (dot(d, mean_dir) >= cone_cos) {
+        in_cone++;
+      }
+    }
+    peak_weight = float(in_cone) / float(count);
+  }
+
+  const float kappa = (rbar > 1.0e-3f) ? estimate_kappa_from_rbar(rbar) : 0.0f;
 
   out.mean_dir = mean_dir;
   out.peak_weight = peak_weight;

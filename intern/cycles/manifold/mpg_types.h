@@ -26,6 +26,7 @@ struct MpgSeedRay {
   int prim = -1;
   float bary_u = 0.0f;
   float bary_v = 0.0f;
+  bool use_smooth_normals = false;
 };
 
 struct MpgSolverOutput {

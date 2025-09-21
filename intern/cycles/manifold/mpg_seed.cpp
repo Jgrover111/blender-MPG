@@ -31,7 +31,13 @@ bool mpg_generate_seed(KernelGlobals kg,
 
   (void)bsdf;
 
-  if (guide.rbar <= 1.0e-3f || guide.peak_weight < options.gate_w || guide.kappa < options.gate_kappa) {
+  const bool gate_active = (options.gate_w > 0.0f) || (options.gate_kappa > 0.0f);
+  if (gate_active) {
+    if (guide.rbar <= 1.0e-3f || guide.peak_weight < options.gate_w || guide.kappa < options.gate_kappa) {
+      return false;
+    }
+  }
+  else if (guide.rbar <= 1.0e-5f) {
     return false;
   }
 
@@ -84,9 +90,7 @@ bool mpg_generate_seed(KernelGlobals kg,
 
   const int shader_id = intersection_get_shader(kg, &isect);
   const KernelShader &kshader = kernel_data_fetch(shaders, shader_id);
-  if (!(kshader.flags & SHADER_SMOOTH_NORMAL)) {
-    return false;
-  }
+  seed.use_smooth_normals = (kshader.flags & SHADER_SMOOTH_NORMAL) != 0;
 
   /* Sample an emitter using the Cycles light sampling routine. */
   const float3 rand_light = path_state_rng_3D(kg, &rng_state, PRNG_LIGHT);

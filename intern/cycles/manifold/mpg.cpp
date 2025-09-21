@@ -42,7 +42,14 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
-  if (g.rbar <= 1.0e-3f || g.peak_weight < opt.gate_w || g.kappa < opt.gate_kappa) {
+  const bool gate_active = (opt.gate_w > 0.0f) || (opt.gate_kappa > 0.0f);
+  if (gate_active) {
+    if (g.rbar <= 1.0e-3f || g.peak_weight < opt.gate_w || g.kappa < opt.gate_kappa) {
+      return result;
+    }
+  }
+  else if (g.rbar <= 1.0e-5f) {
+    /* Without guiding gate we still require a numerically stable direction. */
     return result;
   }
 

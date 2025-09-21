@@ -434,6 +434,16 @@ bool load_surface_geometry(KernelGlobals kg,
 
   geometry.dPdu = geometry.verts[1] - geometry.verts[0];
   geometry.dPdv = geometry.verts[2] - geometry.verts[0];
+
+  if (!seed.use_smooth_normals) {
+    const float3 face_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+    if (is_zero(face_normal)) {
+      return false;
+    }
+    geometry.normals[0] = face_normal;
+    geometry.normals[1] = face_normal;
+    geometry.normals[2] = face_normal;
+  }
   return true;
 }
 
@@ -447,7 +457,14 @@ float compute_visibility(KernelGlobals kg,
   }
 
   Ray shadow_ray;
-  shadow_ray.P = ray_offset(eval.point, eval.normal);
+  float3 offset_normal = eval.normal;
+  if (dot(offset_normal, eval.dir_sl) < 0.0f) {
+    /* For transmission events the light direction is on the opposite side of the
+     * surface normal. Flip the offset normal so that the ray offset moves the
+     * origin along the outgoing direction instead of back into the surface. */
+    offset_normal = -offset_normal;
+  }
+  shadow_ray.P = ray_offset(eval.point, offset_normal);
   shadow_ray.D = eval.dir_sl;
   shadow_ray.tmin = 0.0f;
   shadow_ray.tmax = fmaxf(eval.distance_sl - 1e-4f, 0.0f);
