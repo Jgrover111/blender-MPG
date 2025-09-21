@@ -682,32 +682,50 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
             }
 #      endif
 
-            const float ccl_attr_maybe_unused nee_pdf =
-                (kernel_data.integrator.use_direct_light != 0) ? mpg_light.pdf : 0.0f;
-            /* The MPG direction is defined in solid angle at the shading point. Only include
-             * techniques that can generate mpg_result.wi in the MIS denominator. The light PDF
-             * (nee_pdf) lives in area measure and is still used for emission evaluation, but it
-             * must not affect the MIS weight. */
-            const float denominator = weighted_bsdf_pdf + weighted_guided_pdf + mpg_result.pdf;
-
-            if (denominator > 0.0f && isfinite_safe(denominator)) {
-              const float mis_weight = mpg_result.pdf / denominator;
-              const float visibility_weight = mpg_result.visibility * mis_weight / mpg_result.pdf;
-              bsdf_eval_mul(&mpg_bsdf_eval, light_eval * visibility_weight);
-
-              const Spectrum mpg_contribution =
-                  INTEGRATOR_STATE(state, path, throughput) * bsdf_eval_sum(&mpg_bsdf_eval);
-
-              surface_write_manifold_direct_light(kg,
-                                                  state,
-                                                  mpg_contribution,
-                                                  mpg_light.group,
-                                                  render_buffer);
-#      if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 1
-              if (manifold_options.relax_gate) {
-                guiding_record_manifold_direct_light(kg, state, mpg_contribution, mis_weight);
+            const float pdf_mpg = mpg_result.pdf;
+            if (isfinite_safe(pdf_mpg) && pdf_mpg > 1.0e-12f) {
+              float pdf_light = 0.0f;
+              if (kernel_data.integrator.use_direct_light != 0) {
+                pdf_light = mpg_light.pdf;
+                if (mpg_light.type == LIGHT_AREA || mpg_light.type == LIGHT_TRIANGLE) {
+                  const float3 light_normal = make_float3(
+                      mpg_light.Ng.x, mpg_light.Ng.y, mpg_light.Ng.z);
+                  const float area_to_solid = light_pdf_area_to_solid_angle(
+                      light_normal, -mpg_result.wi, mpg_light.t);
+                  if (isfinite_safe(area_to_solid) && area_to_solid > 0.0f) {
+                    pdf_light *= area_to_solid; /* MPG_FIX: match light pdf measure for MIS. */
+                  }
+                  else {
+                    pdf_light = 0.0f;
+                  }
+                }
+                if (!isfinite_safe(pdf_light) || pdf_light <= 0.0f) {
+                  pdf_light = 0.0f;
+                }
               }
+
+              const float denominator =
+                  pdf_mpg + weighted_bsdf_pdf + weighted_guided_pdf + pdf_light;
+              if (denominator > 0.0f && isfinite_safe(denominator)) {
+                const float mis_weight =
+                    pdf_mpg / denominator; /* MPG_FIX: balance MPG with competing proposals. */
+                const float visibility_weight = mpg_result.visibility * mis_weight / pdf_mpg;
+                bsdf_eval_mul(&mpg_bsdf_eval, light_eval * visibility_weight);
+
+                const Spectrum mpg_contribution =
+                    INTEGRATOR_STATE(state, path, throughput) * bsdf_eval_sum(&mpg_bsdf_eval);
+
+                surface_write_manifold_direct_light(kg,
+                                                    state,
+                                                    mpg_contribution,
+                                                    mpg_light.group,
+                                                    render_buffer);
+#      if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 1
+                if (manifold_options.relax_gate) {
+                  guiding_record_manifold_direct_light(kg, state, mpg_contribution, mis_weight);
+                }
 #      endif
+              }
             }
           }
         }

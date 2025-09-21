@@ -33,7 +33,12 @@ bool mpg_generate_seed(KernelGlobals kg,
 
   const bool gate_active = (options.gate_w > 0.0f) || (options.gate_kappa > 0.0f);
   if (gate_active) {
-    if (guide.rbar <= 1.0e-3f || guide.peak_weight < options.gate_w || guide.kappa < options.gate_kappa) {
+    const bool has_direction_relaxed = (guide.rbar > 1.0e-4f);
+    const bool has_direction_strict = (guide.rbar > 1.0e-3f);
+    const bool strict_gate = has_direction_strict && (guide.peak_weight >= options.gate_w) &&
+                             (guide.kappa >= options.gate_kappa);
+    const bool relaxed_gate = options.relax_gate && has_direction_relaxed;
+    if (!strict_gate && !relaxed_gate) {
       return false;
     }
   }

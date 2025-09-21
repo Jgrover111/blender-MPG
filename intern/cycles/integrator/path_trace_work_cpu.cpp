@@ -361,6 +361,7 @@ void PathTraceWorkCPU::guiding_init_kernel_globals(void *guiding_field,
 #  if PATH_GUIDING_LEVEL >= 4
     if (kg.opgl_surface_sampling_distribution) {
       kg.opgl_surface_sampling_distribution.reset();
+      kg.opgl_surface_sampling_distribution_ptr = nullptr; /* MPG_FIX: keep pointer mirror coherent. */
     }
     if (kg.opgl_volume_sampling_distribution) {
       kg.opgl_volume_sampling_distribution.reset();
@@ -369,6 +370,8 @@ void PathTraceWorkCPU::guiding_init_kernel_globals(void *guiding_field,
     if (field) {
       kg.opgl_surface_sampling_distribution =
           make_unique<openpgl::cpp::SurfaceSamplingDistribution>(field);
+      kg.opgl_surface_sampling_distribution_ptr =
+          kg.opgl_surface_sampling_distribution.get(); /* MPG_FIX: publish active distribution. */
       kg.opgl_volume_sampling_distribution = make_unique<openpgl::cpp::VolumeSamplingDistribution>(
           field);
     }

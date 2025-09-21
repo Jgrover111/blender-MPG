@@ -68,10 +68,10 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
-  float pdf = 0.0f;
-  if (!mpg_evaluate_pdf(kg, sd, bsdf, g, seed, solution, pdf) || pdf <= 0.0f) {
-    return result;
-  }
+  // float pdf = 0.0f;
+  // if (!mpg_evaluate_pdf(kg, sd, bsdf, g, seed, solution, pdf) || pdf <= 0.0f) {
+  //   return result;
+  // }
 
   LightSample light_sample = seed.light_sample;
   const float pdf_selection = light_sample.pdf_selection;
@@ -90,6 +90,16 @@ MpgResult mpg_try_connect(KernelGlobals kg,
                       solution.specular_point,
                       solution.specular_normal,
                       updated_path_flag);
+
+  float light_pdf_solid = light_sample.pdf;
+  if (pdf_selection != 0.0f)
+    light_pdf_solid *= pdf_selection;
+
+  float pdf = seed.seed_pdf * light_pdf_solid * solution.jacobian;
+
+  if (!isfinite_safe(pdf) || pdf <= 0.0f) {
+    return result;
+  }
 
   result.success = true;
   result.wi = solution.wi;
