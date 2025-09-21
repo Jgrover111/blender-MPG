@@ -575,6 +575,19 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       INTEGRATOR_STATE(state, guiding, use_surface_guiding))
   {
     if (kg->opgl_surface_sampling_distribution) {
+#      if !defined(__KERNEL_GPU__)
+      const bool guiding_distribution_available =
+          ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) != 0) &&
+          INTEGRATOR_STATE(state, guiding, use_surface_guiding);
+      bool guiding_distribution_reinitialized = false;
+
+      if (guiding_distribution_available) {
+        float guiding_seed = INTEGRATOR_STATE(state, guiding, sample_surface_guiding_rand);
+        guiding_distribution_reinitialized = guiding_ssd->Init(
+            guiding_guiding_field, guiding_point3f(sd->P), guiding_seed);
+      }
+#      endif
+
       const uint seed = hash_uint3(rng_state->rng_pixel,
                                    uint(rng_state->sample),
                                    rng_state->rng_offset);
@@ -588,6 +601,12 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       {
         manifold_guiding_ready = true;
       }
+
+#      if !defined(__KERNEL_GPU__)
+      if (guiding_distribution_reinitialized) {
+        guiding_ssd->ApplyCosineProduct(guiding_point3f(sd->N));
+      }
+#      endif
     }
   }
 
