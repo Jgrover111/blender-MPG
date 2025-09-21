@@ -567,27 +567,30 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   ccl_attr_maybe_unused const bool manifold_guiding_enabled =
       (kernel_data.integrator.manifold_guiding_enable != 0);
 #    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
-  const bool bsdf_is_delta = (CLOSURE_IS_BSDF_SINGULAR(sc->type) &&
-                              !CLOSURE_IS_RAY_PORTAL(sc->type));
+  const bool guiding_features_enabled =
+      ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) != 0);
+  const bool surface_guiding_active =
+      (guiding_features_enabled && INTEGRATOR_STATE(state, guiding, use_surface_guiding));
 
-  if (!bsdf_is_delta && manifold_guiding_enabled &&
-      (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) &&
-      INTEGRATOR_STATE(state, guiding, use_surface_guiding))
-  {
-    if (kg->opgl_surface_sampling_distribution) {
+  if (manifold_guiding_enabled && guiding_features_enabled && kg->opgl_surface_sampling_distribution) {
+    bool guiding_distribution_ready = false;
 #      if !defined(__KERNEL_GPU__)
-      const bool guiding_distribution_available =
-          ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) != 0) &&
-          INTEGRATOR_STATE(state, guiding, use_surface_guiding);
-      bool guiding_distribution_reinitialized = false;
+    if (surface_guiding_active) {
+      const float guiding_seed = INTEGRATOR_STATE(state, guiding, sample_surface_guiding_rand);
+      guiding_distribution_ready = guiding_surface_prepare_distribution(
+          kg, sd->P, sd->N, guiding_seed);
+    }
 
-      if (guiding_distribution_available) {
-        float guiding_seed = INTEGRATOR_STATE(state, guiding, sample_surface_guiding_rand);
-        guiding_distribution_reinitialized = guiding_ssd->Init(
-            guiding_guiding_field, guiding_point3f(sd->P), guiding_seed);
-      }
+    if (!guiding_distribution_ready) {
+      const float guiding_seed = path_state_rng_1D(kg, rng_state, PRNG_SURFACE_BSDF_GUIDING);
+      guiding_distribution_ready = guiding_surface_prepare_distribution(
+          kg, sd->P, sd->N, guiding_seed);
+    }
+#      else
+    (void)surface_guiding_active;
 #      endif
 
+    if (guiding_distribution_ready) {
       const uint seed = hash_uint3(rng_state->rng_pixel,
                                    uint(rng_state->sample),
                                    rng_state->rng_offset);
@@ -595,18 +598,28 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       if (pgl_estimate_summary(*kg->opgl_surface_sampling_distribution,
                                sd->Ng,
                                seed,
-                               manifold_summary) &&
-          manifold_summary.peak_weight >= kernel_data.integrator.manifold_gate_weight &&
-          manifold_summary.kappa >= kernel_data.integrator.manifold_gate_kappa)
+                               manifold_summary))
       {
-        manifold_guiding_ready = true;
-      }
+        const bool gate_pass =
+            (manifold_summary.peak_weight >= kernel_data.integrator.manifold_gate_weight) &&
+            (manifold_summary.kappa >= kernel_data.integrator.manifold_gate_kappa);
+        const bool has_direction_relaxed = (manifold_summary.rbar > 1.0e-4f);
+        const bool has_direction_strict = (manifold_summary.rbar > 1.0e-3f);
+        const int current_sample = INTEGRATOR_STATE(state, path, sample);
+        const int current_bounce = INTEGRATOR_STATE(state, path, bounce);
+        const int bootstrap_sample_limit = 32;
+        const int bootstrap_depth_limit = 2;
+        const int bootstrap_extended_limit = 128;
+        const bool bootstrap_window = (current_sample < bootstrap_sample_limit) ||
+                                      (current_bounce < bootstrap_depth_limit &&
+                                       current_sample < bootstrap_extended_limit);
+        const bool relax_gate = has_direction_relaxed && bootstrap_window && !gate_pass;
 
-#      if !defined(__KERNEL_GPU__)
-      if (guiding_distribution_reinitialized) {
-        guiding_ssd->ApplyCosineProduct(guiding_point3f(sd->N));
+        if ((gate_pass && has_direction_strict) || relax_gate) {
+          manifold_guiding_ready = true;
+          manifold_options.relax_gate = relax_gate;
+        }
       }
-#      endif
     }
   }
 
@@ -657,8 +670,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
             weighted_bsdf_pdf = unguided_pdf;
 
 #      if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
-            if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) &&
-                INTEGRATOR_STATE(state, guiding, use_surface_guiding))
+            if (surface_guiding_active)
             {
               const float guiding_sampling_prob = INTEGRATOR_STATE(
                   state, guiding, surface_guiding_sampling_prob);
@@ -691,6 +703,11 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                                   mpg_contribution,
                                                   mpg_light.group,
                                                   render_buffer);
+#      if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 1
+              if (manifold_options.relax_gate) {
+                guiding_record_manifold_direct_light(kg, state, mpg_contribution, mis_weight);
+              }
+#      endif
             }
           }
         }

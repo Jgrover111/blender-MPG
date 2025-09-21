@@ -22,6 +22,7 @@ struct MpgOptions {
   float gate_w = 0.35f;
   float gate_kappa = 40.0f;
   float angular_jitter = 0.02f;
+  bool relax_gate = false;
 };
 
 struct MpgResult {
