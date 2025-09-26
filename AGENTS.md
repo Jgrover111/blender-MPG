@@ -1,218 +1,228 @@
 # AGENTS.md — Cycles CPU Manifold Path Guiding (MPG)
 
-Purpose: This document tells any code-generation agent exactly what to implement in Blender Cycles (CPU-only) to add Manifold Path Guiding (MPG) and hook it into existing OpenPGL path guiding, without leaving placeholders or confusing scaffolding.
+**Purpose**
+Make the Cycles CPU MPG implementation **match the Mitsuba reference logic** (repo: `extern/mpg_ref`) for chains up to **2 specular bounces**: `D → S → L` and `D → S → S → L`. Avoid placeholders; align PDFs, measures, order-of-operations, and MIS exactly.
 
-AGENTS
+---
 
-0) Non-negotiables
+## 0) Non‑negotiables
 
-CPU only. Do not touch CUDA/HIP/Metal codepaths in this task.
+* **CPU only.** Do not touch CUDA/HIP/Metal.
+* **No volumes** in v1; skip if inside/crossing media.
+* **No placeholders.** Every path fully implemented or feature gated off.
+* **Unbiasedness preserved.** MPG is an *additional* proposal, combined by MIS with existing proposals (BSDF, NEE, OpenPGL) **in the same measure**.
+* **Minimal blast radius.** Keep all new code in `intern/cycles/manifold/`. Only surgical touches in integrator/UI/build.
+* **No OpenPGL internals.** Only public `sample()`/`pdf()` for the summary estimator.
 
-No volumes v1. Skip when inside or crossing volumetric media.
+---
 
-No placeholders / TODO stubs. Every added function must be fully implemented or the feature gated off. Do not add “WIP” paths, dead flags, or empty classes.
+## 1) Goal (single sentence)
 
-Unbiasedness preserved. MPG is an extra sampling proposal; combine via MIS with existing BSDF/NEE/OpenPGL proposals using PDFs in the same measure (solid angle at the shading point).
+Implement MPG for **1–2 specular bounces** at surface hits in Cycles and MIS‑combine its contribution with BSDF + NEE + OpenPGL, with OpenPGL‑driven gating.
 
-Minimal blast radius. New code must live under a new folder (intern/cycles/manifold/) and integrate through well-scoped calls. Do not refactor unrelated systems.
+---
 
-Do not rely on OpenPGL internals. The seeding/gating “guide summary” must be estimated from the public OpenPGL sampler/pdf; do not include or depend on private headers or internal lobes.
+## 2) Scope (v1)
 
-1) Goal (single sentence)
+* **Chains:** `D→S→L` and `D→S→S→L`.
+* **Materials:** ideal reflection/refraction on meshes (ignore bump/normal map perturbs in the solver).
+* **Lights:** area, sun/distant, environment (sun‑disc OK).
+* **Where:** CPU surface integrator only.
+* **OpenPGL usage:** sampling‑based **GuideSummary** at the hit (dominant dir, peak mass in cone, κ estimate) for *gating & seeding*.
+* **Training:** optionally feed successful MPG samples back to OpenPGL via existing API.
 
-Implement MPG for 1–2 specular bounces (reflection/refraction) at CPU surface hits in Cycles and MIS-combine its contribution with BSDF + NEE + OpenPGL, with an estimated OpenPGL-driven gate to avoid wasted attempts.
+Out of scope: volumes, rough microfacets, GPU, longer chains, SMS/VCM/VM.
 
-2) Scope (v1)
+---
 
-Specular chain length: up to 2 (D→S→L, D→S→S→L).
+## 3) New module & public API
 
-Materials supported: perfect reflection & refraction on triangle meshes with smooth normals (ignore bump/normal maps inside the solver).
+Create `intern/cycles/manifold/` (names may already exist; update in place):
 
-Lights supported: Sun, area lights, and environment maps with small solid angle (treat env sun as small disc).
+* `mpg.h/.cpp` – high‑level **try\_connect** entry (returns direction, visibility, pdf).
+* `mpg_solve.h/.cpp` – Newton/trust‑region solver for `S` and `S+S` constraints (Snell/reflect). Output includes **J\_total** (geometric Jacobian) and shadowing.
+* `mpg_pdf.h` – helper to compose final technique pdf (if not done inline in `mpg.cpp`).
+* `mpg_seed.h/.cpp` – seed direction/params from **GuideSummary**; returns **seed\_pdf** in its own native measure.
+* `mpg_pgl_summary.h/.cpp` – sampling‑based OpenPGL **GuideSummary** estimator (dominant dir, peak mass, κ).
 
-Where it runs: CPU surface shading path only.
+### API sketch
 
-What it uses from OpenPGL: a GuideSummary estimated from samples at the hit (dominant direction, “peak mass” in a cone, concentration κ estimate) for gating + seeding. (No internal getters.)
-
-What it records back: optional training sample from successful MPG direction (pos, dir, weight) via existing guiding buffer API.
-
-Out of scope v1: volumes, microfacet roughness chains, GPU backends, long multi-bounce chains, SMS/VCM/VM, UI for per-material overrides.
-
-3) New module (files and responsibilities)
-
-Create intern/cycles/manifold/ with these files:
-
-mpg.h / mpg.cpp — Public API for a single attempt at a manifold connection from shading point D.
-
-mpg_solve.h / mpg_solve.cpp — Newton/trust-region solver for 1–2 specular bounces (Snell/reflect constraints, residuals, Jacobians, line search).
-
-mpg_pdf.h — Computes the proposal PDF w.r.t. solid angle at D (includes change-of-variables Jacobian).
-
-mpg_seed.h / mpg_seed.cpp — Seeding logic using GuideSummary (endpoint choice + initial direction); early reject if no candidate specular is hit.
-
-NEW: mpg_pgl_summary.h / mpg_pgl_summary.cpp — Sampling-based estimator that computes GuideSummary from the public OpenPGL distribution at the surface hit.
-
-Public API (exact signature shape; adapt types to the tree)
-namespace ccl {
-
+```cpp
 struct MpgOptions {
-int   max_bounces = 1;        // 1 or 2
-int   max_iters   = 6;        // solver steps
-float gate_w      = 0.35f;    // peak mass threshold in a cone
-float gate_kappa  = 40.0f;    // sharpness threshold
-float angular_jitter = 0.02f; // radians for seed jitter
+  int   max_bounces = 2;        // 1 or 2
+  int   max_iters   = 6;
+  float gate_w      = 0.35f;    // peak mass threshold [0..1]
+  float gate_kappa  = 40.0f;    // vMF concentration threshold
+  float angular_jitter = 0.02f; // rad; clamp >= 0.0087 (~0.5°)
 };
 
-struct GuideSummary {
-float3 mean_dir;   // world-space dominant (mean resultant) direction
-float  peak_weight; // mass within a small cone about mean_dir (fraction 0..1)
-float  kappa;       // vMF concentration estimate from Rbar
-float  rbar;        // mean resultant length (0..1) for diagnostics
-};
+struct GuideSummary { float3 mean_dir; float peak_weight, kappa, rbar; };
 
-struct MpgResult {
-bool   success = false;
-float3 wi;         // direction to sample at D (world)
-float  pdf;        // solid-angle pdf at D for wi
-float  visibility; // 0..1; shadow term checked during solve
-};
+struct MpgResult { bool success; float3 wi; float pdf; float visibility; };
 
-MpgResult mpg_try_connect(const ShadingPoint& D,
-const ClosureBSDF& bsdf,
-const Lights& lights,
-const GuideSummary& g,
-const MpgOptions& opt,
-RNG& rng);
+MpgResult mpg_try_connect(/* shading point D, bsdf, lights, */
+                          const GuideSummary& g,
+                          const MpgOptions& opt,
+                          RNG& rng);
 
-/* Estimate GuideSummary from OpenPGL public sampler/pdf (no private headers). */
-bool pgl_estimate_summary(const OpenPGLSurfaceDistribution& dist_world,
-const float3& Ng_world, /* geometric normal for hemisphere */
-RNG& rng,
-GuideSummary& out,
-int n_samples = 128,
-float cone_half_angle_rad = radians(10.0f));
+bool pgl_estimate_summary(/* OpenPGL dist at D, Ng, */ RNG&, GuideSummary&,
+                          int n = 128, float cone = radians(10.0f));
+```
 
-} // namespace ccl
+---
 
+## 4) **Parity rules with Mitsuba** (critical)
 
-Estimator details (must implement):
+**Mirror the reference in these five aspects:**
 
-Draw n_samples directions {ω_i} from dist_world (respect hemisphere via Ng_world if needed).
+### A. **Order of operations** (must match)
 
-Compute mean resultant m = (1/N) * Σ ω_i, out.mean_dir = normalize(m), and Rbar = ||m||.
+1. Build **seed** (dir/params) and **seed\_pdf** using GuideSummary.
+2. Sample/choose light endpoint (record **pdf\_selection**); get light sample in *its native measure*.
+3. **Solve** manifold for the chain (`S` or `S+S`), producing the specular points & **J\_total** and a **shadow term**.
+4. **Update the light sample to the solved specular point** (position/normal) via the usual light update function.
+5. **Compose the technique PDF** (see C below) *after* the update.
+6. Evaluate BSDF & light emission, do visibility, then **MIS & accumulate**.
 
-Estimate κ from Rbar using a closed-form approximation (e.g., κ ≈ Rbar*(3 - Rbar*Rbar)/(1 - Rbar*Rbar)), then clamp to [0, 1e4]. Optionally do one Newton step on A(κ)=Rbar for refinement.
+### B. **Measures** (must match)
 
-Compute peak mass as the fraction of samples with angle(ω_i, out.mean_dir) ≤ cone_half_angle_rad. Set out.peak_weight = count/N.
+* All MIS PDFs compared in **solid angle at the receiver D**.
+* `ls.pdf` *after* `light_sample_update()` is solid angle **at the specular point**. Do **not** re‑introduce cos/d² factors.
+* Multiply by **J\_total** to convert through the specular chain to **receiver solid angle**.
+* The **NEE pdf** in the MIS denominator is the *standard* NEE pdf at **D** (pre‑MPG), **not** the updated light pdf.
 
-If Rbar < 1e-3 (nearly uniform), return false (no reliable guidance).
+### C. **Technique PDF formula** (identical to reference)
 
-4) Integrator hook (CPU)
+For either chain (`S` or `S+S`):
 
-At the CPU surface shading site where BSDF and OpenPGL guided proposals are handled:
+```
+// Solid-angle pdf at D for the MPG proposal
+p_mpg(D, ω) = p_seed * p_light(spec_pt) * J_total
+```
 
-Estimate GuideSummary via pgl_estimate_summary(...) from the public OpenPGL distribution at the hit. Do not call or add internal getters.
+Where:
 
-Gate:
+* `p_seed` = seed sampler pdf (cone/area) — clamp to `[1e-16, +inf)`.
+* `p_light(spec_pt)` = light solid‑angle pdf **after** moving the light sample to the solved specular point (restore `pdf_selection` if it was factored out).
+* `J_total` = solver’s change‑of‑variables Jacobian for the solved chain (product over specular surfaces). **Apply exactly once.**
 
-Skip MPG unless peak_weight >= gate_w and kappa >= gate_kappa and BSDF is non-delta.
+**Never** multiply cosines or distance² here; they are already part of the light sampling measure and BSDF evaluation.
 
-Attempt mpg_try_connect. On success:
+### D. **MIS weight** (3–4 way balance heuristic)
 
-Evaluate f = bsdf_eval(D, r.wi), cosNI = max(dot(N, r.wi), 0).
+Compare proposals present at this bounce (all solid angle @ D):
 
-Contribution: throughput * f * cosNI * r.visibility / r.pdf.
+* `p_bsdf` (BSDF at D toward `wi`),
+* `p_guided` (OpenPGL guided BSDF, if active),
+* `p_nee` (standard NEE at D),
+* `p_mpg` (as above).
 
-Compute MIS with all active proposals at this bounce (same measure, solid angle at D):
+```
+w_mpg = p_mpg / (p_bsdf + p_guided + p_nee + p_mpg)
+```
 
-p_bsdf, p_guided (OpenPGL), p_nee (if attempted), p_mpg = r.pdf.
+Use **balance** heuristic (β=1). Do not mix updated‑light pdf in `p_nee`.
 
-Weight: w_mpg = p_mpg / (p_bsdf + p_guided + p_nee + p_mpg).
+### E. **Accumulation** (same plumbing as NEE)
 
-Accumulate w_mpg * contribution.
+```
+contrib = throughput * bsdf_eval(D, wi) * light_eval(updated_ls) * visibility
+contrib *= w_mpg / p_mpg;
+accumulate_light(contrib);
+```
 
-(Optional) Call guiding training hook to add (D.pos, r.wi, weight=luminance(contribution)).
+---
 
-MPG is additive and gated; do not alter other proposals.
+## 5) Chain specifics
 
-5) Scene flags & UI
+* **D→S→L:** solver returns one specular point; `J_total = J_S`.
+* **D→S→S→L:** two specular points; `J_total = J_S1 * J_S2` from the solver. No extra geometric terms; the BSDFs at D are evaluated as usual.
+* Use **receiver non‑singular labels** (do not mark D as delta). The specular surfaces in the chain are delta constraints handled by the solver/Jacobian.
 
-Add scene options (defaults shown):
+---
 
-manifold_guiding_enable = false
+## 6) Gating & seeding (OpenPGL‑driven)
 
-manifold_max_bounces = 1
+* Compute `GuideSummary` via `pgl_estimate_summary()` using public OpenPGL sampling/pdf.
+* **Gate:** skip MPG unless `peak_weight ≥ gate_w` **and** `kappa ≥ gate_kappa` **and** BSDF at D is non‑delta.
+* **Seeding:** jitter within a cone around `mean_dir` (half‑angle = `max(angular_jitter, 0.0087f)`). Compute `p_seed = 1 / (2π (1 − cos θmax))` (extend with area terms if you seed more parameters). Ensure `p_seed ≥ 1e-16`.
 
-manifold_iters = 6
+---
 
-manifold_gate_weight = 0.35
+## 7) Integrator hook (CPU)
 
-manifold_gate_kappa = 40.0
+At the surface shading site (same place as OpenPGL & NEE):
 
-(internal/advanced) manifold_summary_samples = 128, manifold_summary_cone_deg = 10.0 (optional; if not exposed, keep as constants in the estimator)
+1. Build `GuideSummary`. If gate fails, **bail early**.
+2. Call `mpg_try_connect(...)` (attempt once per bounce). If success:
 
-Expose under Sampling ▸ Guiding as “Manifold Path Guiding (CPU, Experimental)”. When disabled, no codepath changes must execute.
+    * **Do not** alter other proposals; MPG is additive.
+    * Build `p_bsdf`, `p_guided` (if used), `p_nee` (pre‑MPG) and use `r.pdf` as `p_mpg`.
+    * Compute `w_mpg` with balance heuristic, then accumulate as in §4E.
+3. Optionally push training sample to OpenPGL.
 
-6) Build / CMake
+---
 
-Add intern/cycles/manifold/*.cpp to the Cycles CPU target only.
+## 8) Build & UI
 
-Introduce WITH_CYCLES_MANIFOLD CMake option and guard code/UI with it.
+* CMake option: `WITH_CYCLES_MANIFOLD` (CPU target only). Guard kernel/UI code.
+* Scene options (defaults):
 
-Do not alter GPU builds. Do not add global compiler flags that affect other 3rd-party libs.
+    * `manifold_guiding_enable=false`
+    * `manifold_max_bounces=2`
+    * `manifold_iters=6`
+    * `manifold_gate_weight=0.35`
+    * `manifold_gate_kappa=40.0`
+    * (internal) `manifold_summary_samples=128`, `manifold_summary_cone_deg=10`
+* UI: Sampling ▸ Guiding ▸ **Manifold Path Guiding (CPU, Experimental)**.
 
-7) Acceptance criteria (Definition of Done)
+---
 
-Functional
+## 9) Reference mapping (for agents to compare)
 
-Cornell + glass slab + Sun: at 64 spp, MPG ON shows a clear caustic vs OFF. At 16k spp, MPG matches reference within 1% RMSE (no bias).
+Create `docs/MPG_COMPARE.yml` to map our functions to reference ones and to drive checks:
 
-Env “sun pixel” + pool bottom: MPG ON reduces salt-and-pepper speckle at equal spp.
+```yaml
+pairs:
+  - ours: intern/cycles/manifold/mpg_seed.cpp::mpg_build_seed
+    ref:  extern/mpg_ref/src/.../seed.cpp::build_seed
+  - ours: intern/cycles/manifold/mpg_solve.cpp::mpg_solve_connect
+    ref:  extern/mpg_ref/src/.../solve.cpp::connect
+  - ours: intern/cycles/manifold/mpg.cpp::compose_pdf_after_update
+    ref:  extern/mpg_ref/src/.../integrator.cpp::compose_pdf
+  - ours: intern/cycles/kernel/integrator/shade_surface.h::MPG block
+    ref:  extern/mpg_ref/src/.../integrator.cpp::direct_mpg_sample
+checklist:
+  - Light pdf evaluated **after** moving light sample? (Yes)
+  - `p_mpg = p_seed * p_light(spec_pt) * J_total` only once? (Yes)
+  - MIS denominator uses **NEE at D**, not updated light pdf? (Yes)
+  - All pdfs in **solid angle @ D**? (Yes)
+  - No extra cos/d² or double Jacobian? (Yes)
+```
 
-Non-caustic interior: with MPG enabled but gate unmet, results equal (within noise) and render time within ±5% of baseline.
+---
 
-Engineering
+## 10) Acceptance criteria
 
-Builds pass on Windows/MSVC and Linux/Clang/GCC for CPU device.
+**Functional**
 
-Zero new warnings in touched files at default warning level.
+* Cornell slab caustic: MPG ON shows caustic at 64 spp; at 16k spp matches baseline within 1% RMSE (unbiased).
+* Env sun caustic: fewer bright speckles at equal spp.
+* Non‑caustic: MPG gated off → images/time \~ unchanged.
 
-No TODO/FIXME placeholders. No unused functions. No dead flags.
+**Engineering**
 
-Code style follows Cycles conventions; functions documented with brief doxygen comments.
+* Builds on Win/Linux CPU; no new warnings; no dead code.
 
-Safety
+**Safety**
 
-If solver fails or returns pdf<=0, MPG contribution is skipped without affecting other proposals.
+* If solve fails or `pdf≤0`, skip MPG silently.
+* Clamp/validate all pdfs; guard against NaN/Inf.
 
-All PDFs measured in solid angle at D; MIS uses balance heuristic consistently.
+---
 
-8) Guardrails
+## 11) Debug checklist (when images look wrong)
 
-Do not refactor existing integrator architecture beyond inserting the MPG callsite and wiring options.
-
-Do not modify or include OpenPGL internals; use only public sample/pdf calls for the summary.
-
-Do not add experimental features (volumes, rough microfacets, long chains). Defer with a clear comment in the README, not as code stubs.
-
-If an exact type or file path differs, search by symbol (e.g., “openpgl”, “guiding”, “shade_surface”, “bsdf_eval”) and adapt—do not leave partial edits.
-
-9) Test plan (manual)
-
-Build Blender with WITH_CYCLES_MANIFOLD=ON (CPU device).
-
-Render the three acceptance scenes (provided or simple to construct).
-
-Compare images (RMSE or eyeball) at low spp (variance) and high spp (bias check).
-
-Toggle MPG on/off and move thresholds to validate gating behavior.
-
-10) README note for the module
-
-Create intern/cycles/manifold/README.md summarizing:
-
-What MPG does, v1 limitations, PDFs/MIS measure, gating thresholds.
-
-Sampling-based OpenPGL summary approach (no internal getters).
-
-How to run the acceptance scenes.
+* Log once/frame: `p_seed`, `p_light(updated)`, `J_total`, `p_mpg`, `p_bsdf`, `p_nee`, `w_mpg`.
+* If rare bright pixels → `p_mpg` too small or wrong measure; re‑check §4B–C and MIS denominator source.
+* If MPG has no effect → block never accumulates, or `p_mpg` dwarfed by others (gating/MIS).
