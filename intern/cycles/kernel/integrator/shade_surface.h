@@ -684,16 +684,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 
             const float pdf_mpg = mpg_result.pdf;
             if (isfinite_safe(pdf_mpg) && pdf_mpg > 1.0e-12f) {
-              float pdf_light = 0.0f;
-              if (kernel_data.integrator.use_direct_light != 0) {
-                pdf_light = mpg_result.nee_pdf;  // MPG_FIX: use receiver-measure NEE pdf for MIS balance.
-                if (!isfinite_safe(pdf_light) || pdf_light <= 0.0f) {
-                  pdf_light = 0.0f;
-                }
-              }
-
-              const float denominator =
-                  pdf_mpg + weighted_bsdf_pdf + weighted_guided_pdf + pdf_light;
+              const float denominator = pdf_mpg + weighted_bsdf_pdf + weighted_guided_pdf;
               if (denominator > 0.0f && isfinite_safe(denominator)) {
                 const float mis_weight =
                     pdf_mpg / denominator; /* MPG_FIX: balance MPG with competing proposals. */

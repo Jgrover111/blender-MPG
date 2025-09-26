@@ -68,10 +68,9 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
   light_sample_update(
       kg, &light, solution.specular_point, solution.specular_normal, updated_path_flag);
 
-  float light_pdf_solid = light.pdf;
-  if (pdf_selection != 0.0f) {
-    light_pdf_solid *= pdf_selection;
-  }
+  /* `light_sample_update()` already folded in the selection probability. Re-applying it would
+   * shrink the MPG technique pdf and bias MIS towards the other proposals. */
+  const float light_pdf_solid = light.pdf;
   if (!isfinite_safe(light_pdf_solid) || light_pdf_solid <= 0.0f) {
     return false;
   }

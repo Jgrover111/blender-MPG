@@ -76,7 +76,6 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   LightSample light_sample = seed.light_sample;
   const float pdf_selection = light_sample.pdf_selection;
-  float nee_pdf = seed.light_pdf_receiver;
   if (pdf_selection != 0.0f) {
     /* `light_sample_update` expects `ls->pdf` without the selection term. */
     light_sample.pdf /= pdf_selection;
@@ -93,29 +92,16 @@ MpgResult mpg_try_connect(KernelGlobals kg,
                       solution.specular_normal,
                       updated_path_flag);
 
-  float light_pdf_solid = light_sample.pdf;
-  if (pdf_selection != 0.0f)
-    light_pdf_solid *= pdf_selection;
+  /* `light_sample_update()` re-applies the selection term, so `light_sample.pdf` already
+   * contains the probability of picking this emitter. Do not multiply by it again or the
+   * MPG technique PDF gets scaled by an extra factor of `pdf_selection`, driving the MIS
+   * weight towards zero. */
+  const float light_pdf_solid = light_sample.pdf;
 
   float pdf = seed.seed_pdf * light_pdf_solid * solution.jacobian;
 
   if (!isfinite_safe(pdf) || pdf <= 0.0f) {
     return result;
-  }
-
-  if (nee_pdf > 0.0f) {
-    if (seed.light_sample.type == LIGHT_AREA || seed.light_sample.type == LIGHT_TRIANGLE) {
-      const float3 light_normal = make_float3(
-          seed.light_sample.Ng.x, seed.light_sample.Ng.y, seed.light_sample.Ng.z);
-      const float area_to_solid = light_pdf_area_to_solid_angle(
-          light_normal, -seed.light_sample.D, seed.light_sample.t);
-      if (isfinite_safe(area_to_solid) && area_to_solid > 0.0f) {
-        nee_pdf *= area_to_solid;  // MPG_FIX: convert NEE pdf to solid angle at the receiver.
-      }
-      else {
-        nee_pdf = 0.0f;
-      }
-    }
   }
 
   result.success = true;
@@ -124,7 +110,6 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.visibility = solution.visibility;
   result.spec_weight = solution.spec_weight;
   result.light = light_sample;
-  result.nee_pdf = nee_pdf;  // MPG_FIX: carry receiver-space light pdf for MIS balance.
   return result;
 }
 

@@ -32,7 +32,6 @@ struct MpgResult {
   float visibility = 0.0f;
   Spectrum spec_weight = zero_spectrum();
   LightSample light = {};
-  float nee_pdf = 0.0f;
 };
 
 struct MpgSeedRay;
