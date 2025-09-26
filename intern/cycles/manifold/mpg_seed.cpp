@@ -121,6 +121,8 @@ bool mpg_generate_seed(KernelGlobals kg,
   seed.direction = seed_direction;
   seed.seed_pdf = seed_pdf;
   seed.light_sample = light_sample;
+  seed.light_pdf_receiver = light_sample.pdf;  // MPG_FIX: preserve receiver-measure light pdf for MIS.
+  seed.path_flag = path_flag;
   const float light_distance = (light_sample.t == FLT_MAX) ? 1.0e6f : light_sample.t;
   seed.light_sample.P = sd.P + light_sample.D * light_distance;
 

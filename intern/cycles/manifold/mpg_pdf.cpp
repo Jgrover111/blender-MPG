@@ -5,6 +5,8 @@
 #include "manifold/mpg_pdf.h"
 
 #include "kernel/light/common.h"
+#include "kernel/light/sample.h"
+#include "kernel/types.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -52,20 +54,26 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
     return false;
   }
 
-  float light_pdf_solid = seed.light_sample.pdf;
-  if (!isfinite_safe(light_pdf_solid) || light_pdf_solid <= 0.0f) {
-    return false;
+  LightSample light = seed.light_sample;
+  const float pdf_selection = light.pdf_selection;
+  if (pdf_selection != 0.0f) {
+    light.pdf /= pdf_selection;
   }
 
-  if (seed.light_sample.type == LIGHT_AREA || seed.light_sample.type == LIGHT_TRIANGLE) {
-    const float3 light_normal = make_float3(
-        seed.light_sample.Ng.x, seed.light_sample.Ng.y, seed.light_sample.Ng.z);
-    const float area_to_solid = light_pdf_area_to_solid_angle(
-        light_normal, -solution.dir_sl, solution.distance_sl);
-    if (!isfinite_safe(area_to_solid) || area_to_solid <= 0.0f) {
-      return false;
-    }
-    light_pdf_solid *= area_to_solid; /* MPG_FIX: convert emitter pdf into solid angle at receiver. */
+  uint32_t updated_path_flag = seed.path_flag;
+  if (solution.is_refraction) {
+    updated_path_flag |= PATH_RAY_MIS_HAD_TRANSMISSION;
+  }
+
+  light_sample_update(
+      kg, &light, solution.specular_point, solution.specular_normal, updated_path_flag);
+
+  float light_pdf_solid = light.pdf;
+  if (pdf_selection != 0.0f) {
+    light_pdf_solid *= pdf_selection;
+  }
+  if (!isfinite_safe(light_pdf_solid) || light_pdf_solid <= 0.0f) {
+    return false;
   }
 
   /* Compose the solid-angle pdf used in MIS with BSDF/guided/NEE:

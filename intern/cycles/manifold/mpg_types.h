@@ -8,6 +8,8 @@
 
 #include "util/math.h"
 
+#include <cstdint>
+
 CCL_NAMESPACE_BEGIN
 
 struct ShadingPoint {
@@ -22,6 +24,8 @@ struct MpgSeedRay {
   float3 direction = zero_float3();
   float seed_pdf = 0.0f;
   LightSample light_sample = {};
+  float light_pdf_receiver = 0.0f;
+  uint32_t path_flag = 0;
   int object = -1;
   int prim = -1;
   float bary_u = 0.0f;

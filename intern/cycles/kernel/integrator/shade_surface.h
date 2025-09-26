@@ -686,19 +686,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
             if (isfinite_safe(pdf_mpg) && pdf_mpg > 1.0e-12f) {
               float pdf_light = 0.0f;
               if (kernel_data.integrator.use_direct_light != 0) {
-                pdf_light = mpg_light.pdf;
-                if (mpg_light.type == LIGHT_AREA || mpg_light.type == LIGHT_TRIANGLE) {
-                  const float3 light_normal = make_float3(
-                      mpg_light.Ng.x, mpg_light.Ng.y, mpg_light.Ng.z);
-                  const float area_to_solid = light_pdf_area_to_solid_angle(
-                      light_normal, -mpg_result.wi, mpg_light.t);
-                  if (isfinite_safe(area_to_solid) && area_to_solid > 0.0f) {
-                    pdf_light *= area_to_solid; /* MPG_FIX: match light pdf measure for MIS. */
-                  }
-                  else {
-                    pdf_light = 0.0f;
-                  }
-                }
+                pdf_light = mpg_result.nee_pdf;  // MPG_FIX: use receiver-measure NEE pdf for MIS balance.
                 if (!isfinite_safe(pdf_light) || pdf_light <= 0.0f) {
                   pdf_light = 0.0f;
                 }
