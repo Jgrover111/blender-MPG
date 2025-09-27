@@ -348,12 +348,7 @@ params = SpecularParameters();
       continue;
     }
 
-    const bool closure_is_refraction = CLOSURE_IS_REFRACTION(closure->type) ||
-                                       CLOSURE_IS_GLASS(closure->type);
-    const bool closure_is_reflection = (closure->type == CLOSURE_BSDF_MICROFACET_GGX_ID ||
-                                        closure->type == CLOSURE_BSDF_MICROFACET_BECKMANN_ID ||
-                                        closure->type == CLOSURE_BSDF_MICROFACET_MULTI_GGX_ID);
-    if (!(closure_is_refraction || closure_is_reflection)) {
+    if (!CLOSURE_IS_BSDF_MICROFACET(closure->type)) {
       continue;
     }
 
@@ -362,6 +357,9 @@ params = SpecularParameters();
     if (roughness_sq > BSDF_ROUGHNESS_SQ_THRESH) {
       continue;
     }
+
+    const bool closure_is_refraction = CLOSURE_IS_REFRACTION(closure->type) ||
+                                       CLOSURE_IS_GLASS(closure->type);
 
     if (closure_is_refraction) {
       refraction_microfacet = microfacet;
