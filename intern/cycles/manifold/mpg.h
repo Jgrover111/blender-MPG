@@ -35,6 +35,8 @@ struct MpgResult {
   float nee_pdf = 0.0f;
   float visibility = 0.0f;
   float jacobian_total = 0.0f;
+  float seed_pdf = 0.0f;
+  float light_pdf = 0.0f;
   Spectrum spec_weight = zero_spectrum();
   LightSample light = {};
   int specular_vertex_count = 0;

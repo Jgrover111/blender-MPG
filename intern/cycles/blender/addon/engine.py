@@ -286,6 +286,15 @@ def list_render_passes(scene, srl):
         yield ("Guiding Probability", "X", 'VALUE')
         yield ("Guiding Average Roughness", "X", 'VALUE')
 
+        if with_manifold_path_guiding():
+            yield ("MPG Summary", "XYZ", 'VECTOR')
+            yield ("MPG Gate Flags", "XYZ", 'VECTOR')
+            yield ("MPG Attempt", "XYZ", 'VECTOR')
+            yield ("MPG PDF Factors", "XYZ", 'VECTOR')
+            yield ("MPG Competing PDFs", "XYZ", 'VECTOR')
+            yield ("MPG MIS", "XYZ", 'VECTOR')
+            yield ("MPG Contribution", "RGB", 'COLOR')
+
 
 def register_passes(engine, scene, view_layer):
     for name, channelids, channeltype in list_render_passes(scene, view_layer):

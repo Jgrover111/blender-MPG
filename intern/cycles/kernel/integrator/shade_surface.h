@@ -112,6 +112,179 @@ ccl_device_inline void surface_write_manifold_direct_light(KernelGlobals kg,
   }
 #endif
 }
+
+#  ifdef WITH_CYCLES_DEBUG
+ccl_device_inline void surface_write_manifold_debug_summary(KernelGlobals kg,
+                                                           IntegratorState state,
+                                                           const GuideSummary &summary,
+                                                           const bool summary_available,
+                                                           const bool gate_pass,
+                                                           const bool relax_gate,
+                                                           ccl_global float *ccl_restrict
+                                                               render_buffer)
+{
+#    ifdef __PASSES__
+  if (kernel_data.film.pass_manifold_summary == PASS_UNUSED &&
+      kernel_data.film.pass_manifold_gate == PASS_UNUSED)
+  {
+    return;
+  }
+
+  const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+  if (path_flag & PATH_RAY_SHADOW_CATCHER_PASS) {
+    return;
+  }
+
+  ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
+
+  if (kernel_data.film.pass_manifold_summary != PASS_UNUSED) {
+    const float3 summary_values = make_float3(
+        summary.peak_weight, summary.kappa, summary.rbar);
+    film_write_pass_float3(buffer + kernel_data.film.pass_manifold_summary, summary_values);
+  }
+
+  if (kernel_data.film.pass_manifold_gate != PASS_UNUSED) {
+    const float3 gate_values = make_float3(summary_available ? 1.0f : 0.0f,
+                                           gate_pass ? 1.0f : 0.0f,
+                                           relax_gate ? 1.0f : 0.0f);
+    film_write_pass_float3(buffer + kernel_data.film.pass_manifold_gate, gate_values);
+  }
+#    else
+  UNUSED_VARS(kg, state, summary, summary_available, gate_pass, relax_gate, render_buffer);
+#    endif
+}
+
+ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
+                                                            IntegratorState state,
+                                                            const bool attempted,
+                                                            const bool success,
+                                                            const float visibility,
+                                                            const float seed_pdf,
+                                                            const float light_pdf,
+                                                            const float jacobian,
+                                                            const float pdf_mpg,
+                                                            const float weighted_bsdf_pdf,
+                                                            const float weighted_guided_pdf,
+                                                            const float weighted_nee_pdf,
+                                                            const float mis_denominator,
+                                                            const float mis_weight,
+                                                            const Spectrum &contribution,
+                                                            ccl_global float *ccl_restrict
+                                                                render_buffer)
+{
+#    ifdef __PASSES__
+  if (kernel_data.film.pass_manifold_attempt == PASS_UNUSED &&
+      kernel_data.film.pass_manifold_pdf_factors == PASS_UNUSED &&
+      kernel_data.film.pass_manifold_competing_pdfs == PASS_UNUSED &&
+      kernel_data.film.pass_manifold_mis == PASS_UNUSED &&
+      kernel_data.film.pass_manifold_contribution == PASS_UNUSED)
+  {
+    return;
+  }
+
+  const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+  if (path_flag & PATH_RAY_SHADOW_CATCHER_PASS) {
+    return;
+  }
+
+  ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
+
+  if (kernel_data.film.pass_manifold_attempt != PASS_UNUSED) {
+    const float3 attempt_values = make_float3(attempted ? 1.0f : 0.0f,
+                                              success ? 1.0f : 0.0f,
+                                              visibility);
+    film_write_pass_float3(buffer + kernel_data.film.pass_manifold_attempt, attempt_values);
+  }
+
+  if (kernel_data.film.pass_manifold_pdf_factors != PASS_UNUSED) {
+    const float3 factor_values = make_float3(seed_pdf, light_pdf, jacobian);
+    film_write_pass_float3(buffer + kernel_data.film.pass_manifold_pdf_factors, factor_values);
+  }
+
+  if (kernel_data.film.pass_manifold_competing_pdfs != PASS_UNUSED) {
+    const float3 competing_values = make_float3(
+        weighted_bsdf_pdf, weighted_guided_pdf, weighted_nee_pdf);
+    film_write_pass_float3(buffer + kernel_data.film.pass_manifold_competing_pdfs,
+                           competing_values);
+  }
+
+  if (kernel_data.film.pass_manifold_mis != PASS_UNUSED) {
+    const float3 mis_values = make_float3(pdf_mpg, mis_denominator, mis_weight);
+    film_write_pass_float3(buffer + kernel_data.film.pass_manifold_mis, mis_values);
+  }
+
+  if (kernel_data.film.pass_manifold_contribution != PASS_UNUSED) {
+    film_write_pass_spectrum(buffer + kernel_data.film.pass_manifold_contribution,
+                             contribution);
+  }
+#    else
+  UNUSED_VARS(kg,
+              state,
+              attempted,
+              success,
+              visibility,
+              seed_pdf,
+              light_pdf,
+              jacobian,
+              pdf_mpg,
+              weighted_bsdf_pdf,
+              weighted_guided_pdf,
+              weighted_nee_pdf,
+              mis_denominator,
+              mis_weight,
+              contribution,
+              render_buffer);
+#    endif
+}
+#  else
+ccl_device_inline void surface_write_manifold_debug_summary(KernelGlobals kg,
+                                                           IntegratorState state,
+                                                           const GuideSummary &summary,
+                                                           const bool summary_available,
+                                                           const bool gate_pass,
+                                                           const bool relax_gate,
+                                                           ccl_global float *ccl_restrict
+                                                               render_buffer)
+{
+  UNUSED_VARS(kg, state, summary, summary_available, gate_pass, relax_gate, render_buffer);
+}
+
+ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
+                                                            IntegratorState state,
+                                                            const bool attempted,
+                                                            const bool success,
+                                                            const float visibility,
+                                                            const float seed_pdf,
+                                                            const float light_pdf,
+                                                            const float jacobian,
+                                                            const float pdf_mpg,
+                                                            const float weighted_bsdf_pdf,
+                                                            const float weighted_guided_pdf,
+                                                            const float weighted_nee_pdf,
+                                                            const float mis_denominator,
+                                                            const float mis_weight,
+                                                            const Spectrum &contribution,
+                                                            ccl_global float *ccl_restrict
+                                                                render_buffer)
+{
+  UNUSED_VARS(kg,
+              state,
+              attempted,
+              success,
+              visibility,
+              seed_pdf,
+              light_pdf,
+              jacobian,
+              pdf_mpg,
+              weighted_bsdf_pdf,
+              weighted_guided_pdf,
+              weighted_nee_pdf,
+              mis_denominator,
+              mis_weight,
+              contribution,
+              render_buffer);
+}
+#  endif
 #endif
 
 ccl_device_forceinline void integrate_surface_shader_setup(KernelGlobals kg,
@@ -586,6 +759,20 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                  current_sample < bootstrap_extended_limit);
   bool relax_gate = false;
   bool summary_available = false;
+  bool manifold_gate_pass = false;
+  bool manifold_attempted = false;
+  bool manifold_success = false;
+  float manifold_visibility = 0.0f;
+  float manifold_seed_pdf = 0.0f;
+  float manifold_light_pdf = 0.0f;
+  float manifold_abs_jacobian = 0.0f;
+  float manifold_pdf = 0.0f;
+  float manifold_weighted_bsdf_pdf = 0.0f;
+  float manifold_weighted_guided_pdf = 0.0f;
+  float manifold_weighted_nee_pdf = 0.0f;
+  float manifold_mis_denominator = 0.0f;
+  float manifold_mis_weight = 0.0f;
+  Spectrum manifold_debug_contribution = zero_spectrum();
 
 #    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
   if (manifold_guiding_enabled && guiding_features_enabled && kg->opgl_surface_sampling_distribution) {
@@ -613,9 +800,10 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                                manifold_summary);
 
       if (summary_available) {
-        const bool gate_pass =
+        manifold_gate_pass =
             (manifold_summary.peak_weight >= kernel_data.integrator.manifold_gate_weight) &&
             (manifold_summary.kappa >= kernel_data.integrator.manifold_gate_kappa);
+        const bool gate_pass = manifold_gate_pass;
         const bool has_direction_strict = (manifold_summary.rbar > 1.0e-3f);
 
         if (bootstrap_window) {
@@ -646,6 +834,16 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 
   manifold_options.relax_gate = relax_gate;
 
+  if (manifold_guiding_enabled) {
+    surface_write_manifold_debug_summary(kg,
+                                         state,
+                                         manifold_summary,
+                                         summary_available,
+                                         manifold_gate_pass,
+                                         relax_gate,
+                                         render_buffer);
+  }
+
   if (manifold_guiding_enabled && manifold_guiding_ready) {
     const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
     const int bounce = INTEGRATOR_STATE(state, path, bounce);
@@ -658,6 +856,14 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                            path_flag,
                                            bounce,
                                            manifold_rng_state);
+
+    manifold_attempted = true;
+    manifold_success = mpg_result.success;
+    manifold_visibility = mpg_result.visibility;
+    manifold_seed_pdf = mpg_result.seed_pdf;
+    manifold_light_pdf = mpg_result.light_pdf;
+    manifold_abs_jacobian = fabsf(mpg_result.jacobian_total);
+    manifold_pdf = mpg_result.pdf;
 
     if (mpg_result.success &&
         mpg_result.pdf > 0.0f &&
@@ -725,6 +931,10 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
               weighted_nee_pdf = nee_pdf;
             }
 
+            manifold_weighted_bsdf_pdf = weighted_bsdf_pdf;
+            manifold_weighted_guided_pdf = weighted_guided_pdf;
+            manifold_weighted_nee_pdf = weighted_nee_pdf;
+
             const float pdf_mpg = mpg_result.pdf;
             if (isfinite_safe(pdf_mpg) && pdf_mpg > 1.0e-12f) {
               const float denominator =
@@ -735,8 +945,13 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                 const float visibility_weight = mpg_result.visibility * mis_weight / pdf_mpg;
                 bsdf_eval_mul(&mpg_bsdf_eval, light_eval * visibility_weight);
 
+                manifold_mis_denominator = denominator;
+                manifold_mis_weight = mis_weight;
+
                 Spectrum mpg_contribution =
                     INTEGRATOR_STATE(state, path, throughput) * bsdf_eval_sum(&mpg_bsdf_eval);
+
+                manifold_debug_contribution = mpg_contribution;
 
                 surface_write_manifold_direct_light(kg,
                                                     state,
@@ -754,6 +969,25 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
         }
       }
     }
+  }
+
+  if (manifold_guiding_enabled) {
+    surface_write_manifold_debug_metrics(kg,
+                                         state,
+                                         manifold_attempted,
+                                         manifold_success,
+                                         manifold_visibility,
+                                         manifold_seed_pdf,
+                                         manifold_light_pdf,
+                                         manifold_abs_jacobian,
+                                         manifold_pdf,
+                                         manifold_weighted_bsdf_pdf,
+                                         manifold_weighted_guided_pdf,
+                                         manifold_weighted_nee_pdf,
+                                         manifold_mis_denominator,
+                                         manifold_mis_weight,
+                                         manifold_debug_contribution,
+                                         render_buffer);
   }
 #  endif
 #endif

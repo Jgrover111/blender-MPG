@@ -723,6 +723,15 @@ static bool get_known_pass_type(BL::RenderPass &b_pass, PassType &type, PassMode
   MAP_PASS("Guiding Color", PASS_GUIDING_COLOR, false);
   MAP_PASS("Guiding Probability", PASS_GUIDING_PROBABILITY, false);
   MAP_PASS("Guiding Average Roughness", PASS_GUIDING_AVG_ROUGHNESS, false);
+#if defined(WITH_CYCLES_DEBUG) && defined(WITH_CYCLES_MANIFOLD)
+  MAP_PASS("MPG Summary", PASS_MANIFOLD_SUMMARY, false);
+  MAP_PASS("MPG Gate Flags", PASS_MANIFOLD_GATE, false);
+  MAP_PASS("MPG Attempt", PASS_MANIFOLD_ATTEMPT, false);
+  MAP_PASS("MPG PDF Factors", PASS_MANIFOLD_PDF_FACTORS, false);
+  MAP_PASS("MPG Competing PDFs", PASS_MANIFOLD_COMPETING_PDFS, false);
+  MAP_PASS("MPG MIS", PASS_MANIFOLD_MIS, false);
+  MAP_PASS("MPG Contribution", PASS_MANIFOLD_CONTRIBUTION, false);
+#endif
 
   if (string_startswith(name, cryptomatte_prefix)) {
     type = PASS_CRYPTOMATTE;

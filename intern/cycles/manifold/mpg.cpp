@@ -137,6 +137,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.nee_pdf = nee_pdf;
   result.visibility = solution.visibility;
   result.jacobian_total = solution.jacobian_total;
+  result.seed_pdf = p_seed;
+  result.light_pdf = p_light;
   result.spec_weight = solution.specular_throughput;
   result.specular_vertex_count = solution.specular_vertex_count;
   for (int i = 0; i < solution.specular_vertex_count; ++i) {

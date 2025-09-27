@@ -105,6 +105,15 @@ const NodeEnum *Pass::get_type_enum()
     pass_type_enum.insert("guiding_color", PASS_GUIDING_COLOR);
     pass_type_enum.insert("guiding_probability", PASS_GUIDING_PROBABILITY);
     pass_type_enum.insert("guiding_avg_roughness", PASS_GUIDING_AVG_ROUGHNESS);
+#  ifdef WITH_CYCLES_MANIFOLD
+    pass_type_enum.insert("manifold_summary", PASS_MANIFOLD_SUMMARY);
+    pass_type_enum.insert("manifold_gate", PASS_MANIFOLD_GATE);
+    pass_type_enum.insert("manifold_attempt", PASS_MANIFOLD_ATTEMPT);
+    pass_type_enum.insert("manifold_pdf_factors", PASS_MANIFOLD_PDF_FACTORS);
+    pass_type_enum.insert("manifold_competing_pdfs", PASS_MANIFOLD_COMPETING_PDFS);
+    pass_type_enum.insert("manifold_mis", PASS_MANIFOLD_MIS);
+    pass_type_enum.insert("manifold_contribution", PASS_MANIFOLD_CONTRIBUTION);
+#  endif
 #endif
   }
 
@@ -369,7 +378,7 @@ PassInfo Pass::get_info(const PassType type,
       break;
 
     case PASS_CATEGORY_LIGHT_END:
-    case PASS_CATEGORY_DATA_END:
+//    case PASS_CATEGORY_DATA_END:
     case PASS_CATEGORY_BAKE_END:
     case PASS_NUM:
       LOG_DFATAL << "Unexpected pass type is used " << type;
@@ -384,6 +393,23 @@ PassInfo Pass::get_info(const PassType type,
     case PASS_GUIDING_AVG_ROUGHNESS:
       pass_info.num_components = 1;
       break;
+#if defined(WITH_CYCLES_DEBUG) && defined(WITH_CYCLES_MANIFOLD)
+    case PASS_MANIFOLD_SUMMARY:
+    case PASS_MANIFOLD_GATE:
+    case PASS_MANIFOLD_ATTEMPT:
+    case PASS_MANIFOLD_PDF_FACTORS:
+    case PASS_MANIFOLD_COMPETING_PDFS:
+    case PASS_MANIFOLD_MIS:
+      pass_info.num_components = 3;
+      pass_info.use_filter = false;
+      pass_info.use_exposure = false;
+      break;
+    case PASS_MANIFOLD_CONTRIBUTION:
+      pass_info.num_components = 3;
+      pass_info.use_filter = false;
+      pass_info.use_exposure = false;
+      break;
+#endif
   }
 
   return pass_info;

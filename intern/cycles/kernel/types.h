@@ -563,11 +563,20 @@ enum PassType {
   PASS_GUIDING_PROBABILITY,
   /* The avg. roughness at the first bounce. */
   PASS_GUIDING_AVG_ROUGHNESS,
+#  if defined(WITH_CYCLES_DEBUG) && defined(WITH_CYCLES_MANIFOLD)
+  PASS_MANIFOLD_SUMMARY,
+  PASS_MANIFOLD_GATE,
+  PASS_MANIFOLD_ATTEMPT,
+  PASS_MANIFOLD_PDF_FACTORS,
+  PASS_MANIFOLD_COMPETING_PDFS,
+  PASS_MANIFOLD_MIS,
+  PASS_MANIFOLD_CONTRIBUTION,
+#  endif
   /* The majorant optical depth along the ray, for volume scattering probability guiding.
    * When reading this pass, it is converted to majorant transmittance */
   PASS_VOLUME_MAJORANT,
   PASS_VOLUME_MAJORANT_SAMPLE_COUNT,
-  PASS_CATEGORY_DATA_END = 63,
+  PASS_CATEGORY_DATA_END = PASS_VOLUME_MAJORANT_SAMPLE_COUNT,
 
   PASS_BAKE_PRIMITIVE,
   PASS_BAKE_SEED,

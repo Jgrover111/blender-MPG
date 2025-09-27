@@ -226,6 +226,9 @@ ccl_device_inline void surface_shader_validate_bsdf_sample(const KernelGlobals k
    * by estimating the values after a BSDF sample. */
   kernel_assert(org_label == bsdf_label(kg, sc, wo));
   (void)kg;
+  (void)org_label;
+  (void)org_roughness;
+  (void)org_eta;
 
   float2 comp_roughness;
   float comp_eta;
