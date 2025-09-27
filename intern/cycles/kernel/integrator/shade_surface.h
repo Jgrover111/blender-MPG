@@ -560,7 +560,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   ccl_attr_maybe_unused GuideSummary manifold_summary;
   ccl_attr_maybe_unused bool manifold_guiding_ready = false;
   ccl_attr_maybe_unused MpgOptions manifold_options;
-  manifold_options.max_bounces = 1;
+  manifold_options.max_bounces = kernel_data.integrator.manifold_max_bounces;
   manifold_options.max_iters = kernel_data.integrator.manifold_max_iterations;
   manifold_options.gate_w = kernel_data.integrator.manifold_gate_weight;
   manifold_options.gate_kappa = kernel_data.integrator.manifold_gate_kappa;

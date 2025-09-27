@@ -16,6 +16,7 @@
 #include "kernel/svm/types.h"
 #include "kernel/types.h"
 
+#include <algorithm>
 #include <cfloat>
 
 CCL_NAMESPACE_BEGIN
@@ -34,10 +35,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
-  /* Multi-bounce solving is not implemented yet. */
-  if (opt.max_bounces > 1) {
-    return result;
-  }
+  const int solver_bounce_count = std::min(opt.max_bounces, 2);
 
   if (CLOSURE_IS_BSDF_SINGULAR(bsdf.type) && !CLOSURE_IS_RAY_PORTAL(bsdf.type)) {
     return result;
@@ -66,7 +64,23 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   }
 
   MpgSolverOutput solution;
-  if (!mpg_solve_single_bounce(kg, sd, bsdf, seed, opt, rng_state, solution)) {
+  bool solved = false;
+
+  switch (solver_bounce_count) {
+    case 1:
+      solved = mpg_solve_single_bounce(kg, sd, bsdf, seed, opt, rng_state, solution);
+      break;
+    case 2:
+      /* Two-bounce solving is not implemented yet. Guard the branch so the plumbing compiles
+       * ahead of the solver landing. */
+      kernel_assert(false && "Two-bounce MPG solver not implemented yet");
+      return result;
+    default:
+      kernel_assert(false && "Unsupported MPG bounce count");
+      return result;
+  }
+
+  if (!solved) {
     return result;
   }
 

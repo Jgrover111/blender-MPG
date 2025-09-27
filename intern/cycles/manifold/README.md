@@ -11,8 +11,8 @@ same measure.
 
 * Only surface caustics are supported. Volume transport, microfacet roughness, and
   multi-bounce chains beyond a single specular interaction are outside v1. The
-  `manifold_max_bounces` option is clamped to 1 in both the UI and integrator until
-  the solver is extended.
+  `manifold_max_bounces` option is clamped to the [1, 2] range while two-bounce
+  support for the solver is under active development.
 * Triangle shading normals drive the specular constraint; normal mapping is ignored.
 * The solver rejects configurations that trigger total internal reflection, run out of
   iterations, or violate barycentric bounds.
