@@ -78,7 +78,7 @@ bool mpg_generate_seed(KernelGlobals kg,
 
   /* Trace the seed ray to locate the candidate specular surface. */
   Ray ray;
-  ray.P = sd.P;
+  ray.P = ray_offset(sd.P, sd.Ng);
   ray.D = seed_direction;
   ray.tmin = 0.0f;
   ray.tmax = FLT_MAX;
@@ -97,9 +97,7 @@ bool mpg_generate_seed(KernelGlobals kg,
     return false;
   }
 
-  const int shader_id = intersection_get_shader(kg, &isect);
-  const KernelShader &kshader = kernel_data_fetch(shaders, shader_id);
-  seed.use_smooth_normals = (kshader.flags & SHADER_SMOOTH_NORMAL) != 0;
+  seed.use_smooth_normals = false;
 
   /* Sample an emitter using the Cycles light sampling routine. */
   const float3 rand_light = path_state_rng_3D(kg, &rng_state, PRNG_LIGHT);

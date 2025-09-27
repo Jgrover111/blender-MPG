@@ -282,6 +282,12 @@ void evaluate_specular(const ShadingPoint &D,
   eval.dNdu = compute_normal_derivative(geometry, u, v, eval.normal, true);
   eval.dNdv = compute_normal_derivative(geometry, u, v, eval.normal, false);
 
+  if (dot(eval.normal, -eval.dir_ds) < 0.0f) {
+    eval.normal = -eval.normal;
+    eval.dNdu = -eval.dNdu;
+    eval.dNdv = -eval.dNdv;
+  }
+
   float cos_theta_i = 0.0f, cos_theta_t = 0.0f, eta = 1.0f;
   const float3 spec_dir = compute_specular(
       -eval.dir_ds, eval.normal, params, eval.tir, cos_theta_i, cos_theta_t, eta);
@@ -312,7 +318,7 @@ params = SpecularParameters();
   ray_dir /= distance;
 
   Ray ray;
-  ray.P = sd.P;
+  ray.P = ray_offset(sd.P, sd.Ng);
   ray.D = ray_dir;
   ray.tmin = 0.0f;
   ray.tmax = distance;
@@ -663,6 +669,7 @@ bool trace_secondary_seed(KernelGlobals kg,
                           const float primary_u,
                           const float primary_v,
                           const MpgSeedRay &seed,
+                          const SpecularParameters &primary_params,
                           MpgSeedRay &secondary_seed)
 {
   const float3 primary_point = surface_point_from_barycentric(primary_geometry, primary_u, primary_v);
@@ -671,22 +678,35 @@ bool trace_secondary_seed(KernelGlobals kg,
     return false;
   }
 
-  float3 dir = seed.light_sample.P - primary_point;
-  float distance = len(dir);
-  if (!(distance > 1e-4f)) {
+  float3 dir_ds = sd.P - primary_point;
+  float distance_ds = len(dir_ds);
+  if (!(distance_ds > 1e-6f)) {
     return false;
   }
-  dir /= distance;
+  dir_ds /= distance_ds;
 
-  if (dot(primary_normal, dir) < 0.0f) {
+  if (dot(primary_normal, -dir_ds) < 0.0f) {
     primary_normal = -primary_normal;
+  }
+
+  bool tir = false;
+  float cos_theta_i = 0.0f;
+  float cos_theta_t = 0.0f;
+  float eta_used = 1.0f;
+  const float3 dir_sl = compute_specular(dir_ds, primary_normal, primary_params, tir, cos_theta_i, cos_theta_t, eta_used);
+  (void)cos_theta_i;
+  (void)cos_theta_t;
+  (void)eta_used;
+  if (tir || is_zero(dir_sl)) {
+    return false;
   }
 
   Ray ray;
   ray.P = ray_offset(primary_point, primary_normal);
-  ray.D = dir;
+  ray.D = dir_sl;
   ray.tmin = 0.0f;
-  ray.tmax = distance;
+  const float light_distance = len(seed.light_sample.P - primary_point);
+  ray.tmax = (std::isfinite(light_distance) && light_distance > 0.0f) ? light_distance : FLT_MAX;
   ray.time = sd.time;
   ray.self.prim = seed.prim;
   ray.self.object = seed.object;
@@ -702,15 +722,12 @@ bool trace_secondary_seed(KernelGlobals kg,
     return false;
   }
 
-  const int shader_id = intersection_get_shader(kg, &isect);
-  const KernelShader &kshader = kernel_data_fetch(shaders, shader_id);
-
   secondary_seed = seed;
   secondary_seed.object = isect.object;
   secondary_seed.prim = isect.prim;
   secondary_seed.bary_u = isect.u;
   secondary_seed.bary_v = isect.v;
-  secondary_seed.use_smooth_normals = (kshader.flags & SHADER_SMOOTH_NORMAL) != 0;
+  secondary_seed.use_smooth_normals = false;
   return true;
 }
 
@@ -1155,8 +1172,15 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   float primary_v = clamp(seed.bary_v, 1.0e-4f, 1.0f - 1.0e-4f);
   project_barycentrics(primary_u, primary_v);
 
+  SpecularParameters primary_params;
+  if (!specular_parameters_from_surface(kg, sd, primary_geometry, seed, primary_u, primary_v, primary_params)) {
+    return false;
+  }
+
   MpgSeedRay secondary_seed;
-  if (!trace_secondary_seed(kg, sd, primary_geometry, primary_u, primary_v, seed, secondary_seed)) {
+  if (!trace_secondary_seed(
+          kg, sd, primary_geometry, primary_u, primary_v, seed, primary_params, secondary_seed))
+  {
     return false;
   }
 
@@ -1168,11 +1192,6 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   float secondary_u = clamp(secondary_seed.bary_u, 1.0e-4f, 1.0f - 1.0e-4f);
   float secondary_v = clamp(secondary_seed.bary_v, 1.0e-4f, 1.0f - 1.0e-4f);
   project_barycentrics(secondary_u, secondary_v);
-
-  SpecularParameters primary_params;
-  if (!specular_parameters_from_surface(kg, sd, primary_geometry, seed, primary_u, primary_v, primary_params)) {
-    return false;
-  }
 
   ShaderData primary_sd = {};
   primary_sd.P = surface_point_from_barycentric(primary_geometry, primary_u, primary_v);
