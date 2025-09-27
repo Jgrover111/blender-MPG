@@ -72,10 +72,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
       solved = mpg_solve_single_bounce(kg, sd, bsdf, seed, opt, rng_state, solution);
       break;
     case 2:
-      /* Two-bounce solving is not implemented yet. Guard the branch so the plumbing compiles
-       * ahead of the solver landing. */
-      kernel_assert(false && "Two-bounce MPG solver not implemented yet");
-      return result;
+      solved = mpg_solve_double_bounce(kg, sd, bsdf, seed, opt, rng_state, solution);
+      break;
     default:
       kernel_assert(false && "Unsupported MPG bounce count");
       return result;

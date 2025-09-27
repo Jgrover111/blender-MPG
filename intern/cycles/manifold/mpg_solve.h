@@ -18,4 +18,12 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
                              RNGState &rng_state,
                              MpgSolverOutput &result);
 
+bool mpg_solve_double_bounce(KernelGlobals kg,
+                             const ShaderData &sd,
+                             const ShaderClosure &bsdf,
+                             const MpgSeedRay &seed,
+                             const MpgOptions &options,
+                             RNGState &rng_state,
+                             MpgSolverOutput &result);
+
 CCL_NAMESPACE_END
