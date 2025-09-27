@@ -16,7 +16,6 @@
 #include "kernel/svm/types.h"
 #include "kernel/types.h"
 
-#include <algorithm>
 #include <cfloat>
 #include <cmath>
 
@@ -35,8 +34,6 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   if (opt.max_bounces <= 0) {
     return result;
   }
-
-  const int solver_bounce_count = std::min(opt.max_bounces, 2);
 
   if (CLOSURE_IS_BSDF_SINGULAR(bsdf.type) && !CLOSURE_IS_RAY_PORTAL(bsdf.type)) {
     return result;
@@ -67,16 +64,14 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   MpgSolverOutput solution;
   bool solved = false;
 
-  switch (solver_bounce_count) {
-    case 1:
+  if (opt.max_bounces >= 2) {
+    solved = mpg_solve_double_bounce(kg, sd, bsdf, seed, opt, rng_state, solution);
+    if (!solved) {
       solved = mpg_solve_single_bounce(kg, sd, bsdf, seed, opt, rng_state, solution);
-      break;
-    case 2:
-      solved = mpg_solve_double_bounce(kg, sd, bsdf, seed, opt, rng_state, solution);
-      break;
-    default:
-      kernel_assert(false && "Unsupported MPG bounce count");
-      return result;
+    }
+  }
+  else {
+    solved = mpg_solve_single_bounce(kg, sd, bsdf, seed, opt, rng_state, solution);
   }
 
   if (!solved) {
