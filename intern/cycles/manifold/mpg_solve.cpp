@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 
 CCL_NAMESPACE_BEGIN
 
@@ -496,8 +497,7 @@ float3 derivative_specular_refraction(const float3 &dir_in,
                                       const float eta,
                                       const float cos_theta_i,
                                       const float cos_theta_t,
-                                      const float sin_theta_i,
-                                      const float sin_theta_t)
+                                      const float sin_theta_i)
 {
   const float d_cos_theta_i = -dot(d_dir_in, normal) - dot(dir_in, d_normal);
   const float denom = fmaxf(1e-8f, cos_theta_t);
@@ -527,7 +527,6 @@ void compute_jacobian(const ShadingPoint &D,
   }
   else {
     const float sin_theta_i = sqrtf(fmaxf(0.0f, 1.0f - eval.cos_theta_i * eval.cos_theta_i));
-    const float sin_theta_t = sqrtf(fmaxf(0.0f, 1.0f - eval.cos_theta_t * eval.cos_theta_t));
     d_spec_du = derivative_specular_refraction(-eval.dir_ds,
                                                -d_dir_ds_du,
                                                eval.normal,
@@ -535,8 +534,7 @@ void compute_jacobian(const ShadingPoint &D,
                                                eval.eta,
                                                eval.cos_theta_i,
                                                eval.cos_theta_t,
-                                               sin_theta_i,
-                                               sin_theta_t);
+                                               sin_theta_i);
     d_spec_dv = derivative_specular_refraction(-eval.dir_ds,
                                                -d_dir_ds_dv,
                                                eval.normal,
@@ -544,8 +542,7 @@ void compute_jacobian(const ShadingPoint &D,
                                                eval.eta,
                                                eval.cos_theta_i,
                                                eval.cos_theta_t,
-                                               sin_theta_i,
-                                               sin_theta_t);
+                                               sin_theta_i);
   }
 
   J[0] = d_dir_sl_du - d_spec_du;
@@ -862,9 +859,9 @@ bool solve_linear_system_4x4(const float J[4][4], const float rhs[4], float delt
 
   for (int i = 0; i < 4; ++i) {
     int pivot = i;
-    double max_abs = fabs(mat[i][i]);
+    double max_abs = std::fabs(mat[i][i]);
     for (int row = i + 1; row < 4; ++row) {
-      const double value = fabs(mat[row][i]);
+      const double value = std::fabs(mat[row][i]);
       if (value > max_abs) {
         max_abs = value;
         pivot = row;
