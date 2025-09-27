@@ -34,22 +34,30 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
     return false;
   }
 
-  if (!isfinite_safe(solution.jacobian) || solution.jacobian <= 0.0f) {
+  if (solution.specular_vertex_count <= 0) {
     return false;
   }
 
-  if (!isfinite_safe(solution.distance_sl) || solution.distance_sl <= 0.0f) {
+  if (!isfinite_safe(solution.jacobian_total) || solution.jacobian_total <= 0.0f) {
+    return false;
+  }
+
+  const MpgSpecularVertex &entry_vertex = solution.specular_vertices[0];
+  const MpgSpecularVertex &exit_vertex =
+      solution.specular_vertices[solution.specular_vertex_count - 1];
+
+  if (!isfinite_safe(exit_vertex.distance_out) || exit_vertex.distance_out <= 0.0f) {
     return false;
   }
 
   const float3 emitter_normal = make_float3(
       seed.light_sample.Ng.x, seed.light_sample.Ng.y, seed.light_sample.Ng.z);
-  const float cos_light = fabsf(dot(emitter_normal, -solution.dir_sl));
+  const float cos_light = fabsf(dot(emitter_normal, -exit_vertex.dir_out));
   if (!isfinite_safe(cos_light) || cos_light <= 0.0f) {
     return false;
   }
 
-  const float spec_geo_term = fabsf(dot(solution.specular_normal, -solution.wi));
+  const float spec_geo_term = fabsf(dot(entry_vertex.normal, -solution.wi));
   if (!isfinite_safe(spec_geo_term) || spec_geo_term <= 0.0f) {
     return false;
   }
@@ -65,8 +73,7 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
     updated_path_flag |= PATH_RAY_MIS_HAD_TRANSMISSION;
   }
 
-  light_sample_update(
-      kg, &light, solution.specular_point, solution.specular_normal, updated_path_flag);
+  light_sample_update(kg, &light, exit_vertex.position, exit_vertex.normal, updated_path_flag);
 
   /* `light_sample_update()` already folded in the selection probability. Re-applying it would
    * shrink the MPG technique pdf and bias MIS towards the other proposals. */
@@ -77,7 +84,7 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
 
   /* Compose the solid-angle pdf used in MIS with BSDF/guided/NEE:
    *   p = p_seed(ω_d) * p_light(ω_l) * |det dF/duv| * |dX/du x dX/dv| / r_ds^2 */
-  pdf = seed.seed_pdf * light_pdf_solid * solution.jacobian;
+  pdf = seed.seed_pdf * light_pdf_solid * solution.jacobian_total;
   if (!isfinite_safe(pdf) || pdf <= 0.0f) {
     pdf = 0.0f;
     return false;

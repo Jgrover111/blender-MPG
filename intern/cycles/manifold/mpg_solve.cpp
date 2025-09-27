@@ -743,28 +743,53 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   }
 
   result.success = true;
-  result.specular_point = eval.point;
-  result.specular_normal = eval.normal;
-  result.dir_ds = -eval.dir_ds;
-  result.dir_sl = eval.dir_sl;
-  result.distance_ds = eval.distance_ds;
-  result.distance_sl = eval.distance_sl;
-  result.dXdu = eval.dXdu;
-  result.dXdv = eval.dXdv;
-  result.dNdu = eval.dNdu;
-  result.dNdv = eval.dNdv;
-  result.u = u;
-  result.v = v;
+  result.specular_vertex_count = 1;
   result.visibility = compute_visibility(kg, sd, seed, eval);
-  result.wi = normalize(eval.point - shading_point.position);
-  result.object = seed.object;
-  result.prim = seed.prim;
-  result.is_refraction = params.is_refraction;
+  result.wi = eval.dir_ds;
+
+  MpgSpecularVertex &vertex = result.specular_vertices[0];
+  vertex.position = eval.point;
+  vertex.normal = eval.normal;
+  vertex.dir_in = eval.dir_ds;
+  vertex.dir_out = eval.dir_sl;
+  vertex.distance_in = eval.distance_ds;
+  vertex.distance_out = eval.distance_sl;
+  vertex.eta = eval.eta;
+  vertex.cos_theta_in = eval.cos_theta_i;
+  vertex.cos_theta_out = eval.cos_theta_t;
+  vertex.dXdu = eval.dXdu;
+  vertex.dXdv = eval.dXdv;
+  vertex.dNdu = eval.dNdu;
+  vertex.dNdv = eval.dNdv;
+  vertex.u = u;
+  vertex.v = v;
+  vertex.is_refraction = params.is_refraction;
+  vertex.total_internal_reflection = eval.tir;
+  vertex.object = seed.object;
+  vertex.prim = seed.prim;
+
+  result.dir_ds = -vertex.dir_in;
+  result.dir_sl = vertex.dir_out;
+  result.distance_ds = vertex.distance_in;
+  result.distance_sl = vertex.distance_out;
+  result.specular_point = vertex.position;
+  result.specular_normal = vertex.normal;
+  result.dXdu = vertex.dXdu;
+  result.dXdv = vertex.dXdv;
+  result.dNdu = vertex.dNdu;
+  result.dNdv = vertex.dNdv;
+  result.u = vertex.u;
+  result.v = vertex.v;
+  result.object = vertex.object;
+  result.prim = vertex.prim;
+  result.is_refraction = vertex.is_refraction;
 
   result.spec_weight = evaluate_specular_weight(kg, params, result.dir_ds, result.dir_sl);
   if (is_zero(result.spec_weight)) {
     return false;
   }
+  vertex.throughput = result.spec_weight;
+  result.specular_throughput = result.spec_weight;
 
   float residual_matrix[2][2];
   if (!compute_residual_matrix(shading_point, seed, geometry, eval, residual_matrix)) {
@@ -789,7 +814,9 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     return false;
   }
 
-  result.jacobian = fabsf(determinant) * area_to_solid;
+  result.jacobian_total = fabsf(determinant) * area_to_solid;
+  result.jacobian = result.jacobian_total;
+  vertex.jacobian = result.jacobian_total;
 
   return true;
 }

@@ -94,6 +94,13 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
+  if (solution.specular_vertex_count <= 0) {
+    return result;
+  }
+
+  const MpgSpecularVertex &exit_vertex =
+      solution.specular_vertices[solution.specular_vertex_count - 1];
+
   LightSample light_sample = seed.light_sample;
   const float pdf_selection = light_sample.pdf_selection;
   if (pdf_selection != 0.0f) {
@@ -106,11 +113,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     updated_path_flag |= PATH_RAY_MIS_HAD_TRANSMISSION;
   }
 
-  light_sample_update(kg,
-                      &light_sample,
-                      solution.specular_point,
-                      solution.specular_normal,
-                      updated_path_flag);
+  light_sample_update(kg, &light_sample, exit_vertex.position, exit_vertex.normal, updated_path_flag);
 
   /* `light_sample_update()` re-applies the selection term, so `light_sample.pdf` already
    * contains the probability of picking this emitter. Do not multiply by it again or the
@@ -118,7 +121,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
    * weight towards zero. */
   const float light_pdf_solid = light_sample.pdf;
 
-  float pdf = seed.seed_pdf * light_pdf_solid * solution.jacobian;
+  float pdf = seed.seed_pdf * light_pdf_solid * solution.jacobian_total;
 
   if (!isfinite_safe(pdf) || pdf <= 0.0f) {
     return result;
@@ -129,7 +132,12 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.pdf = pdf;
   result.nee_pdf = nee_pdf;
   result.visibility = solution.visibility;
-  result.spec_weight = solution.spec_weight;
+  result.jacobian_total = solution.jacobian_total;
+  result.spec_weight = solution.specular_throughput;
+  result.specular_vertex_count = solution.specular_vertex_count;
+  for (int i = 0; i < solution.specular_vertex_count; ++i) {
+    result.specular_vertices[i] = solution.specular_vertices[i];
+  }
   result.light = light_sample;
   return result;
 }

@@ -12,6 +12,8 @@
 #include "kernel/light/sample.h"
 #include "kernel/types.h"
 
+#include "manifold/mpg_types.h"
+
 #include "util/math.h"
 
 CCL_NAMESPACE_BEGIN
@@ -32,8 +34,11 @@ struct MpgResult {
   float pdf = 0.0f;
   float nee_pdf = 0.0f;
   float visibility = 0.0f;
+  float jacobian_total = 0.0f;
   Spectrum spec_weight = zero_spectrum();
   LightSample light = {};
+  int specular_vertex_count = 0;
+  MpgSpecularVertex specular_vertices[2];
 };
 
 struct MpgSeedRay;
