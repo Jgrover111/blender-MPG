@@ -657,6 +657,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
           if (!bsdf_eval_is_zero(&mpg_bsdf_eval)) {
             float weighted_bsdf_pdf = 0.0f;
             float weighted_guided_pdf = 0.0f;
+            float weighted_nee_pdf = 0.0f;
 
             float unguided_pdf = 0.0f;
             {
@@ -682,17 +683,25 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
             }
 #      endif
 
+            const float nee_pdf = mpg_result.nee_pdf;
+            if (isfinite_safe(nee_pdf) && nee_pdf > 0.0f) {
+              weighted_nee_pdf = nee_pdf;
+            }
+
             const float pdf_mpg = mpg_result.pdf;
             if (isfinite_safe(pdf_mpg) && pdf_mpg > 1.0e-12f) {
-              const float denominator = pdf_mpg + weighted_bsdf_pdf + weighted_guided_pdf;
+              const float denominator =
+                  pdf_mpg + weighted_bsdf_pdf + weighted_guided_pdf + weighted_nee_pdf;
               if (denominator > 0.0f && isfinite_safe(denominator)) {
                 const float mis_weight =
                     pdf_mpg / denominator; /* MPG_FIX: balance MPG with competing proposals. */
                 const float visibility_weight = mpg_result.visibility * mis_weight / pdf_mpg;
                 bsdf_eval_mul(&mpg_bsdf_eval, light_eval * visibility_weight);
 
-                const Spectrum mpg_contribution =
+                Spectrum mpg_contribution =
                     INTEGRATOR_STATE(state, path, throughput) * bsdf_eval_sum(&mpg_bsdf_eval);
+
+                mpg_contribution *= make_float3(1.0f, 0.1f, 0.1f); /* MPG_DEBUG: tint MPG contributions red. */
 
                 surface_write_manifold_direct_light(kg,
                                                     state,

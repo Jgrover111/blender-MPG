@@ -74,6 +74,11 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   //   return result;
   // }
 
+  const float nee_pdf = seed.light_sample.pdf;
+  if (!isfinite_safe(nee_pdf) || nee_pdf <= 0.0f) {
+    return result;
+  }
+
   LightSample light_sample = seed.light_sample;
   const float pdf_selection = light_sample.pdf_selection;
   if (pdf_selection != 0.0f) {
@@ -107,6 +112,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.success = true;
   result.wi = solution.wi;
   result.pdf = pdf;
+  result.nee_pdf = nee_pdf;
   result.visibility = solution.visibility;
   result.spec_weight = solution.spec_weight;
   result.light = light_sample;

@@ -56,21 +56,19 @@ bool mpg_generate_seed(KernelGlobals kg,
   }
   axis = normalize(axis);
 
-  float3 seed_direction = axis;
-  float seed_pdf = 1.0f;
-  if (options.angular_jitter > 0.0f) {
-    const float2 rand = path_state_rng_2D(kg, &rng_state, PRNG_SURFACE_BSDF);
-    float unused_cos = 0.0f;
-    float pdf = 0.0f;
-    seed_direction = sample_uniform_cone(
-        axis, one_minus_cos(options.angular_jitter), rand, &unused_cos, &pdf);
-    seed_pdf = pdf;
-  }
+  const float min_cone_angle = 0.00872664626f; /* ~0.5 degrees. */
+  const float jitter = fmaxf(options.angular_jitter, min_cone_angle);
+  const float2 rand = path_state_rng_2D(kg, &rng_state, PRNG_SURFACE_BSDF);
+  float unused_cos = 0.0f;
+  float seed_pdf = 0.0f;
+  float3 seed_direction = sample_uniform_cone(
+      axis, one_minus_cos(jitter), rand, &unused_cos, &seed_pdf);
 
   if (is_zero(seed_direction) || seed_pdf <= 0.0f) {
     return false;
   }
   seed_direction = normalize(seed_direction);
+  seed_pdf = fmaxf(seed_pdf, 1.0e-16f);
 
   /* Trace the seed ray to locate the candidate specular surface. */
   Ray ray;
