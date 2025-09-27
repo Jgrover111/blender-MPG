@@ -1,12 +1,14 @@
 pairs:
-  - ours: intern/cycles/manifold/mpg_seed.cpp::mpg_build_seed
-    ref:  extern/mpg_ref/src/.../seed.cpp::build_seed
-  - ours: intern/cycles/manifold/mpg_solve.cpp::mpg_solve_connect
-    ref:  extern/mpg_ref/src/.../solve.cpp::connect
-  - ours: intern/cycles/manifold/mpg_pdf.cpp::mpg_compute_pdf
-    ref:  extern/mpg_ref/src/.../pdf.cpp::compute_pdf
-  - ours: intern/cycles/kernel/integrator/shade_surface.h::MPG block
-    ref:  extern/mpg_ref/src/.../integrator.cpp::direct_mpg_sample
+  - ours: intern/cycles/manifold/mpg_seed.cpp::mpg_generate_seed
+    ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.cpp::GuidedManifoldSampler::sample_seed_path
+  - ours: intern/cycles/manifold/mpg_solve.cpp::mpg_solve_single_bounce
+    ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.h::Manifold_Walk::newton_solver
+  - ours: intern/cycles/manifold/mpg_pdf.cpp::mpg_evaluate_pdf
+    ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.cpp::GuidedManifoldSampler::specular_manifold_sampling_impl
+  - ours: intern/cycles/manifold/mpg.cpp::mpg_try_connect
+    ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.cpp::ManifoldPathGuidingIntegrator::specular_manifold_sampling
+  - ours: intern/cycles/kernel/integrator/shade_surface.h::integrate_surface_direct_light (MPG block)
+    ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.cpp::ManifoldPathGuidingIntegrator::sample
 checklist:
   - When is the light pdf evaluated (before/after moving the light sample)?
   - Exact formula for technique pdf: p_mpg = p_seed * p_light(spec_pt) * J (receiver solid angle).
