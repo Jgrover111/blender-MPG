@@ -3,6 +3,8 @@ pairs:
     ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.cpp::GuidedManifoldSampler::sample_seed_path
   - ours: intern/cycles/manifold/mpg_solve.cpp::mpg_solve_single_bounce
     ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.h::Manifold_Walk::newton_solver
+  - ours: intern/cycles/manifold/mpg_solve.cpp::mpg_solve_double_bounce
+    ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.h::Manifold_Walk::newton_solver
   - ours: intern/cycles/manifold/mpg_pdf.cpp::mpg_evaluate_pdf
     ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.cpp::GuidedManifoldSampler::specular_manifold_sampling_impl
   - ours: intern/cycles/manifold/mpg.cpp::mpg_try_connect
@@ -14,5 +16,7 @@ checklist:
   - Exact formula for technique pdf: p_mpg = p_seed * p_light(spec_pt) * J (receiver solid angle).
   - Which pdfs are in the MIS denominator (p_bsdf, p_light(NEE), p_mpg) and are they all same measure?
   - Where is the Jacobian applied (once, not twice)?
+  - Does the two-bounce solver populate both specular vertices and accumulate `J_S1 * J_S2`?
+  - Is visibility traced across all segments in multi-bounce chains?
   - Are receiver labels singular or non-singular?
   - Is visibility/shadow test & accumulation identical to NEE?
