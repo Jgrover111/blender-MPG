@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 
 CCL_NAMESPACE_BEGIN
 
@@ -84,11 +85,6 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
-  // float pdf = 0.0f;
-  // if (!mpg_evaluate_pdf(kg, sd, bsdf, g, seed, solution, pdf) || pdf <= 0.0f) {
-  //   return result;
-  // }
-
   const float nee_pdf = seed.light_sample.pdf;
   if (!isfinite_safe(nee_pdf) || nee_pdf <= 0.0f) {
     return result;
@@ -103,7 +99,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   LightSample light_sample = seed.light_sample;
   const float pdf_selection = light_sample.pdf_selection;
-  if (pdf_selection != 0.0f) {
+  if (pdf_selection > 0.0f) {
     /* `light_sample_update` expects `ls->pdf` without the selection term. */
     light_sample.pdf /= pdf_selection;
   }
@@ -120,9 +116,24 @@ MpgResult mpg_try_connect(KernelGlobals kg,
    * MPG technique PDF gets scaled by an extra factor of `pdf_selection`, driving the MIS
    * weight towards zero. */
   const float light_pdf_solid = light_sample.pdf;
+  const float p_light = (isfinite_safe(light_pdf_solid)) ? fmaxf(light_pdf_solid, 0.0f) : 0.0f;
+  if (p_light <= 0.0f) {
+    return result;
+  }
 
-  float pdf = seed.seed_pdf * light_pdf_solid * solution.jacobian_total;
+  const float p_seed = (isfinite_safe(seed.seed_pdf)) ? fmaxf(seed.seed_pdf, 1.0e-16f) : 0.0f;
+  if (p_seed <= 0.0f) {
+    return result;
+  }
 
+  const float J_total = (isfinite_safe(solution.jacobian_total)) ?
+                            fmaxf(fabsf(solution.jacobian_total), 0.0f) :
+                            0.0f;
+  if (J_total <= 0.0f) {
+    return result;
+  }
+
+  const float pdf = p_seed * p_light * J_total;
   if (!isfinite_safe(pdf) || pdf <= 0.0f) {
     return result;
   }
