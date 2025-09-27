@@ -38,7 +38,8 @@ bool mpg_generate_seed(KernelGlobals kg,
     const bool strict_gate = has_direction_strict && (guide.peak_weight >= options.gate_w) &&
                              (guide.kappa >= options.gate_kappa);
     const bool relaxed_gate = options.relax_gate && has_direction_relaxed;
-    if (!strict_gate && !relaxed_gate) {
+    const bool bootstrap_gate = options.relax_gate && !has_direction_relaxed;
+    if (!strict_gate && !relaxed_gate && !bootstrap_gate) {
       return false;
     }
   }
@@ -57,7 +58,12 @@ bool mpg_generate_seed(KernelGlobals kg,
   axis = normalize(axis);
 
   const float min_cone_angle = 0.00872664626f; /* ~0.5 degrees. */
-  const float jitter = fmaxf(options.angular_jitter, min_cone_angle);
+  float jitter = fmaxf(options.angular_jitter, min_cone_angle);
+  if (guide.rbar <= 1.0e-4f) {
+    /* With no directional signal yet, explore a wide bootstrap cone similar to the Mitsuba
+     * reference implementation. */
+    jitter = 0.5f * M_PI_F;
+  }
   const float2 rand = path_state_rng_2D(kg, &rng_state, PRNG_SURFACE_BSDF);
   float unused_cos = 0.0f;
   float seed_pdf = 0.0f;

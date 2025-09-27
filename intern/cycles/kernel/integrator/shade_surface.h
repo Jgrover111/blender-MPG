@@ -595,30 +595,46 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                    uint(rng_state->sample),
                                    rng_state->rng_offset);
 
-      if (pgl_estimate_summary(*kg->opgl_surface_sampling_distribution,
-                               sd->Ng,
-                               seed,
-                               manifold_summary))
-      {
+      const bool summary_available = pgl_estimate_summary(*kg->opgl_surface_sampling_distribution,
+                                                          sd->Ng,
+                                                          seed,
+                                                          manifold_summary);
+      const int current_sample = INTEGRATOR_STATE(state, path, sample);
+      const int current_bounce = INTEGRATOR_STATE(state, path, bounce);
+      const int bootstrap_sample_limit = 32;
+      const int bootstrap_depth_limit = 2;
+      const int bootstrap_extended_limit = 128;
+      const bool bootstrap_window = (current_sample < bootstrap_sample_limit) ||
+                                    (current_bounce < bootstrap_depth_limit &&
+                                     current_sample < bootstrap_extended_limit);
+
+      if (summary_available) {
         const bool gate_pass =
             (manifold_summary.peak_weight >= kernel_data.integrator.manifold_gate_weight) &&
             (manifold_summary.kappa >= kernel_data.integrator.manifold_gate_kappa);
         const bool has_direction_relaxed = (manifold_summary.rbar > 1.0e-4f);
         const bool has_direction_strict = (manifold_summary.rbar > 1.0e-3f);
-        const int current_sample = INTEGRATOR_STATE(state, path, sample);
-        const int current_bounce = INTEGRATOR_STATE(state, path, bounce);
-        const int bootstrap_sample_limit = 32;
-        const int bootstrap_depth_limit = 2;
-        const int bootstrap_extended_limit = 128;
-        const bool bootstrap_window = (current_sample < bootstrap_sample_limit) ||
-                                      (current_bounce < bootstrap_depth_limit &&
-                                       current_sample < bootstrap_extended_limit);
-        const bool relax_gate = has_direction_relaxed && bootstrap_window && !gate_pass;
+        bool relax_gate = false;
+
+        if (bootstrap_window) {
+          /* Allow bootstrap attempts while the guided summary is still noisy. */
+          relax_gate = (!gate_pass) || !has_direction_strict;
+          manifold_options.relax_gate = relax_gate;
+        }
 
         if ((gate_pass && has_direction_strict) || relax_gate) {
           manifold_guiding_ready = true;
-          manifold_options.relax_gate = relax_gate;
         }
+      }
+      else if (bootstrap_window) {
+        /* Fall back to a diffuse bootstrap seeded around the shading normal when no guide
+         * summary is available yet, matching the Mitsuba reference behaviour. */
+        manifold_summary.mean_dir = (!is_zero(sd->N)) ? sd->N : sd->Ng;
+        manifold_summary.peak_weight = 0.0f;
+        manifold_summary.kappa = 0.0f;
+        manifold_summary.rbar = 0.0f;
+        manifold_guiding_ready = true;
+        manifold_options.relax_gate = true;
       }
     }
   }

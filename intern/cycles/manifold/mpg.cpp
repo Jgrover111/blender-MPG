@@ -50,7 +50,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     const bool strict_gate = has_direction_strict && (g.peak_weight >= opt.gate_w) &&
                              (g.kappa >= opt.gate_kappa);
     const bool relaxed_gate = opt.relax_gate && has_direction_relaxed;
-    if (!strict_gate && !relaxed_gate) {
+    const bool bootstrap_gate = opt.relax_gate && !has_direction_relaxed;
+    if (!strict_gate && !relaxed_gate && !bootstrap_gate) {
       return result;
     }
   }
