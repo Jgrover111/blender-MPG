@@ -571,10 +571,25 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) != 0);
   const bool surface_guiding_active =
       (guiding_features_enabled && INTEGRATOR_STATE(state, guiding, use_surface_guiding));
+#    else
+  ccl_attr_maybe_unused const bool guiding_features_enabled = false;
+  ccl_attr_maybe_unused const bool surface_guiding_active = false;
+#    endif
 
+  const int current_sample = INTEGRATOR_STATE(state, path, sample);
+  const int current_bounce = INTEGRATOR_STATE(state, path, bounce);
+  const int bootstrap_sample_limit = 32;
+  const int bootstrap_depth_limit = 2;
+  const int bootstrap_extended_limit = 128;
+  const bool bootstrap_window = (current_sample < bootstrap_sample_limit) ||
+                                (current_bounce < bootstrap_depth_limit &&
+                                 current_sample < bootstrap_extended_limit);
+  bool relax_gate = false;
+  bool summary_available = false;
+
+#    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
   if (manifold_guiding_enabled && guiding_features_enabled && kg->opgl_surface_sampling_distribution) {
     bool guiding_distribution_ready = false;
-#      if !defined(__KERNEL_GPU__)
     if (surface_guiding_active) {
       const float guiding_seed = INTEGRATOR_STATE(state, guiding, sample_surface_guiding_rand);
       guiding_distribution_ready = guiding_surface_prepare_distribution(
@@ -586,58 +601,50 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       guiding_distribution_ready = guiding_surface_prepare_distribution(
           kg, sd->P, sd->N, guiding_seed);
     }
-#      else
-    (void)surface_guiding_active;
-#      endif
 
     if (guiding_distribution_ready) {
       const uint seed = hash_uint3(rng_state->rng_pixel,
                                    uint(rng_state->sample),
                                    rng_state->rng_offset);
 
-      const bool summary_available = pgl_estimate_summary(*kg->opgl_surface_sampling_distribution,
-                                                          sd->Ng,
-                                                          seed,
-                                                          manifold_summary);
-      const int current_sample = INTEGRATOR_STATE(state, path, sample);
-      const int current_bounce = INTEGRATOR_STATE(state, path, bounce);
-      const int bootstrap_sample_limit = 32;
-      const int bootstrap_depth_limit = 2;
-      const int bootstrap_extended_limit = 128;
-      const bool bootstrap_window = (current_sample < bootstrap_sample_limit) ||
-                                    (current_bounce < bootstrap_depth_limit &&
-                                     current_sample < bootstrap_extended_limit);
+      summary_available = pgl_estimate_summary(*kg->opgl_surface_sampling_distribution,
+                                               sd->Ng,
+                                               seed,
+                                               manifold_summary);
 
       if (summary_available) {
         const bool gate_pass =
             (manifold_summary.peak_weight >= kernel_data.integrator.manifold_gate_weight) &&
             (manifold_summary.kappa >= kernel_data.integrator.manifold_gate_kappa);
-        const bool has_direction_relaxed = (manifold_summary.rbar > 1.0e-4f);
         const bool has_direction_strict = (manifold_summary.rbar > 1.0e-3f);
-        bool relax_gate = false;
 
         if (bootstrap_window) {
           /* Allow bootstrap attempts while the guided summary is still noisy. */
           relax_gate = (!gate_pass) || !has_direction_strict;
-          manifold_options.relax_gate = relax_gate;
         }
 
         if ((gate_pass && has_direction_strict) || relax_gate) {
           manifold_guiding_ready = true;
         }
       }
-      else if (bootstrap_window) {
-        /* Fall back to a diffuse bootstrap seeded around the shading normal when no guide
-         * summary is available yet, matching the Mitsuba reference behaviour. */
-        manifold_summary.mean_dir = (!is_zero(sd->N)) ? sd->N : sd->Ng;
-        manifold_summary.peak_weight = 0.0f;
-        manifold_summary.kappa = 0.0f;
-        manifold_summary.rbar = 0.0f;
-        manifold_guiding_ready = true;
-        manifold_options.relax_gate = true;
-      }
     }
   }
+#    endif
+
+  if (manifold_guiding_enabled && !manifold_guiding_ready) {
+    if (!summary_available && bootstrap_window) {
+      /* Fall back to a diffuse bootstrap seeded around the shading normal when no guide summary
+       * is available yet, matching the Mitsuba reference behaviour. */
+      manifold_summary.mean_dir = (!is_zero(sd->N)) ? sd->N : sd->Ng;
+      manifold_summary.peak_weight = 0.0f;
+      manifold_summary.kappa = 0.0f;
+      manifold_summary.rbar = 0.0f;
+      manifold_guiding_ready = true;
+      relax_gate = true;
+    }
+  }
+
+  manifold_options.relax_gate = relax_gate;
 
   if (manifold_guiding_enabled && manifold_guiding_ready) {
     const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
@@ -693,11 +700,25 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                   state, guiding, surface_guiding_sampling_prob);
               const float bssrdf_sampling_prob = INTEGRATOR_STATE(
                   state, guiding, bssrdf_sampling_prob);
-              weighted_bsdf_pdf *= (1.0f - guiding_sampling_prob);
               const float guiding_pdf = guiding_bsdf_pdf(kg, mpg_result.wi);
-              weighted_guided_pdf = guiding_sampling_prob * (1.0f - bssrdf_sampling_prob) * guiding_pdf;
+              const float guided_pdf =
+                  ((isfinite_safe(guiding_pdf) && guiding_pdf > 0.0f) ? guiding_pdf : 0.0f) *
+                  (1.0f - bssrdf_sampling_prob);
+
+              if (kernel_data.integrator.guiding_directional_sampling_type ==
+                  GUIDING_DIRECTIONAL_SAMPLING_TYPE_RIS)
+              {
+                weighted_bsdf_pdf = 0.5f * unguided_pdf;
+                weighted_guided_pdf = 0.5f * guided_pdf;
+              }
+              else {
+                weighted_bsdf_pdf *= (1.0f - guiding_sampling_prob);
+                weighted_guided_pdf = guiding_sampling_prob * guided_pdf;
+              }
             }
 #      endif
+            weighted_bsdf_pdf = fmaxf(weighted_bsdf_pdf, 0.0f);
+            weighted_guided_pdf = fmaxf(weighted_guided_pdf, 0.0f);
 
             const float nee_pdf = mpg_result.nee_pdf;
             if (isfinite_safe(nee_pdf) && nee_pdf > 0.0f) {
@@ -710,14 +731,12 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                   pdf_mpg + weighted_bsdf_pdf + weighted_guided_pdf + weighted_nee_pdf;
               if (denominator > 0.0f && isfinite_safe(denominator)) {
                 const float mis_weight =
-                    pdf_mpg / denominator; /* MPG_FIX: balance MPG with competing proposals. */
+                    pdf_mpg / denominator; /* Balance MPG with competing proposals. */
                 const float visibility_weight = mpg_result.visibility * mis_weight / pdf_mpg;
                 bsdf_eval_mul(&mpg_bsdf_eval, light_eval * visibility_weight);
 
                 Spectrum mpg_contribution =
                     INTEGRATOR_STATE(state, path, throughput) * bsdf_eval_sum(&mpg_bsdf_eval);
-
-                mpg_contribution *= make_float3(1.0f, 0.1f, 0.1f); /* MPG_DEBUG: tint MPG contributions red. */
 
                 surface_write_manifold_direct_light(kg,
                                                     state,
@@ -736,7 +755,6 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       }
     }
   }
-#    endif
 #  endif
 #endif
 
