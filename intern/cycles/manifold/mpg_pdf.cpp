@@ -8,7 +8,40 @@
 #include "kernel/light/sample.h"
 #include "kernel/types.h"
 
+#include <cfloat>
+
+#include "util/math.h"
+
 CCL_NAMESPACE_BEGIN
+
+float mpg_light_sample_pdf_solid(KernelGlobals kg,
+                                 const ShaderData &sd,
+                                 const LightSample &light_sample)
+{
+  (void)kg;
+  (void)sd;
+
+  const float pdf_native = light_sample.pdf;
+  if (!isfinite_safe(pdf_native) || pdf_native <= 0.0f) {
+    return 0.0f;
+  }
+
+  const bool finite_distance = isfinite_safe(light_sample.t) && light_sample.t != FLT_MAX;
+  const LightType light_type = light_sample.type;
+
+  if (!finite_distance || light_type == LIGHT_BACKGROUND || light_type == LIGHT_DISTANT) {
+    return pdf_native;
+  }
+
+  const float3 Ng = make_float3(light_sample.Ng.x, light_sample.Ng.y, light_sample.Ng.z);
+  const float3 I = -light_sample.D;
+  const float area_to_solid = light_pdf_area_to_solid_angle(Ng, I, light_sample.t);
+  if (!isfinite_safe(area_to_solid) || area_to_solid <= 0.0f) {
+    return 0.0f;
+  }
+
+  return pdf_native * area_to_solid;
+}
 
 bool mpg_evaluate_pdf(KernelGlobals kg,
                       const ShaderData &sd,
@@ -77,8 +110,8 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
 
   /* `light_sample_update()` already folded in the selection probability. Re-applying it would
    * shrink the MPG technique pdf and bias MIS towards the other proposals. */
-  const float light_pdf_solid = light.pdf;
-  if (!isfinite_safe(light_pdf_solid) || light_pdf_solid <= 0.0f) {
+  const float light_pdf_solid = mpg_light_sample_pdf_solid(kg, sd, light);
+  if (light_pdf_solid <= 0.0f) {
     return false;
   }
 

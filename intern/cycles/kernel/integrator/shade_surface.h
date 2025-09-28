@@ -925,12 +925,73 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     }
     manifold_pdf = mpg_result.pdf;
 
+    LightSample mpg_light = mpg_result.light;
+    const float3 wi_mpg = mpg_result.wi;
+    const bool has_valid_wi = !is_zero(wi_mpg);
+    const float pdf_mpg =
+        (isfinite_safe(mpg_result.pdf) && mpg_result.pdf > 0.0f) ? mpg_result.pdf : 0.0f;
+    const float nee_pdf_sa =
+        (isfinite_safe(mpg_result.light_pdf) && mpg_result.light_pdf > 0.0f) ? mpg_result.light_pdf : 0.0f;
+
+    float weighted_bsdf_pdf = 0.0f;
+    float weighted_guided_pdf = 0.0f;
+    float unguided_pdf = 0.0f;
+
+    if (has_valid_wi) {
+      BsdfEval mpg_pdf_eval;
+      bsdf_eval_init(&mpg_pdf_eval, zero_spectrum());
+      float unguided_pdfs[MAX_CLOSURE];
+      unguided_pdf = surface_shader_bsdf_eval_pdfs(
+          kg, sd, wi_mpg, &mpg_pdf_eval, unguided_pdfs, mpg_light.shader);
+      weighted_bsdf_pdf = unguided_pdf;
+
+#      if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
+      if (surface_guiding_active)
+      {
+        const float guiding_sampling_prob = INTEGRATOR_STATE(
+            state, guiding, surface_guiding_sampling_prob);
+        const float bssrdf_sampling_prob = INTEGRATOR_STATE(
+            state, guiding, bssrdf_sampling_prob);
+        const float guiding_pdf = guiding_bsdf_pdf(kg, wi_mpg);
+        const float guided_pdf =
+            ((isfinite_safe(guiding_pdf) && guiding_pdf > 0.0f) ? guiding_pdf : 0.0f) *
+            (1.0f - bssrdf_sampling_prob);
+
+        if (kernel_data.integrator.guiding_directional_sampling_type ==
+            GUIDING_DIRECTIONAL_SAMPLING_TYPE_RIS)
+        {
+          weighted_bsdf_pdf = 0.5f * unguided_pdf;
+          weighted_guided_pdf = 0.5f * guided_pdf;
+        }
+        else {
+          weighted_bsdf_pdf *= (1.0f - guiding_sampling_prob);
+          weighted_guided_pdf = guiding_sampling_prob * guided_pdf;
+        }
+      }
+#      endif
+    }
+
+    weighted_bsdf_pdf = fmaxf(weighted_bsdf_pdf, 0.0f);
+    weighted_guided_pdf = fmaxf(weighted_guided_pdf, 0.0f);
+    const float weighted_nee_pdf = fmaxf(nee_pdf_sa, 0.0f);
+
+    manifold_weighted_bsdf_pdf = weighted_bsdf_pdf;
+    manifold_weighted_guided_pdf = weighted_guided_pdf;
+    manifold_weighted_nee_pdf = weighted_nee_pdf;
+
+    const float mis_denominator = pdf_mpg + weighted_bsdf_pdf + weighted_guided_pdf + weighted_nee_pdf;
+    const float mis_weight =
+        (mis_denominator > 0.0f && isfinite_safe(mis_denominator)) ? pdf_mpg / mis_denominator : 0.0f;
+
+    manifold_mis_denominator = mis_denominator;
+    manifold_mis_weight = mis_weight;
+
     if (mpg_result.success &&
-        mpg_result.pdf > 0.0f &&
+        pdf_mpg > 0.0f &&
         mpg_result.visibility > 0.0f &&
-        !is_zero(mpg_result.spec_weight))
+        !is_zero(mpg_result.spec_weight) &&
+        has_valid_wi)
     {
-      LightSample mpg_light = mpg_result.light;
       ShaderDataCausticsStorage mpg_emission_sd_storage;
       ccl_private ShaderData *mpg_emission_sd = AS_SHADER_DATA(&mpg_emission_sd_storage);
       Spectrum light_eval = light_sample_shader_eval(kg, state, mpg_emission_sd, &mpg_light, sd->time);
@@ -938,96 +999,42 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       if (!is_zero(light_eval)) {
         BsdfEval mpg_bsdf_eval;
         const float mpg_bsdf_pdf = surface_shader_bsdf_eval(
-            kg, state, sd, mpg_result.wi, &mpg_bsdf_eval, mpg_light.shader);
+            kg, state, sd, wi_mpg, &mpg_bsdf_eval, mpg_light.shader);
 
         if (mpg_bsdf_pdf > 0.0f) {
           bsdf_eval_mul(&mpg_bsdf_eval, mpg_result.spec_weight);
 
-          if (!bsdf_eval_is_zero(&mpg_bsdf_eval)) {
-            float weighted_bsdf_pdf = 0.0f;
-            float weighted_guided_pdf = 0.0f;
-            float weighted_nee_pdf = 0.0f;
+          if (!bsdf_eval_is_zero(&mpg_bsdf_eval) && mis_weight > 0.0f) {
+            const float visibility_weight = mpg_result.visibility * mis_weight / pdf_mpg;
+            if (visibility_weight > 0.0f && isfinite_safe(visibility_weight)) {
+              bsdf_eval_mul(&mpg_bsdf_eval, light_eval * visibility_weight);
 
-            float unguided_pdf = 0.0f;
-            {
-              BsdfEval mpg_pdf_eval;
-              bsdf_eval_init(&mpg_pdf_eval, zero_spectrum());
-              float unguided_pdfs[MAX_CLOSURE];
-              unguided_pdf = surface_shader_bsdf_eval_pdfs(
-                  kg, sd, mpg_result.wi, &mpg_pdf_eval, unguided_pdfs, mpg_light.shader);
-            }
+              Spectrum mpg_contribution =
+                  INTEGRATOR_STATE(state, path, throughput) * bsdf_eval_sum(&mpg_bsdf_eval);
 
-            weighted_bsdf_pdf = unguided_pdf;
+              manifold_debug_contribution = mpg_contribution;
 
-#      if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
-            if (surface_guiding_active)
-            {
-              const float guiding_sampling_prob = INTEGRATOR_STATE(
-                  state, guiding, surface_guiding_sampling_prob);
-              const float bssrdf_sampling_prob = INTEGRATOR_STATE(
-                  state, guiding, bssrdf_sampling_prob);
-              const float guiding_pdf = guiding_bsdf_pdf(kg, mpg_result.wi);
-              const float guided_pdf =
-                  ((isfinite_safe(guiding_pdf) && guiding_pdf > 0.0f) ? guiding_pdf : 0.0f) *
-                  (1.0f - bssrdf_sampling_prob);
-
-              if (kernel_data.integrator.guiding_directional_sampling_type ==
-                  GUIDING_DIRECTIONAL_SAMPLING_TYPE_RIS)
-              {
-                weighted_bsdf_pdf = 0.5f * unguided_pdf;
-                weighted_guided_pdf = 0.5f * guided_pdf;
-              }
-              else {
-                weighted_bsdf_pdf *= (1.0f - guiding_sampling_prob);
-                weighted_guided_pdf = guiding_sampling_prob * guided_pdf;
-              }
-            }
-#      endif
-            weighted_bsdf_pdf = fmaxf(weighted_bsdf_pdf, 0.0f);
-            weighted_guided_pdf = fmaxf(weighted_guided_pdf, 0.0f);
-
-            const float nee_pdf = mpg_result.nee_pdf;
-            if (isfinite_safe(nee_pdf) && nee_pdf > 0.0f) {
-              weighted_nee_pdf = nee_pdf;
-            }
-
-            manifold_weighted_bsdf_pdf = weighted_bsdf_pdf;
-            manifold_weighted_guided_pdf = weighted_guided_pdf;
-            manifold_weighted_nee_pdf = weighted_nee_pdf;
-
-            const float pdf_mpg = mpg_result.pdf;
-            if (isfinite_safe(pdf_mpg) && pdf_mpg > 1.0e-12f) {
-              const float denominator =
-                  pdf_mpg + weighted_bsdf_pdf + weighted_guided_pdf + weighted_nee_pdf;
-              if (denominator > 0.0f && isfinite_safe(denominator)) {
-                const float mis_weight =
-                    pdf_mpg / denominator; /* Balance MPG with competing proposals. */
-                const float visibility_weight = mpg_result.visibility * mis_weight / pdf_mpg;
-                bsdf_eval_mul(&mpg_bsdf_eval, light_eval * visibility_weight);
-
-                manifold_mis_denominator = denominator;
-                manifold_mis_weight = mis_weight;
-
-                Spectrum mpg_contribution =
-                    INTEGRATOR_STATE(state, path, throughput) * bsdf_eval_sum(&mpg_bsdf_eval);
-
-                manifold_debug_contribution = mpg_contribution;
-
-                surface_write_manifold_direct_light(kg,
-                                                    state,
-                                                    mpg_contribution,
-                                                    mpg_light.group,
-                                                    render_buffer);
+              surface_write_manifold_direct_light(kg,
+                                                  state,
+                                                  mpg_contribution,
+                                                  mpg_light.group,
+                                                  render_buffer);
 #      if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 1
-                if (manifold_options.relax_gate) {
-                  guiding_record_manifold_direct_light(kg, state, mpg_contribution, mis_weight);
-                }
-#      endif
+              if (manifold_options.relax_gate) {
+                guiding_record_manifold_direct_light(kg, state, mpg_contribution, mis_weight);
               }
+#      endif
             }
           }
         }
       }
+    }
+
+    if (!mpg_result.success &&
+        manifold_abs_jacobian < 0.0f &&
+        mpg_result.failure_code != MPG_FAILURE_NONE)
+    {
+      manifold_abs_jacobian = -float(mpg_result.failure_code);
     }
   }
 

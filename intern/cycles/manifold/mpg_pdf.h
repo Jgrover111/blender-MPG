@@ -16,4 +16,8 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
                       const MpgSolverOutput &solution,
                       float &pdf);
 
+float mpg_light_sample_pdf_solid(KernelGlobals kg,
+                                 const ShaderData &sd,
+                                 const LightSample &light_sample);
+
 CCL_NAMESPACE_END

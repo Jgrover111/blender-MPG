@@ -91,11 +91,15 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
   result.seed_pdf = seed.seed_pdf;
-  result.light_pdf = seed.light_sample.pdf;
+  result.light = seed.light_sample;
+  if (!is_zero(seed.direction)) {
+    result.wi = normalize(seed.direction);
+  }
 
-  const float nee_pdf = seed.light_sample.pdf;
+  const float nee_pdf = mpg_light_sample_pdf_solid(kg, sd, seed.light_sample);
+  result.light_pdf = nee_pdf;
   result.nee_pdf = nee_pdf;
-  if (!isfinite_safe(nee_pdf) || nee_pdf <= 0.0f) {
+  if (nee_pdf <= 0.0f) {
     result.failure_code = MPG_FAILURE_INVALID_NEE_PDF;
     return result;
   }
@@ -160,8 +164,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   light_sample_update(kg, &light_sample, exit_vertex.position, exit_vertex.normal, updated_path_flag);
 
-  const float light_pdf_solid = light_sample.pdf;
-  const float p_light = (isfinite_safe(light_pdf_solid)) ? fmaxf(light_pdf_solid, 0.0f) : 0.0f;
+  const float p_light = mpg_light_sample_pdf_solid(kg, sd, light_sample);
   if (p_light <= 0.0f) {
     result.failure_code = MPG_FAILURE_INVALID_LIGHT_PDF;
     result.light_pdf = p_light;
@@ -195,6 +198,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.pdf = pdf;
   result.seed_pdf = p_seed;
   result.light_pdf = p_light;
+  result.nee_pdf = p_light;
   result.light = light_sample;
 
   return result;

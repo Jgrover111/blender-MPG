@@ -38,11 +38,12 @@ bool mpg_generate_seed(KernelGlobals kg,
   if (is_zero(axis)) {
     axis = sd.N;
   }
-  if (is_zero(axis)) {
-    failure_code = MPG_FAILURE_SEED;
-    return false;
+
+  const bool bootstrap_seed = (guide.rbar <= 1.0e-4f);
+  const bool use_uniform_fallback = bootstrap_seed || is_zero(axis);
+  if (!use_uniform_fallback) {
+    axis = normalize(axis);
   }
-  axis = normalize(axis);
 
   const float min_cone_angle = 0.00872664626f; /* ~0.5 degrees. */
   float jitter = fmaxf(options.angular_jitter, min_cone_angle);
@@ -52,10 +53,17 @@ bool mpg_generate_seed(KernelGlobals kg,
     jitter = 0.5f * M_PI_F;
   }
   const float2 rand = path_state_rng_2D(kg, &rng_state, PRNG_SURFACE_BSDF);
-  float unused_cos = 0.0f;
   float seed_pdf = 0.0f;
-  float3 seed_direction = sample_uniform_cone(
-      axis, one_minus_cos(jitter), rand, &unused_cos, &seed_pdf);
+  float3 seed_direction = zero_float3();
+
+  if (use_uniform_fallback) {
+    seed_direction = sample_uniform_sphere(rand);
+    seed_pdf = M_1_4PI_F;
+  }
+  else {
+    float unused_cos = 0.0f;
+    seed_direction = sample_uniform_cone(axis, one_minus_cos(jitter), rand, &unused_cos, &seed_pdf);
+  }
 
   if (is_zero(seed_direction) || seed_pdf <= 0.0f) {
     failure_code = MPG_FAILURE_SEED;
