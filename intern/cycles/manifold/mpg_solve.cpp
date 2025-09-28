@@ -1139,7 +1139,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
 
   const float determinant =
       residual_matrix[0][0] * residual_matrix[1][1] - residual_matrix[0][1] * residual_matrix[1][0];
-  if (!isfinite_safe(determinant) || determinant <= 0.0f) {
+  if (!isfinite_safe(determinant) || fabsf(determinant) <= 1.0e-12f) {
     failure_code = MPG_FAILURE_JACOBIAN_ZERO;
     return false;
   }
@@ -1421,7 +1421,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   float determinant_primary = matrix_primary[0][0] * matrix_primary[1][1] -
                               matrix_primary[0][1] * matrix_primary[1][0];
-  if (!isfinite_safe(determinant_primary) || determinant_primary <= 0.0f) {
+  if (!isfinite_safe(determinant_primary) || fabsf(determinant_primary) <= 1.0e-12f) {
     failure_code = MPG_FAILURE_JACOBIAN_ZERO;
     return false;
   }
@@ -1453,7 +1453,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   float determinant_secondary = matrix_secondary[0][0] * matrix_secondary[1][1] -
                                 matrix_secondary[0][1] * matrix_secondary[1][0];
-  if (!isfinite_safe(determinant_secondary) || determinant_secondary <= 0.0f) {
+  if (!isfinite_safe(determinant_secondary) || fabsf(determinant_secondary) <= 1.0e-12f) {
     failure_code = MPG_FAILURE_JACOBIAN_ZERO;
     return false;
   }
