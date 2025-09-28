@@ -34,6 +34,41 @@ same measure.
   attenuation. The README documents the omission to avoid stubbed code paths in the
   implementation.
 
+## Debug AOVs
+
+When Cycles is compiled with `WITH_CYCLES_DEBUG` and manifold guiding is enabled, a set
+of auxiliary passes is available to inspect the guiding signals in the viewport. Each
+pass writes a three-channel value (RGB) unless noted otherwise:
+
+* **MPG Summary** – encodes the OpenPGL guide summary used to seed the solver.
+  * `X`: peak guide weight (how dominant the strongest lobe is).
+  * `Y`: von Mises–Fisher concentration `κ` (higher values mean a tighter lobe).
+  * `Z`: `r̄`, the length of the mean direction (close to zero means no confident
+    direction yet).
+* **MPG Gate Flags** – shows which gating heuristics let MPG run for the current path.
+  * `X`: set to 1 when a guide summary was available.
+  * `Y`: set to 1 when the strict gate thresholds passed.
+  * `Z`: set to 1 when the solver was allowed to run via relaxed/bootstrap gating.
+* **MPG Attempt** – tracks solver bookkeeping per shading point.
+  * `X`: number of solver attempts taken for this connection.
+  * `Y`: bit mask of gate states accumulated from `MpgGateMask` (1=active gate,
+    2=has relaxed direction, 4=has strict direction, 8=strict pass, 16=relaxed pass,
+    32=bootstrap pass).
+  * `Z`: failure code from `MpgFailureCode` (0=no failure, 1=seed, 2=TIR, …, 15=unknown).
+* **MPG PDF Factors** – breaks down the manifold proposal density.
+  * `X`: seed pdf from the guide cone.
+  * `Y`: light pdf after snapping the light sample to the solved specular point.
+  * `Z`: absolute solver Jacobian for the chain.
+* **MPG Competing PDFs** – the other proposals considered in MIS.
+  * `X`: BSDF pdf at the receiver (including any guiding blend weights).
+  * `Y`: guided BSDF pdf (zero when guiding is inactive).
+  * `Z`: next-event estimation pdf at the receiver.
+* **MPG MIS** – MIS weight diagnostics.
+  * `X`: manifold proposal pdf in solid angle at the receiver.
+  * `Y`: MIS denominator (sum of all competing pdfs including MPG).
+  * `Z`: final MIS weight applied to the contribution.
+* **MPG Contribution** – raw spectral contribution from the manifold sample (RGB).
+
 ## Acceptance testing
 
 1. Build Cycles with `WITH_CYCLES_MANIFOLD=ON`.
