@@ -963,19 +963,23 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
                              const MpgSeedRay &seed,
                              const MpgOptions &options,
                              RNGState &rng_state,
-                             MpgSolverOutput &result)
+                             MpgSolverOutput &result,
+                             MpgFailureCode &failure_code)
 {
   (void)rng_state;
   (void)bsdf;
 
   result = MpgSolverOutput();
+  failure_code = MPG_FAILURE_NONE;
 
   if (seed.prim < 0 || seed.object < 0) {
+    failure_code = MPG_FAILURE_GEOMETRY;
     return false;
   }
 
   SpecularSurfaceGeometry geometry;
   if (!load_surface_geometry(kg, sd, seed, geometry)) {
+    failure_code = MPG_FAILURE_GEOMETRY;
     return false;
   }
 
@@ -985,6 +989,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
 
   SpecularParameters params;
   if (!specular_parameters_from_surface(kg, sd, geometry, seed, u, v, params)) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
@@ -997,6 +1002,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   SpecularEval eval;
   evaluate_specular(shading_point, seed, geometry, params, u, v, eval);
   if (eval.tir) {
+    failure_code = MPG_FAILURE_TOTAL_INTERNAL_REFLECTION;
     return false;
   }
 
@@ -1012,6 +1018,9 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
 
     float2 delta;
     if (!solve_step(J_cols[0], J_cols[1], eval.residual, delta)) {
+      if (failure_code == MPG_FAILURE_NONE) {
+        failure_code = MPG_FAILURE_JACOBIAN_ZERO;
+      }
       break;
     }
 
@@ -1030,6 +1039,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     if (new_eval.tir) {
       trust_radius *= 0.5f;
       if (trust_radius < 1e-6f) {
+        failure_code = MPG_FAILURE_TOTAL_INTERNAL_REFLECTION;
         return false;
       }
       continue;
@@ -1053,6 +1063,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     else {
       trust_radius *= 0.5f;
       if (trust_radius < 1e-6f) {
+        failure_code = (failure_code != MPG_FAILURE_NONE) ? failure_code : MPG_FAILURE_NEWTON_DIVERGED;
         return false;
       }
       ++increase_counter;
@@ -1064,6 +1075,9 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   }
 
   if (residual_norm > 1e-4f) {
+    if (failure_code == MPG_FAILURE_NONE) {
+      failure_code = MPG_FAILURE_NEWTON_DIVERGED;
+    }
     return false;
   }
 
@@ -1111,6 +1125,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
 
   result.spec_weight = evaluate_specular_weight(kg, params, result.dir_ds, result.dir_sl);
   if (is_zero(result.spec_weight)) {
+    failure_code = MPG_FAILURE_ZERO_THROUGHPUT;
     return false;
   }
   vertex.throughput = result.spec_weight;
@@ -1118,12 +1133,14 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
 
   float residual_matrix[2][2];
   if (!compute_residual_matrix(shading_point, seed, geometry, eval, residual_matrix)) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
   const float determinant =
       residual_matrix[0][0] * residual_matrix[1][1] - residual_matrix[0][1] * residual_matrix[1][0];
   if (!isfinite_safe(determinant) || determinant <= 0.0f) {
+    failure_code = MPG_FAILURE_JACOBIAN_ZERO;
     return false;
   }
 
@@ -1131,17 +1148,21 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   const float cos_theta = fabsf(dot(eval.normal, -result.wi));
   const float dist2 = fmaxf(result.distance_ds * result.distance_ds, 1e-8f);
   if (area_element <= 0.0f || cos_theta <= 0.0f) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
   const float area_to_solid = area_element * cos_theta / dist2;
   if (!isfinite_safe(area_to_solid) || area_to_solid <= 0.0f) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
   result.jacobian_total = fabsf(determinant) * area_to_solid;
   result.jacobian = result.jacobian_total;
   vertex.jacobian = result.jacobian_total;
+
+  failure_code = MPG_FAILURE_NONE;
 
   return true;
 }
@@ -1152,19 +1173,23 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                              const MpgSeedRay &seed,
                              const MpgOptions &options,
                              RNGState &rng_state,
-                             MpgSolverOutput &result)
+                             MpgSolverOutput &result,
+                             MpgFailureCode &failure_code)
 {
   (void)rng_state;
   (void)bsdf;
 
   result = MpgSolverOutput();
+  failure_code = MPG_FAILURE_NONE;
 
   if (seed.prim < 0 || seed.object < 0) {
+    failure_code = MPG_FAILURE_GEOMETRY;
     return false;
   }
 
   SpecularSurfaceGeometry primary_geometry;
   if (!load_surface_geometry(kg, sd, seed, primary_geometry)) {
+    failure_code = MPG_FAILURE_GEOMETRY;
     return false;
   }
 
@@ -1174,6 +1199,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   SpecularParameters primary_params;
   if (!specular_parameters_from_surface(kg, sd, primary_geometry, seed, primary_u, primary_v, primary_params)) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
@@ -1181,11 +1207,13 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   if (!trace_secondary_seed(
           kg, sd, primary_geometry, primary_u, primary_v, seed, primary_params, secondary_seed))
   {
+    failure_code = MPG_FAILURE_SEED;
     return false;
   }
 
   SpecularSurfaceGeometry secondary_geometry;
   if (!load_surface_geometry(kg, sd, secondary_seed, secondary_geometry)) {
+    failure_code = MPG_FAILURE_GEOMETRY;
     return false;
   }
 
@@ -1203,6 +1231,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   if (!specular_parameters_from_surface(
           kg, primary_sd, secondary_geometry, secondary_seed, secondary_u, secondary_v, secondary_params))
   {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
@@ -1221,6 +1250,8 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                               secondary_v,
                               eval))
   {
+    failure_code = (eval.primary.tir || eval.secondary.tir) ? MPG_FAILURE_TOTAL_INTERNAL_REFLECTION :
+                                                                 MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
@@ -1253,11 +1284,13 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                         eval.residual,
                                         J))
     {
+      failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
       return false;
     }
 
     float delta[4];
     if (!solve_linear_system_4x4(J, eval.residual, delta)) {
+      failure_code = MPG_FAILURE_JACOBIAN_ZERO;
       return false;
     }
 
@@ -1298,6 +1331,9 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     {
       trust_radius *= 0.5f;
       if (trust_radius < 1.0e-6f) {
+        failure_code = (new_eval.primary.tir || new_eval.secondary.tir) ?
+                            MPG_FAILURE_TOTAL_INTERNAL_REFLECTION :
+                            MPG_FAILURE_NEWTON_DIVERGED;
         return false;
       }
       continue;
@@ -1328,6 +1364,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     else {
       trust_radius *= 0.5f;
       if (trust_radius < 1.0e-6f) {
+        failure_code = MPG_FAILURE_NEWTON_DIVERGED;
         return false;
       }
       ++increase_counter;
@@ -1339,10 +1376,12 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   }
 
   if (residual_norm > 1.0e-4f) {
+    failure_code = MPG_FAILURE_NEWTON_DIVERGED;
     return false;
   }
 
   if (!specular_parameters_from_surface(kg, sd, primary_geometry, seed, primary_u, primary_v, primary_params)) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
@@ -1350,6 +1389,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   if (!specular_parameters_from_surface(
           kg, primary_sd, secondary_geometry, secondary_seed, secondary_u, secondary_v, secondary_params))
   {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
@@ -1365,6 +1405,8 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                               secondary_v,
                               eval))
   {
+    failure_code = (eval.primary.tir || eval.secondary.tir) ? MPG_FAILURE_TOTAL_INTERNAL_REFLECTION :
+                                                                 MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
@@ -1373,12 +1415,14 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   float matrix_primary[2][2];
   if (!compute_residual_matrix(receiver, primary_seed_for_jacobian, primary_geometry, eval.primary, matrix_primary)) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
   float determinant_primary = matrix_primary[0][0] * matrix_primary[1][1] -
                               matrix_primary[0][1] * matrix_primary[1][0];
   if (!isfinite_safe(determinant_primary) || determinant_primary <= 0.0f) {
+    failure_code = MPG_FAILURE_JACOBIAN_ZERO;
     return false;
   }
 
@@ -1386,10 +1430,12 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   const float cos_primary = fabsf(dot(eval.primary.normal, -eval.primary.dir_ds));
   const float dist_primary_sq = fmaxf(eval.primary.distance_ds * eval.primary.distance_ds, 1.0e-8f);
   if (!(area_primary > 0.0f) || !(cos_primary > 0.0f)) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
   const float area_to_solid_primary = area_primary * cos_primary / dist_primary_sq;
   if (!isfinite_safe(area_to_solid_primary) || area_to_solid_primary <= 0.0f) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
   const float jacobian_primary = fabsf(determinant_primary) * area_to_solid_primary;
@@ -1401,12 +1447,14 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   float matrix_secondary[2][2];
   if (!compute_residual_matrix(intermediate_point, secondary_seed, secondary_geometry, eval.secondary, matrix_secondary)) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
   float determinant_secondary = matrix_secondary[0][0] * matrix_secondary[1][1] -
                                 matrix_secondary[0][1] * matrix_secondary[1][0];
   if (!isfinite_safe(determinant_secondary) || determinant_secondary <= 0.0f) {
+    failure_code = MPG_FAILURE_JACOBIAN_ZERO;
     return false;
   }
 
@@ -1414,16 +1462,19 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   const float cos_secondary = fabsf(dot(eval.secondary.normal, -eval.secondary.dir_ds));
   const float dist_secondary_sq = fmaxf(eval.secondary.distance_ds * eval.secondary.distance_ds, 1.0e-8f);
   if (!(area_secondary > 0.0f) || !(cos_secondary > 0.0f)) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
   const float area_to_solid_secondary = area_secondary * cos_secondary / dist_secondary_sq;
   if (!isfinite_safe(area_to_solid_secondary) || area_to_solid_secondary <= 0.0f) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
   const float jacobian_secondary = fabsf(determinant_secondary) * area_to_solid_secondary;
 
   const float jacobian_total = jacobian_primary * jacobian_secondary;
   if (!isfinite_safe(jacobian_total) || jacobian_total <= 0.0f) {
+    failure_code = MPG_FAILURE_JACOBIAN_ZERO;
     return false;
   }
 
@@ -1431,6 +1482,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   const float3 dir_primary_out = eval.primary.dir_sl;
   const Spectrum primary_weight = evaluate_specular_weight(kg, primary_params, dir_primary_in, dir_primary_out);
   if (is_zero(primary_weight)) {
+    failure_code = MPG_FAILURE_ZERO_THROUGHPUT;
     return false;
   }
 
@@ -1438,11 +1490,13 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   const float3 dir_secondary_out = eval.secondary.dir_sl;
   const Spectrum secondary_weight = evaluate_specular_weight(kg, secondary_params, dir_secondary_in, dir_secondary_out);
   if (is_zero(secondary_weight)) {
+    failure_code = MPG_FAILURE_ZERO_THROUGHPUT;
     return false;
   }
 
   const Spectrum spec_throughput = primary_weight * secondary_weight;
   if (is_zero(spec_throughput)) {
+    failure_code = MPG_FAILURE_ZERO_THROUGHPUT;
     return false;
   }
 
@@ -1530,6 +1584,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   result.object = primary_vertex.object;
   result.prim = primary_vertex.prim;
 
+  failure_code = MPG_FAILURE_NONE;
   return true;
 }
 

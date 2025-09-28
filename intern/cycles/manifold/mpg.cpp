@@ -31,60 +31,116 @@ MpgResult mpg_try_connect(KernelGlobals kg,
                           RNGState &rng_state)
 {
   MpgResult result;
+  result.failure_code = MPG_FAILURE_NONE;
+
   if (opt.max_bounces <= 0) {
+    result.failure_code = MPG_FAILURE_UNSUPPORTED;
     return result;
   }
 
   if (CLOSURE_IS_BSDF_SINGULAR(bsdf.type) && !CLOSURE_IS_RAY_PORTAL(bsdf.type)) {
+    result.failure_code = MPG_FAILURE_UNSUPPORTED;
     return result;
   }
 
   const bool gate_active = (opt.gate_w > 0.0f) || (opt.gate_kappa > 0.0f);
+  const bool has_direction_relaxed = (g.rbar > 1.0e-4f);
+  const bool has_direction_strict = (g.rbar > 1.0e-3f);
+  const bool strict_gate = has_direction_strict && (g.peak_weight >= opt.gate_w) &&
+                           (g.kappa >= opt.gate_kappa);
+  const bool relaxed_gate = opt.relax_gate && has_direction_relaxed;
+  const bool bootstrap_gate = opt.relax_gate && !has_direction_relaxed;
+
+  uint32_t gate_mask = MPG_GATE_MASK_NONE;
   if (gate_active) {
-    const bool has_direction_relaxed = (g.rbar > 1.0e-4f);
-    const bool has_direction_strict = (g.rbar > 1.0e-3f);
-    const bool strict_gate = has_direction_strict && (g.peak_weight >= opt.gate_w) &&
-                             (g.kappa >= opt.gate_kappa);
-    const bool relaxed_gate = opt.relax_gate && has_direction_relaxed;
-    const bool bootstrap_gate = opt.relax_gate && !has_direction_relaxed;
+    gate_mask |= MPG_GATE_MASK_ACTIVE;
+  }
+  if (has_direction_relaxed) {
+    gate_mask |= MPG_GATE_MASK_HAS_DIRECTION_RELAXED;
+  }
+  if (has_direction_strict) {
+    gate_mask |= MPG_GATE_MASK_HAS_DIRECTION_STRICT;
+  }
+  if (strict_gate) {
+    gate_mask |= MPG_GATE_MASK_STRICT_PASS;
+  }
+  if (relaxed_gate) {
+    gate_mask |= MPG_GATE_MASK_RELAX_PASS;
+  }
+  if (bootstrap_gate) {
+    gate_mask |= MPG_GATE_MASK_BOOTSTRAP_PASS;
+  }
+  result.gate_mask = gate_mask;
+
+  if (gate_active) {
     if (!strict_gate && !relaxed_gate && !bootstrap_gate) {
+      result.failure_code = MPG_FAILURE_GATE;
       return result;
     }
   }
   else if (g.rbar <= 1.0e-5f) {
     /* Without guiding gate we still require a numerically stable direction. */
+    result.failure_code = MPG_FAILURE_GATE;
     return result;
   }
 
   MpgSeedRay seed;
-  if (!mpg_generate_seed(kg, sd, bsdf, g, opt, path_flag, bounce, rng_state, seed)) {
+  MpgFailureCode seed_failure = MPG_FAILURE_NONE;
+  if (!mpg_generate_seed(kg, sd, bsdf, g, opt, path_flag, bounce, rng_state, seed, seed_failure)) {
+    result.failure_code = (seed_failure != MPG_FAILURE_NONE) ? seed_failure : MPG_FAILURE_SEED;
+    return result;
+  }
+  result.seed_pdf = seed.seed_pdf;
+  result.light_pdf = seed.light_sample.pdf;
+
+  const float nee_pdf = seed.light_sample.pdf;
+  result.nee_pdf = nee_pdf;
+  if (!isfinite_safe(nee_pdf) || nee_pdf <= 0.0f) {
+    result.failure_code = MPG_FAILURE_INVALID_NEE_PDF;
     return result;
   }
 
   MpgSolverOutput solution;
   bool solved = false;
+  int attempt_count = 0;
+  MpgFailureCode solver_failure = MPG_FAILURE_NONE;
 
   if (opt.max_bounces >= 2) {
-    solved = mpg_solve_double_bounce(kg, sd, bsdf, seed, opt, rng_state, solution);
+    ++attempt_count;
+    solved = mpg_solve_double_bounce(kg, sd, bsdf, seed, opt, rng_state, solution, solver_failure);
     if (!solved) {
-      solved = mpg_solve_single_bounce(kg, sd, bsdf, seed, opt, rng_state, solution);
+      result.failure_code = solver_failure;
     }
-  }
-  else {
-    solved = mpg_solve_single_bounce(kg, sd, bsdf, seed, opt, rng_state, solution);
   }
 
   if (!solved) {
-    return result;
+    ++attempt_count;
+    solved = mpg_solve_single_bounce(kg, sd, bsdf, seed, opt, rng_state, solution, solver_failure);
+    if (!solved) {
+      result.failure_code = solver_failure;
+    }
   }
 
-  const float nee_pdf = seed.light_sample.pdf;
-  if (!isfinite_safe(nee_pdf) || nee_pdf <= 0.0f) {
+  result.attempt_count = attempt_count;
+
+  if (!solved) {
+    if (result.failure_code == MPG_FAILURE_NONE) {
+      result.failure_code = (solver_failure != MPG_FAILURE_NONE) ? solver_failure : MPG_FAILURE_NO_SPECULAR;
+    }
     return result;
   }
 
   if (solution.specular_vertex_count <= 0) {
+    result.failure_code = MPG_FAILURE_NO_SPECULAR;
     return result;
+  }
+
+  result.jacobian_total = solution.jacobian_total;
+  result.visibility = solution.visibility;
+  result.spec_weight = solution.specular_throughput;
+  result.specular_vertex_count = solution.specular_vertex_count;
+  for (int i = 0; i < solution.specular_vertex_count; ++i) {
+    result.specular_vertices[i] = solution.specular_vertices[i];
   }
 
   const MpgSpecularVertex &exit_vertex =
@@ -104,18 +160,18 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   light_sample_update(kg, &light_sample, exit_vertex.position, exit_vertex.normal, updated_path_flag);
 
-  /* `light_sample_update()` re-applies the selection term, so `light_sample.pdf` already
-   * contains the probability of picking this emitter. Do not multiply by it again or the
-   * MPG technique PDF gets scaled by an extra factor of `pdf_selection`, driving the MIS
-   * weight towards zero. */
   const float light_pdf_solid = light_sample.pdf;
   const float p_light = (isfinite_safe(light_pdf_solid)) ? fmaxf(light_pdf_solid, 0.0f) : 0.0f;
   if (p_light <= 0.0f) {
+    result.failure_code = MPG_FAILURE_INVALID_LIGHT_PDF;
+    result.light_pdf = p_light;
     return result;
   }
 
   const float p_seed = (isfinite_safe(seed.seed_pdf)) ? fmaxf(seed.seed_pdf, 1.0e-16f) : 0.0f;
   if (p_seed <= 0.0f) {
+    result.failure_code = MPG_FAILURE_INVALID_SEED_PDF;
+    result.seed_pdf = p_seed;
     return result;
   }
 
@@ -123,28 +179,24 @@ MpgResult mpg_try_connect(KernelGlobals kg,
                             fmaxf(fabsf(solution.jacobian_total), 0.0f) :
                             0.0f;
   if (J_total <= 0.0f) {
+    result.failure_code = MPG_FAILURE_JACOBIAN_ZERO;
     return result;
   }
 
   const float pdf = p_seed * p_light * J_total;
   if (!isfinite_safe(pdf) || pdf <= 0.0f) {
+    result.failure_code = MPG_FAILURE_INVALID_PDF;
     return result;
   }
 
   result.success = true;
+  result.failure_code = MPG_FAILURE_NONE;
   result.wi = solution.wi;
   result.pdf = pdf;
-  result.nee_pdf = nee_pdf;
-  result.visibility = solution.visibility;
-  result.jacobian_total = solution.jacobian_total;
   result.seed_pdf = p_seed;
   result.light_pdf = p_light;
-  result.spec_weight = solution.specular_throughput;
-  result.specular_vertex_count = solution.specular_vertex_count;
-  for (int i = 0; i < solution.specular_vertex_count; ++i) {
-    result.specular_vertices[i] = solution.specular_vertices[i];
-  }
   result.light = light_sample;
+
   return result;
 }
 

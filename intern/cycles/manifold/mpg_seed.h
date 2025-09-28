@@ -17,6 +17,7 @@ bool mpg_generate_seed(KernelGlobals kg,
                        const uint32_t path_flag,
                        const int bounce,
                        const RNGState &rng_state,
-                       MpgSeedRay &seed);
+                       MpgSeedRay &seed,
+                       MpgFailureCode &failure_code);
 
 CCL_NAMESPACE_END

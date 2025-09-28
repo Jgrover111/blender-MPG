@@ -25,27 +25,13 @@ bool mpg_generate_seed(KernelGlobals kg,
                        const uint32_t path_flag,
                        const int bounce,
                        const RNGState &rng_state,
-                       MpgSeedRay &seed)
+                       MpgSeedRay &seed,
+                       MpgFailureCode &failure_code)
 {
   seed = MpgSeedRay();
+  failure_code = MPG_FAILURE_NONE;
 
   (void)bsdf;
-
-  const bool gate_active = (options.gate_w > 0.0f) || (options.gate_kappa > 0.0f);
-  if (gate_active) {
-    const bool has_direction_relaxed = (guide.rbar > 1.0e-4f);
-    const bool has_direction_strict = (guide.rbar > 1.0e-3f);
-    const bool strict_gate = has_direction_strict && (guide.peak_weight >= options.gate_w) &&
-                             (guide.kappa >= options.gate_kappa);
-    const bool relaxed_gate = options.relax_gate && has_direction_relaxed;
-    const bool bootstrap_gate = options.relax_gate && !has_direction_relaxed;
-    if (!strict_gate && !relaxed_gate && !bootstrap_gate) {
-      return false;
-    }
-  }
-  else if (guide.rbar <= 1.0e-5f) {
-    return false;
-  }
 
   /* Determine the dominant seed direction from the guided mean with optional jitter. */
   float3 axis = guide.mean_dir;
@@ -53,6 +39,7 @@ bool mpg_generate_seed(KernelGlobals kg,
     axis = sd.N;
   }
   if (is_zero(axis)) {
+    failure_code = MPG_FAILURE_SEED;
     return false;
   }
   axis = normalize(axis);
@@ -71,6 +58,7 @@ bool mpg_generate_seed(KernelGlobals kg,
       axis, one_minus_cos(jitter), rand, &unused_cos, &seed_pdf);
 
   if (is_zero(seed_direction) || seed_pdf <= 0.0f) {
+    failure_code = MPG_FAILURE_SEED;
     return false;
   }
   seed_direction = normalize(seed_direction);
@@ -90,10 +78,12 @@ bool mpg_generate_seed(KernelGlobals kg,
 
   Intersection isect;
   if (!scene_intersect(kg, &ray, PATH_RAY_ALL_VISIBILITY, &isect)) {
+    failure_code = MPG_FAILURE_SEED;
     return false;
   }
 
   if (!(isect.type & PRIMITIVE_TRIANGLE)) {
+    failure_code = MPG_FAILURE_GEOMETRY;
     return false;
   }
 
@@ -113,10 +103,12 @@ bool mpg_generate_seed(KernelGlobals kg,
                                   path_flag,
                                   &light_sample))
   {
+    failure_code = MPG_FAILURE_SEED;
     return false;
   }
 
   if (light_sample.pdf <= 0.0f) {
+    failure_code = MPG_FAILURE_INVALID_LIGHT_PDF;
     return false;
   }
 

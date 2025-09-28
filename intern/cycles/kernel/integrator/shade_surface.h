@@ -156,7 +156,7 @@ ccl_device_inline void surface_write_manifold_debug_summary(KernelGlobals kg,
 
 ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
                                                             IntegratorState state,
-                                                            const bool attempted,
+                                                            const int attempt_count,
                                                             const bool success,
                                                             const float visibility,
                                                             const float seed_pdf,
@@ -169,6 +169,8 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
                                                             const float mis_denominator,
                                                             const float mis_weight,
                                                             const Spectrum &contribution,
+                                                            const uint32_t gate_mask,
+                                                            const int failure_code,
                                                             ccl_global float *ccl_restrict
                                                                 render_buffer)
 {
@@ -189,10 +191,13 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
 
   ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
 
+  UNUSED_VAR(success);
+  UNUSED_VAR(visibility);
+
   if (kernel_data.film.pass_manifold_attempt != PASS_UNUSED) {
-    const float3 attempt_values = make_float3(attempted ? 1.0f : 0.0f,
-                                              success ? 1.0f : 0.0f,
-                                              visibility);
+    const float3 attempt_values = make_float3((float)attempt_count,
+                                              float(gate_mask),
+                                              (float)failure_code);
     film_write_pass_float3(buffer + kernel_data.film.pass_manifold_attempt, attempt_values);
   }
 
@@ -220,7 +225,7 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
 #    else
   UNUSED_VARS(kg,
               state,
-              attempted,
+              attempt_count,
               success,
               visibility,
               seed_pdf,
@@ -233,6 +238,8 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
               mis_denominator,
               mis_weight,
               contribution,
+              gate_mask,
+              failure_code,
               render_buffer);
 #    endif
 }
@@ -760,12 +767,12 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   bool relax_gate = false;
   bool summary_available = false;
   bool manifold_gate_pass = false;
-  bool manifold_attempted = false;
+  int manifold_attempt_count = 0;
   bool manifold_success = false;
   float manifold_visibility = 0.0f;
-  float manifold_seed_pdf = 0.0f;
+  float manifold_seed_pdf = -1.0f;
   float manifold_light_pdf = 0.0f;
-  float manifold_abs_jacobian = 0.0f;
+  float manifold_abs_jacobian = -1.0f;
   float manifold_pdf = 0.0f;
   float manifold_weighted_bsdf_pdf = 0.0f;
   float manifold_weighted_guided_pdf = 0.0f;
@@ -773,6 +780,8 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   float manifold_mis_denominator = 0.0f;
   float manifold_mis_weight = 0.0f;
   Spectrum manifold_debug_contribution = zero_spectrum();
+  uint32_t manifold_gate_mask = MPG_GATE_MASK_NONE;
+  int manifold_failure_code = int(MPG_FAILURE_NONE);
 
 #    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
   if (manifold_guiding_enabled && guiding_features_enabled && kg->opgl_surface_sampling_distribution) {
@@ -835,6 +844,33 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   manifold_options.relax_gate = relax_gate;
 
   if (manifold_guiding_enabled) {
+    const bool gate_active_local = (manifold_options.gate_w > 0.0f) ||
+                                   (manifold_options.gate_kappa > 0.0f);
+    const bool has_dir_relaxed_local = (manifold_summary.rbar > 1.0e-4f);
+    const bool has_dir_strict_local = (manifold_summary.rbar > 1.0e-3f);
+    if (gate_active_local) {
+      manifold_gate_mask |= MPG_GATE_MASK_ACTIVE;
+    }
+    if (has_dir_relaxed_local) {
+      manifold_gate_mask |= MPG_GATE_MASK_HAS_DIRECTION_RELAXED;
+    }
+    if (has_dir_strict_local) {
+      manifold_gate_mask |= MPG_GATE_MASK_HAS_DIRECTION_STRICT;
+    }
+    if (manifold_gate_pass) {
+      manifold_gate_mask |= MPG_GATE_MASK_STRICT_PASS;
+    }
+    if (relax_gate) {
+      if (has_dir_relaxed_local) {
+        manifold_gate_mask |= MPG_GATE_MASK_RELAX_PASS;
+      }
+      else {
+        manifold_gate_mask |= MPG_GATE_MASK_BOOTSTRAP_PASS;
+      }
+    }
+  }
+
+  if (manifold_guiding_enabled) {
     surface_write_manifold_debug_summary(kg,
                                          state,
                                          manifold_summary,
@@ -842,6 +878,12 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                          manifold_gate_pass,
                                          relax_gate,
                                          render_buffer);
+  }
+
+  if (manifold_guiding_enabled && !manifold_guiding_ready) {
+    if (summary_available && !manifold_gate_pass && !relax_gate) {
+      manifold_failure_code = int(MPG_FAILURE_GATE);
+    }
   }
 
   if (manifold_guiding_enabled && manifold_guiding_ready) {
@@ -857,12 +899,18 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                            bounce,
                                            manifold_rng_state);
 
-    manifold_attempted = true;
+    manifold_attempt_count = mpg_result.attempt_count;
+    manifold_gate_mask |= mpg_result.gate_mask;
+    manifold_failure_code = int(mpg_result.failure_code);
     manifold_success = mpg_result.success;
     manifold_visibility = mpg_result.visibility;
-    manifold_seed_pdf = mpg_result.seed_pdf;
+    if (mpg_result.seed_pdf != 0.0f || manifold_seed_pdf < 0.0f) {
+      manifold_seed_pdf = mpg_result.seed_pdf;
+    }
     manifold_light_pdf = mpg_result.light_pdf;
-    manifold_abs_jacobian = fabsf(mpg_result.jacobian_total);
+    if (mpg_result.jacobian_total != 0.0f) {
+      manifold_abs_jacobian = fabsf(mpg_result.jacobian_total);
+    }
     manifold_pdf = mpg_result.pdf;
 
     if (mpg_result.success &&
@@ -974,7 +1022,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   if (manifold_guiding_enabled) {
     surface_write_manifold_debug_metrics(kg,
                                          state,
-                                         manifold_attempted,
+                                         manifold_attempt_count,
                                          manifold_success,
                                          manifold_visibility,
                                          manifold_seed_pdf,
@@ -987,6 +1035,8 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                          manifold_mis_denominator,
                                          manifold_mis_weight,
                                          manifold_debug_contribution,
+                                         manifold_gate_mask,
+                                         manifold_failure_code,
                                          render_buffer);
   }
 #  endif
