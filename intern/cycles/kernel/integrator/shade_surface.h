@@ -150,7 +150,13 @@ ccl_device_inline void surface_write_manifold_debug_summary(KernelGlobals kg,
     film_write_pass_float3(buffer + kernel_data.film.pass_manifold_gate, gate_values);
   }
 #    else
-  UNUSED_VARS(kg, state, summary, summary_available, gate_pass, relax_gate, render_buffer);
+  (void)kg;
+  (void)state;
+  (void)summary;
+  (void)summary_available;
+  (void)gate_pass;
+  (void)relax_gate;
+  (void)render_buffer;
 #    endif
 }
 
@@ -191,8 +197,8 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
 
   ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
 
-  UNUSED_VAR(success);
-  UNUSED_VAR(visibility);
+  (void)success;
+  (void)visibility;
 
   if (kernel_data.film.pass_manifold_attempt != PASS_UNUSED) {
     const float3 attempt_values = make_float3((float)attempt_count,
@@ -223,24 +229,24 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
                              contribution);
   }
 #    else
-  UNUSED_VARS(kg,
-              state,
-              attempt_count,
-              success,
-              visibility,
-              seed_pdf,
-              light_pdf,
-              jacobian,
-              pdf_mpg,
-              weighted_bsdf_pdf,
-              weighted_guided_pdf,
-              weighted_nee_pdf,
-              mis_denominator,
-              mis_weight,
-              contribution,
-              gate_mask,
-              failure_code,
-              render_buffer);
+  (void)kg;
+  (void)state;
+  (void)attempt_count;
+  (void)success;
+  (void)visibility;
+  (void)seed_pdf;
+  (void)light_pdf;
+  (void)jacobian;
+  (void)pdf_mpg;
+  (void)weighted_bsdf_pdf;
+  (void)weighted_guided_pdf;
+  (void)weighted_nee_pdf;
+  (void)mis_denominator;
+  (void)mis_weight;
+  (void)contribution;
+  (void)gate_mask;
+  (void)failure_code;
+  (void)render_buffer;
 #    endif
 }
 #  else
@@ -253,7 +259,13 @@ ccl_device_inline void surface_write_manifold_debug_summary(KernelGlobals kg,
                                                            ccl_global float *ccl_restrict
                                                                render_buffer)
 {
-  UNUSED_VARS(kg, state, summary, summary_available, gate_pass, relax_gate, render_buffer);
+  (void)kg;
+  (void)state;
+  (void)summary;
+  (void)summary_available;
+  (void)gate_pass;
+  (void)relax_gate;
+  (void)render_buffer;
 }
 
 ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
@@ -274,22 +286,22 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
                                                             ccl_global float *ccl_restrict
                                                                 render_buffer)
 {
-  UNUSED_VARS(kg,
-              state,
-              attempted,
-              success,
-              visibility,
-              seed_pdf,
-              light_pdf,
-              jacobian,
-              pdf_mpg,
-              weighted_bsdf_pdf,
-              weighted_guided_pdf,
-              weighted_nee_pdf,
-              mis_denominator,
-              mis_weight,
-              contribution,
-              render_buffer);
+  (void)kg;
+  (void)state;
+  (void)attempted;
+  (void)success;
+  (void)visibility;
+  (void)seed_pdf;
+  (void)light_pdf;
+  (void)jacobian;
+  (void)pdf_mpg;
+  (void)weighted_bsdf_pdf;
+  (void)weighted_guided_pdf;
+  (void)weighted_nee_pdf;
+  (void)mis_denominator;
+  (void)mis_weight;
+  (void)contribution;
+  (void)render_buffer;
 }
 #  endif
 #endif
