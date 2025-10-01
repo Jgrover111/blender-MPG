@@ -338,7 +338,7 @@ bool specular_parameters_from_surface(KernelGlobals kg,
 
   const ConstIntegratorState integrator_state = nullptr;
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
-      kg, integrator_state, &spec_sd, nullptr, PATH_RAY_SHADOW, true);
+      kg, integrator_state, &spec_sd, nullptr, PATH_RAY_CAMERA, true);
 
   const MicrofacetBsdf *reflection_microfacet = nullptr;
   const MicrofacetBsdf *refraction_microfacet = nullptr;

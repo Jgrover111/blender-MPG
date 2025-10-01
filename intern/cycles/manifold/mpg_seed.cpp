@@ -29,7 +29,7 @@ static inline bool has_specular_bsdf_at_hit(KernelGlobals kg, const Ray &ray, co
   const ConstIntegratorState integrator_state = nullptr;
   /* We only need closures, not emission; this is fast enough and CPU-safe. */
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
-      kg, integrator_state, &spec_sd, nullptr, PATH_RAY_SHADOW, true);
+      kg, integrator_state, &spec_sd, nullptr, PATH_RAY_CAMERA, true);
 
   for (int i = 0; i < spec_sd.num_closure; ++i) {
     const ShaderClosure *c = &spec_sd.closure[i];
