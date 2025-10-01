@@ -95,10 +95,6 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   if (!is_zero(seed.direction)) {
     result.wi = normalize(seed.direction);
   }
-  LightSample ls_tmp = seed.light_sample;
-  light_sample_update(kg, &ls_tmp, sd.P, sd.Ng, path_flag);
-  const float nee_pdf_sa = (isfinite_safe(ls_tmp.pdf) && ls_tmp.pdf > 0.0f) ? ls_tmp.pdf : 0.0f;
-  result.nee_pdf = nee_pdf_sa;
 
   MpgSolverOutput solution;
   bool solved = false;
@@ -158,10 +154,17 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     updated_path_flag |= PATH_RAY_MIS_HAD_TRANSMISSION;
   }
 
+  LightSample light_sa = light_sample;
   light_sample_update(kg, &light_sample, exit_vertex.position, exit_vertex.normal, updated_path_flag);
+  float nee_pdf_sa = 0.0f;
+  LightSample tmp = light_sa;
+  light_sample_update(kg, &tmp, sd.P, sd.Ng, path_flag);
+  nee_pdf_sa = (isfinite_safe(tmp.pdf) && tmp.pdf > 0.0f) ? tmp.pdf : 0.0f;
+  result.nee_pdf = nee_pdf_sa;
 
   const float p_light = mpg_light_sample_pdf_solid(kg, sd, light_sample);
   if (p_light <= 0.0f) {
+    result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_LIGHT_PDF;
     result.light_pdf = p_light;
     return result;
@@ -169,6 +172,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   const float p_seed = (isfinite_safe(seed.seed_pdf)) ? fmaxf(seed.seed_pdf, 1.0e-16f) : 0.0f;
   if (p_seed <= 0.0f) {
+    result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_SEED_PDF;
     result.seed_pdf = p_seed;
     return result;
@@ -178,12 +182,14 @@ MpgResult mpg_try_connect(KernelGlobals kg,
                             fmaxf(fabsf(solution.jacobian_total), 0.0f) :
                             0.0f;
   if (J_total <= 0.0f) {
+    result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_JACOBIAN_ZERO;
     return result;
   }
 
   const float pdf = p_seed * p_light * J_total;
   if (!isfinite_safe(pdf) || pdf <= 0.0f) {
+    result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_PDF;
     return result;
   }
@@ -195,6 +201,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.seed_pdf = p_seed;
   result.light_pdf = p_light;
   result.light = light_sample;
+  result.attempt_count = attempt_count;
 
   return result;
 }

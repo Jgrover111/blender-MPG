@@ -18,9 +18,24 @@ float mpg_light_sample_pdf_solid(KernelGlobals kg,
                                  const ShaderData &sd,
                                  const LightSample &light_sample)
 {
-  LightSample ls = light_sample;
-  light_sample_update(kg, &ls, sd.P, sd.Ng, PATH_RAY_SHADOW);
-  return (isfinite_safe(ls.pdf) && ls.pdf > 0.0f) ? ls.pdf : 0.0f;
+  if (!(isfinite_safe(light_sample.pdf)  && light_sample.pdf > 0.0f)) {
+    return 0.0f;
+  }
+
+  float pdf = light_sample.pdf;
+
+  const bool is_area_like = (len_squared(light_sample.Ng) > 0.0f);
+
+  if (is_area_like) {
+    const float3 L = light_sample.P - sd.P;
+    const float dist2 = fmaxf(dot(L, L), 1.0e-8f);
+    const float cos_l = fabsf(dot(light_sample.Ng, -light_sample.D));
+    if (!(isfinite(cos_l) && cos_l > 1.0e-8f)) {
+      return 0.0f;
+    }
+    pdf = pdf * (dist2 / cos_l);
+  }
+  return (isfinite(pdf) && pdf > 0.0f) ? pdf : 0.0f;
 }
 
 bool mpg_evaluate_pdf(KernelGlobals kg,

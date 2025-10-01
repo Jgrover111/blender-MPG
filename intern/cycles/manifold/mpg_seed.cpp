@@ -151,7 +151,7 @@ bool mpg_generate_seed(KernelGlobals kg,
     return false;
   }
 
-  seed.use_smooth_normals = false;
+  seed.use_smooth_normals = true;
 
   /* Sample an emitter using the Cycles light sampling routine. */
   const float3 rand_light = path_state_rng_3D(kg, &rng_state, PRNG_LIGHT);
