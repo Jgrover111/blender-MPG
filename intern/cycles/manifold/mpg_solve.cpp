@@ -279,9 +279,19 @@ void evaluate_specular(const ShadingPoint &D,
   eval.dir_sl = (eval.distance_sl > 0.0f) ? (eval.dir_sl / eval.distance_sl) :
                                            make_float3(0.0f, 0.0f, 1.0f);
 
-  eval.normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
-  eval.dNdu = zero_float3();
-  eval.dNdv = zero_float3();
+  if (seed.use_smooth_normals) {
+    eval.normal = combine_vertex_normals(geometry, u, v);
+    if (is_zero(eval.normal)) {
+      eval.normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+    }
+    eval.dNdu = compute_normal_derivative(geometry, u, v, eval.normal, true);
+    eval.dNdv = compute_normal_derivative(geometry, u, v, eval.normal, false);
+  }
+  else {
+    eval.normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+    eval.dNdu = zero_float3();
+    eval.dNdv = zero_float3();
+  }
 
   float cos_theta_i = 0.0f, cos_theta_t = 0.0f, eta = 1.0f;
   const float3 spec_dir = compute_specular(

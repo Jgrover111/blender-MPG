@@ -21,8 +21,12 @@
 
 CCL_NAMESPACE_BEGIN
 
-static inline bool has_specular_bsdf_at_hit(KernelGlobals kg, const Ray &ray, const Intersection &isect)
+static inline bool has_specular_bsdf_at_hit(KernelGlobals kg,
+                                            const Ray &ray,
+                                            const Intersection &isect,
+                                            bool &has_smooth_normals)
 {
+  has_smooth_normals = false;
   ShaderData spec_sd = {};
   shader_setup_from_ray(kg, &spec_sd, &ray, const_cast<Intersection *>(&isect));
 
@@ -30,6 +34,8 @@ static inline bool has_specular_bsdf_at_hit(KernelGlobals kg, const Ray &ray, co
   /* We only need closures, not emission; this is fast enough and CPU-safe. */
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
       kg, integrator_state, &spec_sd, nullptr, PATH_RAY_CAMERA, true);
+
+  has_smooth_normals = (spec_sd.shader & SHADER_SMOOTH_NORMAL) != 0;
 
   for (int i = 0; i < spec_sd.num_closure; ++i) {
     const ShaderClosure *c = &spec_sd.closure[i];
@@ -138,11 +144,13 @@ bool mpg_generate_seed(KernelGlobals kg,
       continue;
     }
 
-    if (!has_specular_bsdf_at_hit(kg, ray, isect)) {
+    bool has_smooth_normals = false;
+    if (!has_specular_bsdf_at_hit(kg, ray, isect, has_smooth_normals)) {
       last_failure = MPG_FAILURE_NO_SPECULAR;
       continue;
     }
 
+    seed.use_smooth_normals = has_smooth_normals;
     seed_valid = true;
   }
 
@@ -150,8 +158,6 @@ bool mpg_generate_seed(KernelGlobals kg,
     failure_code = last_failure;
     return false;
   }
-
-  seed.use_smooth_normals = true;
 
   /* Sample an emitter using the Cycles light sampling routine. */
   const float3 rand_light = path_state_rng_3D(kg, &rng_state, PRNG_LIGHT);
