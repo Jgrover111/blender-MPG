@@ -7,6 +7,7 @@
 #include "kernel/bvh/bvh.h"
 #include "kernel/bvh/util.h"
 #include "kernel/closure/bsdf_microfacet.h"
+#include "kernel/closure/bsdf_util.h"
 #include "kernel/integrator/state.h"
 #include "kernel/integrator/surface_shader.h"
 #include "kernel/geom/motion_triangle.h"
@@ -39,6 +40,10 @@ struct SpecularParameters {
   FresnelConductor fresnel_conductor = {};
   FresnelGeneralizedSchlick fresnel_generalized_schlick = {};
   FresnelF82Tint fresnel_f82_tint = {};
+  float3 normal = zero_float3();
+  bool has_normal = false;
+  bool has_conductor_fresnel = false;
+  ComplexIOR<Spectrum> conductor_ior = {};
 };
 
 struct SpecularEval {
@@ -105,12 +110,12 @@ void copy_microfacet_to_parameters(const MicrofacetBsdf *microfacet, SpecularPar
   }
 }
 
-static inline float pow5f(float x) { const float x2=x*x; return x2*x2*x; }
-
 Spectrum evaluate_specular_weight(KernelGlobals kg,
                                   const SpecularParameters &params,
                                   const float3 &dir_ds,
-                                  const float3 &dir_sl)
+                                  const float3 &dir_sl,
+                                  const float cos_theta_i_hint,
+                                  const float cos_theta_t_hint)
 {
   if (params.has_microfacet) {
     const MicrofacetBsdf &mf = params.microfacet;
@@ -133,11 +138,83 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     return mf.weight * fw;
   }
   else {
-    const float n = params.base_eta;
-    const float F0 = sqr((n - 1.0f) / (n + 1.0f));
+    const bool has_cos_i = (cos_theta_i_hint >= 0.0f);
+    const bool has_cos_t = (cos_theta_t_hint >= 0.0f);
+    float3 normal = params.normal;
+    if (!params.has_normal) {
+      normal = params.has_microfacet ? params.microfacet.N : normal;
+    }
+    if (is_zero(normal)) {
+      return zero_spectrum();
+    }
+    normal = normalize(normal);
 
-    const float c = 0.5f;
-    const float F = F0 + (1.0f - F0) * pow5f(1.0f - c);
+    float cos_theta_i = has_cos_i ? cos_theta_i_hint : dot(normal, dir_ds);
+    const float cos_theta_o = dot(normal, params.is_refraction ? dir_sl : -dir_sl);
+
+    if (params.is_refraction) {
+      if (!has_cos_i) {
+        if (cos_theta_i == 0.0f || cos_theta_o == 0.0f || cos_theta_i * cos_theta_o >= 0.0f) {
+          return zero_spectrum();
+        }
+        cos_theta_i = fabsf(cos_theta_i);
+      }
+      else {
+        if (!(cos_theta_i > 0.0f) || cos_theta_o == 0.0f) {
+          return zero_spectrum();
+        }
+      }
+    }
+    else {
+      if (!has_cos_i) {
+        if (cos_theta_i <= 0.0f || cos_theta_o <= 0.0f) {
+          return zero_spectrum();
+        }
+        cos_theta_i = fabsf(cos_theta_i);
+      }
+      else {
+        if (!(cos_theta_i > 0.0f) || cos_theta_o <= 0.0f) {
+          return zero_spectrum();
+        }
+      }
+    }
+    cos_theta_i = fabsf(cos_theta_i);
+
+    if (params.has_conductor_fresnel) {
+      if (!(cos_theta_i > 1e-7f)) {
+        return zero_spectrum();
+      }
+      return fresnel_conductor(cos_theta_i, params.conductor_ior);
+    }
+
+    const float eta = fmaxf(params.base_eta, 1.0e-6f);
+    if (!(eta > 0.0f)) {
+      return zero_spectrum();
+    }
+
+    float cos_theta_t = has_cos_t ? cos_theta_t_hint : 0.0f;
+    float relative_eta = eta;
+    if (params.is_refraction) {
+      const bool entering = dot(normal, dir_ds) > 0.0f;
+      relative_eta = entering ? (1.0f / eta) : eta;
+      if (!has_cos_t) {
+        const float sin2_theta_i = fmaxf(0.0f, 1.0f - cos_theta_i * cos_theta_i);
+        const float sin2_theta_t = relative_eta * relative_eta * sin2_theta_i;
+        if (sin2_theta_t >= 1.0f) {
+          return zero_spectrum();
+        }
+        cos_theta_t = sqrtf(fmaxf(0.0f, 1.0f - sin2_theta_t));
+      }
+    }
+
+    if (!(cos_theta_i > 1e-7f)) {
+      return zero_spectrum();
+    }
+
+    float cos_theta_t_eval = cos_theta_t;
+    const float F = params.is_refraction ?
+                        fresnel_dielectric(cos_theta_i, relative_eta, &cos_theta_t_eval) :
+                        fresnel_dielectric_cos(cos_theta_i, eta);
 
     return params.is_refraction ? make_spectrum(1.0f - F) : make_spectrum(F);
   }
@@ -350,6 +427,9 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
       kg, integrator_state, &spec_sd, nullptr, PATH_RAY_CAMERA, true);
 
+  const float3 shading_normal = safe_normalize(spec_sd.N);
+  const bool has_shading_normal = !is_zero(shading_normal);
+
   const MicrofacetBsdf *reflection_microfacet = nullptr;
   const MicrofacetBsdf *refraction_microfacet = nullptr;
 
@@ -405,6 +485,10 @@ bool specular_parameters_from_surface(KernelGlobals kg,
         }
         if (spec_sd.flag &SD_BACKFACING) eta = (eta > 1e-6f) ? 1.0f / eta : eta;
         params.base_eta = fabsf(eta);
+        if (has_shading_normal) {
+          params.normal = shading_normal;
+          params.has_normal = true;
+        }
         return true;
       }
       have_singular_reflection = true;
@@ -414,8 +498,33 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   if (have_singular_reflection) {
     params = SpecularParameters();
     params.has_microfacet = false;
-    params.is_refraction  = false;
-    params.base_eta       = 1.0f;
+    params.is_refraction = false;
+    params.base_eta = fabsf(eta_singular);
+    if (reflection_microfacet != nullptr) {
+      params.normal = safe_normalize(reflection_microfacet->N);
+      params.has_normal = !is_zero(params.normal);
+      if (reflection_microfacet->fresnel != nullptr) {
+        const MicrofacetFresnel fresnel_type =
+            static_cast<MicrofacetFresnel>(reflection_microfacet->fresnel_type);
+        if (fresnel_type == MicrofacetFresnel::CONDUCTOR) {
+          params.has_conductor_fresnel = true;
+          const FresnelConductor *fresnel = reinterpret_cast<const FresnelConductor *>(
+              reflection_microfacet->fresnel);
+          params.conductor_ior = fresnel->ior;
+        }
+        else if (fresnel_type == MicrofacetFresnel::DIELECTRIC ||
+                 fresnel_type == MicrofacetFresnel::DIELECTRIC_TINT)
+        {
+          if (reflection_microfacet->ior > 0.0f) {
+            params.base_eta = fabsf(reflection_microfacet->ior);
+          }
+        }
+      }
+    }
+    if (has_shading_normal && !params.has_normal) {
+      params.normal = shading_normal;
+      params.has_normal = true;
+    }
     return true;
   }
   const MicrofacetBsdf *microfacet = refraction_microfacet ? refraction_microfacet : reflection_microfacet;
@@ -434,6 +543,10 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     params.base_eta = 1.0f;
   }
   params.microfacet.N = normalize(params.microfacet.N);
+  if (has_shading_normal) {
+    params.normal = shading_normal;
+    params.has_normal = true;
+  }
   {
     const float3 spec_point = geometry.verts[0] * (1.0f - u - v) +
                               geometry.verts[1] * u +
@@ -448,6 +561,10 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     if (bad_refraction || bad_reflection) {
       params.microfacet.N = -params.microfacet.N;
     }
+  }
+  if (!params.has_normal && has_shading_normal) {
+    params.normal = shading_normal;
+    params.has_normal = true;
   }
   return true;
 }
@@ -1200,7 +1317,8 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   result.prim = vertex.prim;
   result.is_refraction = vertex.is_refraction;
 
-  result.spec_weight = evaluate_specular_weight(kg, params, result.dir_ds, result.dir_sl);
+  result.spec_weight = evaluate_specular_weight(
+      kg, params, result.dir_ds, result.dir_sl, vertex.cos_theta_in, vertex.cos_theta_out);
   if (is_zero(result.spec_weight)) {
     failure_code = MPG_FAILURE_ZERO_THROUGHPUT;
     return false;
@@ -1565,7 +1683,8 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   const float3 dir_primary_in = -eval.primary.dir_ds;
   const float3 dir_primary_out = eval.primary.dir_sl;
-  const Spectrum primary_weight = evaluate_specular_weight(kg, primary_params, dir_primary_in, dir_primary_out);
+  const Spectrum primary_weight = evaluate_specular_weight(
+      kg, primary_params, dir_primary_in, dir_primary_out, eval.primary.cos_theta_i, eval.primary.cos_theta_t);
   if (is_zero(primary_weight)) {
     failure_code = MPG_FAILURE_ZERO_THROUGHPUT;
     return false;
@@ -1573,7 +1692,12 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   const float3 dir_secondary_in = -eval.secondary.dir_ds;
   const float3 dir_secondary_out = eval.secondary.dir_sl;
-  const Spectrum secondary_weight = evaluate_specular_weight(kg, secondary_params, dir_secondary_in, dir_secondary_out);
+  const Spectrum secondary_weight = evaluate_specular_weight(kg,
+                                                            secondary_params,
+                                                            dir_secondary_in,
+                                                            dir_secondary_out,
+                                                            eval.secondary.cos_theta_i,
+                                                            eval.secondary.cos_theta_t);
   if (is_zero(secondary_weight)) {
     failure_code = MPG_FAILURE_ZERO_THROUGHPUT;
     return false;
