@@ -105,41 +105,42 @@ void copy_microfacet_to_parameters(const MicrofacetBsdf *microfacet, SpecularPar
   }
 }
 
+static inline float pow5f(float x) { const float x2=x*x; return x2*x2*x; }
+
 Spectrum evaluate_specular_weight(KernelGlobals kg,
                                   const SpecularParameters &params,
                                   const float3 &dir_ds,
                                   const float3 &dir_sl)
 {
-  if (!params.has_microfacet) {
-    return zero_spectrum();
-  }
+  if (params.has_microfacet) {
+    const MicrofacetBsdf &mf = params.microfacet;
+    const float cos_NI = dot(mf.N, dir_ds);
+    const float3 incident_dir = params.is_refraction ? dir_sl : -dir_sl;
+    const float cos_NO = dot(mf.N, incident_dir);
 
-  const MicrofacetBsdf &microfacet = params.microfacet;
-  const float cos_NI = dot(microfacet.N, dir_ds);
-  const float3 incident_dir = params.is_refraction ? dir_sl : -dir_sl;
-  const float cos_NO = dot(microfacet.N, incident_dir);
-
-  if (!(fabsf(cos_NI) > 1e-6f && fabsf(cos_NO) > 1e-6f)) {
-    return zero_spectrum();
-  }
-
-  if (params.is_refraction) {
-    if (cos_NI * cos_NO >= 0.0f) {
+    if (!(fabsf(cos_NI) > 1e-7f && fabsf(cos_NO) > 1e-7f)) {
       return zero_spectrum();
     }
+    if (params.is_refraction) {
+      if (cos_NI * cos_NO >= 0.0f) return zero_spectrum();
+    } else {
+      if (cos_NI <= 0.0f || cos_NO <= 0.0f) return zero_spectrum();
+    }
+
+    Spectrum F_refl=zero_spectrum(), F_trans=zero_spectrum();
+    microfacet_fresnel(kg, &mf, cos_NI, nullptr, &F_refl, &F_trans);
+    const Spectrum fw = params.is_refraction ? F_trans : F_refl;
+    return mf.weight * fw;
   }
   else {
-    if (cos_NI <= 0.0f || cos_NO <= 0.0f) {
-      return zero_spectrum();
-    }
+    const float n = params.base_eta;
+    const float F0 = sqr((n - 1.0f) / (n + 1.0f));
+
+    const float c = 0.5f;
+    const float F = F0 + (1.0f - F0) * pow5f(1.0f - c);
+
+    return params.is_refraction ? make_spectrum(1.0f - F) : make_spectrum(F);
   }
-
-  Spectrum reflectance = zero_spectrum();
-  Spectrum transmittance = zero_spectrum();
-  microfacet_fresnel(kg, &microfacet, cos_NI, nullptr, &reflectance, &transmittance);
-
-  const Spectrum fresnel_weight = params.is_refraction ? transmittance : reflectance;
-  return microfacet.weight * fresnel_weight;
 }
 
 float3 combine_vertex_normals(const SpecularSurfaceGeometry &geometry, const float u, const float v)
@@ -278,15 +279,9 @@ void evaluate_specular(const ShadingPoint &D,
   eval.dir_sl = (eval.distance_sl > 0.0f) ? (eval.dir_sl / eval.distance_sl) :
                                            make_float3(0.0f, 0.0f, 1.0f);
 
-  eval.normal = combine_vertex_normals(geometry, u, v);
-  eval.dNdu = compute_normal_derivative(geometry, u, v, eval.normal, true);
-  eval.dNdv = compute_normal_derivative(geometry, u, v, eval.normal, false);
-
-  if (dot(eval.normal, -eval.dir_ds) < 0.0f) {
-    eval.normal = -eval.normal;
-    eval.dNdu = -eval.dNdu;
-    eval.dNdv = -eval.dNdv;
-  }
+  eval.normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+  eval.dNdu = zero_float3();
+  eval.dNdv = zero_float3();
 
   float cos_theta_i = 0.0f, cos_theta_t = 0.0f, eta = 1.0f;
   const float3 spec_dir = compute_specular(
@@ -306,7 +301,7 @@ bool specular_parameters_from_surface(KernelGlobals kg,
                                       const float v,
                                       SpecularParameters &params)
 {
-params = SpecularParameters();
+  params = SpecularParameters();
 
   const float w = 1.0f - u - v;
   const float3 spec_point = geometry.verts[0] * w + geometry.verts[1] * u + geometry.verts[2] * v;
@@ -318,13 +313,14 @@ params = SpecularParameters();
   ray_dir /= distance;
 
   Ray ray;
-  ray.P = ray_offset(sd.P, sd.Ng);
+  float3 n_off = (dot(sd.Ng, ray_dir) >= 0.0f) ? sd.Ng : -sd.Ng;
+  ray.P = ray_offset(sd.P, n_off);
   ray.D = ray_dir;
   ray.tmin = 0.0f;
   ray.tmax = distance;
   ray.time = sd.time;
-  ray.self.prim = sd.prim;
-  ray.self.object = sd.object;
+  ray.self.prim = seed.prim;
+  ray.self.object = seed.object;
   ray.self.light_prim = PRIM_NONE;
   ray.self.light_object = OBJECT_NONE;
 
@@ -341,67 +337,108 @@ params = SpecularParameters();
   shader_setup_from_ray(kg, &spec_sd, &ray, &isect);
 
   const ConstIntegratorState integrator_state = nullptr;
-  surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
-      kg, integrator_state, &spec_sd, nullptr, PATH_RAY_DIFFUSE, true);
+  surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
+      kg, integrator_state, &spec_sd, nullptr, PATH_RAY_SHADOW, true);
 
   const MicrofacetBsdf *reflection_microfacet = nullptr;
   const MicrofacetBsdf *refraction_microfacet = nullptr;
+
+  bool have_singular_refraction = false;
+  bool have_singular_reflection = false;
+  float eta_singular = 1.5f; // overwritten below with microfacet IOR when available
 
   for (int i = 0; i < spec_sd.num_closure; ++i) {
     const ShaderClosure *closure = &spec_sd.closure[i];
     if (!CLOSURE_IS_BSDF(closure->type)) {
       continue;
     }
-    if (!(closure->sample_weight > 0.0f)) {
+
+    const bool is_trans = CLOSURE_IS_BSDF_TRANSMISSION(closure->type);
+    const bool is_micro = CLOSURE_IS_BSDF_MICROFACET(closure->type);
+    const bool is_singular = CLOSURE_IS_BSDF_SINGULAR(closure->type);
+
+    if (!(is_micro || is_singular)) {
       continue;
     }
 
-    if (!CLOSURE_IS_BSDF_MICROFACET(closure->type)) {
+    if (is_micro) {
+      const MicrofacetBsdf *mf = reinterpret_cast<const MicrofacetBsdf *>(closure);
+      const float ax = fmaxf(mf->alpha_x, 0.0f);
+      const float ay = fmaxf(mf->alpha_y, 0.0f);
+      const bool delta_like = (ax <= 1.0e-6f) && (ay <= 1.0e-6f);
+      if (delta_like) {
+        if (is_trans) {
+          have_singular_refraction = true;
+        }
+        else {
+          have_singular_reflection = true;
+        }
+        if (mf->ior > 0.0f) {
+          eta_singular = mf->ior;
+        }
+      }
+      if (is_trans) {
+        refraction_microfacet = mf;
+      } else {
+        reflection_microfacet = mf;
+      }
+    }
+    if (is_singular) {
+      if (is_trans) {
+        params = SpecularParameters();
+        params.has_microfacet = false;
+        params.is_refraction = true;
+
+        float eta = 1.45f;
+        if (refraction_microfacet) {
+          eta = fmaxf(1.0e-6f, refraction_microfacet->ior);
+        }
+        if (spec_sd.flag &SD_BACKFACING) eta = (eta > 1e-6f) ? 1.0f / eta : eta;
+        params.base_eta = fabsf(eta);
+        return true;
+      }
+      have_singular_reflection = true;
       continue;
-    }
-
-    const MicrofacetBsdf *microfacet = reinterpret_cast<const MicrofacetBsdf *>(closure);
-    const float roughness_sq = microfacet->alpha_x * microfacet->alpha_y;
-    if (roughness_sq > BSDF_ROUGHNESS_SQ_THRESH) {
-      continue;
-    }
-
-    const bool closure_is_refraction = CLOSURE_IS_REFRACTION(closure->type) ||
-                                       CLOSURE_IS_GLASS(closure->type);
-
-    if (closure_is_refraction) {
-      refraction_microfacet = microfacet;
-      break;
-    }
-
-    if (reflection_microfacet == nullptr) {
-      reflection_microfacet = microfacet;
     }
   }
-
-  const MicrofacetBsdf *microfacet = refraction_microfacet ? refraction_microfacet :
-                                                                  reflection_microfacet;
-  if (microfacet == nullptr) {
-    return false;
+  if (have_singular_reflection) {
+    params = SpecularParameters();
+    params.has_microfacet = false;
+    params.is_refraction  = false;
+    params.base_eta       = 1.0f;
+    return true;
   }
-
+  const MicrofacetBsdf *microfacet = refraction_microfacet ? refraction_microfacet : reflection_microfacet;
+  if (microfacet == nullptr) return false;
+  params = SpecularParameters();
   copy_microfacet_to_parameters(microfacet, params);
 
   params.is_refraction = (microfacet == refraction_microfacet);
   if (params.is_refraction) {
     float eta = microfacet->ior;
-    if (fabsf(eta) <= 1e-6f) {
-      return false;
-    }
-    if (spec_sd.flag & SD_BACKFACING) {
-      eta = 1.0f / eta;
-    }
+    if (fabsf(eta) <= 1e-6f) return false;
+    if (spec_sd.flag & SD_BACKFACING) eta = 1.0f / eta;
     params.base_eta = fabsf(eta);
   }
   else {
     params.base_eta = 1.0f;
   }
-
+  params.microfacet.N = normalize(params.microfacet.N);
+  {
+    const float3 spec_point = geometry.verts[0] * (1.0f - u - v) +
+                              geometry.verts[1] * u +
+                              geometry.verts[2] * v;
+    const float3 dir_ds = normalize(spec_point - sd.P);
+    const float3 dir_sl = normalize(seed.light_sample.P - spec_point);
+    const float3 incident  = dir_ds;
+    const float3 outgoing  = params.is_refraction ? dir_sl : -dir_sl;
+    const float s = dot(params.microfacet.N, incident) * dot(params.microfacet.N, outgoing);
+    const bool bad_refraction =  params.is_refraction ? (s > 0.0f) : false;
+    const bool bad_reflection = !params.is_refraction ? (s < 0.0f) : false;
+    if (bad_refraction || bad_reflection) {
+      params.microfacet.N = -params.microfacet.N;
+    }
+  }
   return true;
 }
 
@@ -507,7 +544,7 @@ float3 derivative_specular_refraction(const float3 &dir_in,
 {
   const float d_cos_theta_i = -dot(d_dir_in, normal) - dot(dir_in, d_normal);
   const float denom = fmaxf(1e-8f, cos_theta_t);
-  const float d_cos_theta_t = -(eta * eta * sin_theta_i * d_cos_theta_i) / denom;
+  const float d_cos_theta_t = (eta * eta * cos_theta_i / denom) * d_cos_theta_i;
   const float3 term_dir = eta * d_dir_in;
   const float3 term_normal = (eta * d_cos_theta_i - d_cos_theta_t) * normal +
                              (eta * cos_theta_i - cos_theta_t) * d_normal;
@@ -523,8 +560,8 @@ void compute_jacobian(const ShadingPoint &D,
   const float3 d_dir_ds_du = derivative_normalized(eval.point - D.position, geometry.dPdu);
   const float3 d_dir_ds_dv = derivative_normalized(eval.point - D.position, geometry.dPdv);
 
-  const float3 d_dir_sl_du = -derivative_normalized(seed.light_sample.P - eval.point, -geometry.dPdu);
-  const float3 d_dir_sl_dv = -derivative_normalized(seed.light_sample.P - eval.point, -geometry.dPdv);
+  const float3 d_dir_sl_du = derivative_normalized(seed.light_sample.P - eval.point, -geometry.dPdu);
+  const float3 d_dir_sl_dv = derivative_normalized(seed.light_sample.P - eval.point, -geometry.dPdv);
 
   float3 d_spec_du, d_spec_dv;
   if (!eval.refractive) {
@@ -596,14 +633,28 @@ bool solve_step(const float3 &J0,
   const float b0 = dot(J0, residual);
   const float b1 = dot(J1, residual);
 
-  const float det = a00 * a11 - a01 * a01;
-  if (fabsf(det) < 1e-10f) {
-    return false;
-  }
+  float det = a00 * a11 - a01 * a01;
+  if (!(isfinite_safe(det)) || fabsf(det) < 1e-12f) {
+    // Diagonal damping proportional to trace for scale invariance
+    const float trace = a00 + a11 + 1e-20f;
+    const float lambda = 1e-6f * trace;
 
-  delta.x = (-a11 * b0 + a01 * b1) / det;
-  delta.y = (a01 * b0 - a00 * b1) / det;
-  return true;
+    const float a00d = a00 + lambda;
+    const float a11d = a11 + lambda;
+    det = a00d * a11d - a01 * a01;
+
+    if (!(isfinite_safe(det)) || fabsf(det) < 1e-20f) {
+      return false;
+    }
+
+    delta.x = (-a11 * b0 + a01 * b1) / det;
+    delta.y = (a01 * b0 - a00 * b1) / det;
+  }
+  else {
+    delta.x = (-a11 * b0 + a01 * b1) / det;
+    delta.y = (a01 * b0 - a00 * b1) / det;
+  }
+  return isfinite_safe(delta.x) && isfinite_safe(delta.y);
 }
 
 void project_barycentrics(float &u, float &v)
@@ -702,7 +753,11 @@ bool trace_secondary_seed(KernelGlobals kg,
   }
 
   Ray ray;
-  ray.P = ray_offset(primary_point, primary_normal);
+  float3 offset_n = primary_normal;
+  if (dot(offset_n, dir_sl) < 0.0f) {
+    offset_n = -offset_n;
+  }
+  ray.P = ray_offset(primary_point, offset_n);
   ray.D = dir_sl;
   ray.tmin = 0.0f;
   const float light_distance = len(seed.light_sample.P - primary_point);
@@ -989,7 +1044,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
 
   SpecularParameters params;
   if (!specular_parameters_from_surface(kg, sd, geometry, seed, u, v, params)) {
-    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+    failure_code = MPG_FAILURE_NO_SPECULAR;
     return false;
   }
 
@@ -1007,6 +1062,10 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   }
 
   float residual_norm = len(eval.residual);
+  if (!isfinite_safe(residual_norm)) {
+    failure_code = MPG_FAILURE_NEWTON_DIVERGED;
+    return false;
+  }
 
   for (int iter = 0; iter < options.max_iters; ++iter) {
     if (residual_norm < 1e-5f) {
@@ -1017,7 +1076,10 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     compute_jacobian(shading_point, seed, geometry, eval, J_cols);
 
     float2 delta;
-    if (!solve_step(J_cols[0], J_cols[1], eval.residual, delta)) {
+    if (!solve_step(J_cols[0], J_cols[1], eval.residual, delta) ||
+        !isfinite_safe(delta.x) ||
+        !isfinite_safe(delta.y))
+    {
       if (failure_code == MPG_FAILURE_NONE) {
         failure_code = MPG_FAILURE_JACOBIAN_ZERO;
       }
@@ -1046,6 +1108,11 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     }
 
     const float new_residual_norm = len(new_eval.residual);
+    if (!isfinite_safe(new_residual_norm)) {
+      failure_code = MPG_FAILURE_NEWTON_DIVERGED;
+      return false;
+    }
+
     if (new_residual_norm < residual_norm) {
       u = new_u;
       v = new_v;
@@ -1074,7 +1141,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     }
   }
 
-  if (residual_norm > 1e-4f) {
+  if (!isfinite_safe(residual_norm) || residual_norm > 1e-4f) {
     if (failure_code == MPG_FAILURE_NONE) {
       failure_code = MPG_FAILURE_NEWTON_DIVERGED;
     }
@@ -1260,6 +1327,10 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     residual_norm += eval.residual[i] * eval.residual[i];
   }
   residual_norm = sqrtf(residual_norm);
+  if (!isfinite_safe(residual_norm)) {
+    failure_code = MPG_FAILURE_NEWTON_DIVERGED;
+    return false;
+  }
 
   float trust_radius = 0.25f;
   float prev_residual = FLT_MAX;
@@ -1344,6 +1415,10 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
       new_norm += new_eval.residual[i] * new_eval.residual[i];
     }
     new_norm = sqrtf(new_norm);
+    if (!isfinite_safe(new_norm)) {
+      failure_code = MPG_FAILURE_NEWTON_DIVERGED;
+      return false;
+    }
 
     if (new_norm < residual_norm) {
       primary_u = new_primary_u;
@@ -1375,7 +1450,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     }
   }
 
-  if (residual_norm > 1.0e-4f) {
+  if (!isfinite_safe(residual_norm) || residual_norm > 1.0e-4f) {
     failure_code = MPG_FAILURE_NEWTON_DIVERGED;
     return false;
   }
@@ -1459,8 +1534,8 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   }
 
   const float area_secondary = len(cross(eval.secondary.dXdu, eval.secondary.dXdv));
-  const float cos_secondary = fabsf(dot(eval.secondary.normal, -eval.secondary.dir_ds));
-  const float dist_secondary_sq = fmaxf(eval.secondary.distance_ds * eval.secondary.distance_ds, 1.0e-8f);
+  const float cos_secondary = fabsf(dot(eval.secondary.normal, -eval.secondary.dir_sl));
+  const float dist_secondary_sq = fmaxf(eval.secondary.distance_sl * eval.secondary.distance_sl, 1.0e-8f);
   if (!(area_secondary > 0.0f) || !(cos_secondary > 0.0f)) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
@@ -1473,7 +1548,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   const float jacobian_secondary = fabsf(determinant_secondary) * area_to_solid_secondary;
 
   const float jacobian_total = jacobian_primary * jacobian_secondary;
-  if (!isfinite_safe(jacobian_total) || jacobian_total <= 0.0f) {
+  if (!isfinite_safe(jacobian_total) || fabsf(jacobian_total) <= 1.0e-12f) {
     failure_code = MPG_FAILURE_JACOBIAN_ZERO;
     return false;
   }

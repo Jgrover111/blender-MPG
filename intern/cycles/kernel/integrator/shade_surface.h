@@ -783,7 +783,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   bool manifold_success = false;
   float manifold_visibility = 0.0f;
   float manifold_seed_pdf = -1.0f;
-  float manifold_light_pdf = 0.0f;
+  float manifold_light_pdf = -1.0f;
   float manifold_abs_jacobian = -1.0f;
   float manifold_pdf = 0.0f;
   float manifold_weighted_bsdf_pdf = 0.0f;
@@ -928,30 +928,30 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     LightSample mpg_light = mpg_result.light;
     const float3 wi_mpg = mpg_result.wi;
     const bool has_valid_wi = !is_zero(wi_mpg);
-    const float pdf_mpg =
+    const float pdf_mpg_sa =
         (isfinite_safe(mpg_result.pdf) && mpg_result.pdf > 0.0f) ? mpg_result.pdf : 0.0f;
-    const float nee_pdf_sa =
-        (isfinite_safe(mpg_result.light_pdf) && mpg_result.light_pdf > 0.0f) ? mpg_result.light_pdf : 0.0f;
+    const float pdf_nee_sa =
+        (isfinite_safe(mpg_result.nee_pdf) && mpg_result.nee_pdf > 0.0f) ? mpg_result.nee_pdf : 0.0f;
 
-    float weighted_bsdf_pdf = 0.0f;
-    float weighted_guided_pdf = 0.0f;
-    float unguided_pdf = 0.0f;
+    const bool mpg_ok = (mpg_result.success && has_valid_wi &&
+                         pdf_mpg_sa > 0.0f && mpg_result.visibility > 0.0f);
+
+    float pdf_bsdf_sa = 0.0f;
+    float pdf_guided_sa = 0.0f;
 
     if (has_valid_wi) {
       BsdfEval mpg_pdf_eval;
       bsdf_eval_init(&mpg_pdf_eval, zero_spectrum());
       float unguided_pdfs[MAX_CLOSURE];
-      unguided_pdf = surface_shader_bsdf_eval_pdfs(
+      pdf_bsdf_sa = surface_shader_bsdf_eval_pdfs(
           kg, sd, wi_mpg, &mpg_pdf_eval, unguided_pdfs, mpg_light.shader);
-      weighted_bsdf_pdf = unguided_pdf;
 
 #      if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
       if (surface_guiding_active)
       {
         const float guiding_sampling_prob = INTEGRATOR_STATE(
             state, guiding, surface_guiding_sampling_prob);
-        const float bssrdf_sampling_prob = INTEGRATOR_STATE(
-            state, guiding, bssrdf_sampling_prob);
+        const float bssrdf_sampling_prob = INTEGRATOR_STATE(state, guiding, bssrdf_sampling_prob);
         const float guiding_pdf = guiding_bsdf_pdf(kg, wi_mpg);
         const float guided_pdf =
             ((isfinite_safe(guiding_pdf) && guiding_pdf > 0.0f) ? guiding_pdf : 0.0f) *
@@ -960,37 +960,37 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
         if (kernel_data.integrator.guiding_directional_sampling_type ==
             GUIDING_DIRECTIONAL_SAMPLING_TYPE_RIS)
         {
-          weighted_bsdf_pdf = 0.5f * unguided_pdf;
-          weighted_guided_pdf = 0.5f * guided_pdf;
+          pdf_bsdf_sa *= 0.5f;
+          pdf_guided_sa = 0.5f * guided_pdf;
         }
         else {
-          weighted_bsdf_pdf *= (1.0f - guiding_sampling_prob);
-          weighted_guided_pdf = guiding_sampling_prob * guided_pdf;
+          pdf_guided_sa = guiding_sampling_prob * guided_pdf;
+          pdf_bsdf_sa *= (1.0f - guiding_sampling_prob);
         }
       }
 #      endif
     }
 
-    weighted_bsdf_pdf = fmaxf(weighted_bsdf_pdf, 0.0f);
-    weighted_guided_pdf = fmaxf(weighted_guided_pdf, 0.0f);
-    const float weighted_nee_pdf = fmaxf(nee_pdf_sa, 0.0f);
+    pdf_bsdf_sa = fmaxf(pdf_bsdf_sa, 0.0f);
+    pdf_guided_sa = fmaxf(pdf_guided_sa, 0.0f);
+    const float pdf_mpg = mpg_ok ? pdf_mpg_sa : 0.0f;
+    const float pdf_nee = fmaxf(pdf_nee_sa, 0.0f);
 
-    manifold_weighted_bsdf_pdf = weighted_bsdf_pdf;
-    manifold_weighted_guided_pdf = weighted_guided_pdf;
-    manifold_weighted_nee_pdf = weighted_nee_pdf;
+    manifold_weighted_bsdf_pdf = pdf_bsdf_sa;
+    manifold_weighted_guided_pdf = pdf_guided_sa;
+    manifold_weighted_nee_pdf = pdf_nee;
+    if (pdf_mpg > 0.0f) {
+      manifold_pdf = pdf_mpg;
+    }
 
-    const float mis_denominator = pdf_mpg + weighted_bsdf_pdf + weighted_guided_pdf + weighted_nee_pdf;
+    const float mis_denominator = pdf_bsdf_sa + pdf_guided_sa + pdf_nee + pdf_mpg;
     const float mis_weight =
         (mis_denominator > 0.0f && isfinite_safe(mis_denominator)) ? pdf_mpg / mis_denominator : 0.0f;
 
     manifold_mis_denominator = mis_denominator;
     manifold_mis_weight = mis_weight;
 
-    if (mpg_result.success &&
-        pdf_mpg > 0.0f &&
-        mpg_result.visibility > 0.0f &&
-        !is_zero(mpg_result.spec_weight) &&
-        has_valid_wi)
+    if (mpg_ok && !is_zero(mpg_result.spec_weight))
     {
       ShaderDataCausticsStorage mpg_emission_sd_storage;
       ccl_private ShaderData *mpg_emission_sd = AS_SHADER_DATA(&mpg_emission_sd_storage);
@@ -1005,7 +1005,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
           bsdf_eval_mul(&mpg_bsdf_eval, mpg_result.spec_weight);
 
           if (!bsdf_eval_is_zero(&mpg_bsdf_eval) && mis_weight > 0.0f) {
-            const float visibility_weight = mpg_result.visibility * mis_weight / pdf_mpg;
+            const float visibility_weight = (mpg_result.visibility > 0.0f && pdf_mpg > 0.0f) ? (mpg_result.visibility * (mis_weight / pdf_mpg)) : 0.0f;
             if (visibility_weight > 0.0f && isfinite_safe(visibility_weight)) {
               bsdf_eval_mul(&mpg_bsdf_eval, light_eval * visibility_weight);
 
