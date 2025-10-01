@@ -189,8 +189,7 @@ ccl_device_inline void surface_write_manifold_debug_summary(KernelGlobals kg,
     const float3 gate_values = make_float3(summary_available ? 1.0f : 0.0f,
                                            gate_pass ? 1.0f : 0.0f,
                                            relax_gate ? 1.0f : 0.0f);
-    manifold_debug_store_average_float3(
-        state, buffer + kernel_data.film.pass_manifold_gate, gate_values);
+    film_overwrite_pass_float3(buffer + kernel_data.film.pass_manifold_gate, gate_values);
   }
 #    else
   (void)kg;
@@ -218,6 +217,7 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
                                                             const float mis_denominator,
                                                             const float mis_weight,
                                                             const Spectrum &contribution,
+                                                            const bool manifold_pdf_factors_valid,
                                                             const uint32_t gate_mask,
                                                             const int failure_code,
                                                             ccl_global float *ccl_restrict
@@ -248,29 +248,21 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
   const float prev_weight = (sample > 0) ? (float)sample * inv_sample : 0.0f;
 
   if (kernel_data.film.pass_manifold_attempt != PASS_UNUSED) {
-    const float3 attempt_values = make_float3((float)attempt_count,
-                                              float(gate_mask),
-                                              (float)failure_code);
-    float attempt_avg = attempt_values.x;
-
-    if (sample > 0) {
-      const float3 prev = kernel_read_pass_float3(buffer + kernel_data.film.pass_manifold_attempt);
-      attempt_avg = (prev.x * prev_weight) + (attempt_values.x * inv_sample);
-    }
-
-    const float3 stored_values = make_float3(attempt_avg, attempt_values.y, attempt_values.z);
+    const float3 stored_values = make_float3((float)attempt_count,
+                                             float(gate_mask),
+                                             (float)failure_code);
     film_overwrite_pass_float3(buffer + kernel_data.film.pass_manifold_attempt, stored_values);
   }
 
   if (kernel_data.film.pass_manifold_pdf_factors != PASS_UNUSED) {
     const float3 factor_values = make_float3(seed_pdf, light_pdf, jacobian);
-    float3 stored_values = factor_values;
+    const bool value_valid =
+        (factor_values.x >= 0.0f && factor_values.y >= 0.0f && factor_values.z >= 0.0f);
+    float3 stored_values = value_valid ? factor_values : make_float3(0.0f, 0.0f, 0.0f);
 
     if (sample > 0) {
       const float3 prev = kernel_read_pass_float3(buffer + kernel_data.film.pass_manifold_pdf_factors);
       const bool prev_valid = (prev.x >= 0.0f && prev.y >= 0.0f && prev.z >= 0.0f);
-      const bool value_valid = (factor_values.x >= 0.0f && factor_values.y >= 0.0f &&
-                                factor_values.z >= 0.0f);
 
       if (prev_valid && value_valid) {
         stored_values = (prev * prev_weight) + (factor_values * inv_sample);
@@ -285,17 +277,21 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
   }
 
   if (kernel_data.film.pass_manifold_competing_pdfs != PASS_UNUSED) {
-    const float3 competing_values = make_float3(
-        weighted_bsdf_pdf, weighted_guided_pdf, weighted_nee_pdf);
-    manifold_debug_store_average_float3(state,
-                                        buffer + kernel_data.film.pass_manifold_competing_pdfs,
-                                        competing_values);
+    if (manifold_pdf_factors_valid || sample == 0) {
+      const float3 competing_values = make_float3(
+          weighted_bsdf_pdf, weighted_guided_pdf, weighted_nee_pdf);
+      manifold_debug_store_average_float3(state,
+                                          buffer + kernel_data.film.pass_manifold_competing_pdfs,
+                                          competing_values);
+    }
   }
 
   if (kernel_data.film.pass_manifold_mis != PASS_UNUSED) {
-    const float3 mis_values = make_float3(pdf_mpg, mis_denominator, mis_weight);
-    manifold_debug_store_average_float3(
-        state, buffer + kernel_data.film.pass_manifold_mis, mis_values);
+    if (manifold_pdf_factors_valid || sample == 0) {
+      const float3 mis_values = make_float3(pdf_mpg, mis_denominator, mis_weight);
+      manifold_debug_store_average_float3(
+          state, buffer + kernel_data.film.pass_manifold_mis, mis_values);
+    }
   }
 
   if (kernel_data.film.pass_manifold_contribution != PASS_UNUSED) {
@@ -318,6 +314,7 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
   (void)mis_denominator;
   (void)mis_weight;
   (void)contribution;
+  (void)manifold_pdf_factors_valid;
   (void)gate_mask;
   (void)failure_code;
   (void)render_buffer;
@@ -357,6 +354,7 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
                                                             const float mis_denominator,
                                                             const float mis_weight,
                                                             const Spectrum &contribution,
+                                                            const bool manifold_pdf_factors_valid,
                                                             const uint32_t gate_mask,
                                                             const int failure_code,
                                                             ccl_global float *ccl_restrict
@@ -377,6 +375,7 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
   (void)mis_denominator;
   (void)mis_weight;
   (void)contribution;
+  (void)manifold_pdf_factors_valid;
   (void)gate_mask;
   (void)failure_code;
   (void)render_buffer;
@@ -864,6 +863,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   float manifold_light_pdf = -1.0f;
   float manifold_abs_jacobian = -1.0f;
   float manifold_pdf = 0.0f;
+  bool manifold_pdf_factors_valid = false;
   float manifold_weighted_bsdf_pdf = 0.0f;
   float manifold_weighted_guided_pdf = 0.0f;
   float manifold_weighted_nee_pdf = 0.0f;
@@ -990,14 +990,16 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     manifold_failure_code = int(mpg_result.failure_code);
     manifold_success = mpg_result.success;
     manifold_visibility = mpg_result.visibility;
-    if (mpg_result.seed_pdf != 0.0f || manifold_seed_pdf < 0.0f) {
-      manifold_seed_pdf = mpg_result.seed_pdf;
-    }
-    manifold_light_pdf = mpg_result.light_pdf;
-    if (mpg_result.jacobian_total != 0.0f) {
-      manifold_abs_jacobian = fabsf(mpg_result.jacobian_total);
-    }
-    manifold_pdf = mpg_result.pdf;
+
+    const bool gate_pass_any_result =
+        (mpg_result.gate_mask & (MPG_GATE_MASK_STRICT_PASS | MPG_GATE_MASK_RELAX_PASS |
+                                 MPG_GATE_MASK_BOOTSTRAP_PASS)) != 0;
+    const bool mpg_failure = (mpg_result.failure_code != MPG_FAILURE_NONE);
+
+    manifold_seed_pdf = -1.0f;
+    manifold_light_pdf = -1.0f;
+    manifold_abs_jacobian = -1.0f;
+    manifold_pdf = 0.0f;
 
     LightSample mpg_light = mpg_result.light;
     const float3 wi_mpg = mpg_result.wi;
@@ -1006,9 +1008,29 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
         (isfinite_safe(mpg_result.pdf) && mpg_result.pdf > 0.0f) ? mpg_result.pdf : 0.0f;
     const float pdf_nee_sa =
         (isfinite_safe(mpg_result.nee_pdf) && mpg_result.nee_pdf > 0.0f) ? mpg_result.nee_pdf : 0.0f;
+    const float jacobian_abs = fabsf(mpg_result.jacobian_total);
 
-    const bool mpg_ok = (mpg_result.success && has_valid_wi &&
-                         pdf_mpg_sa > 0.0f && mpg_result.visibility > 0.0f);
+    manifold_pdf_factors_valid = (gate_pass_any_result && !mpg_failure && mpg_result.success &&
+                                  mpg_result.seed_pdf > 0.0f && mpg_result.light_pdf > 0.0f &&
+                                  jacobian_abs > 0.0f && pdf_mpg_sa > 0.0f);
+
+    if (manifold_pdf_factors_valid) {
+      manifold_seed_pdf = mpg_result.seed_pdf;
+      manifold_light_pdf = mpg_result.light_pdf;
+      manifold_abs_jacobian = jacobian_abs;
+      manifold_pdf = pdf_mpg_sa;
+    }
+
+    if (manifold_guiding_ready && gate_pass_any_result && !mpg_failure) {
+      kernel_assert(mpg_result.seed_pdf > 0.0f);
+      kernel_assert(mpg_result.light_pdf > 0.0f);
+      kernel_assert(jacobian_abs > 0.0f);
+      kernel_assert(pdf_mpg_sa > 0.0f);
+      kernel_assert(pdf_nee_sa > 0.0f);
+    }
+
+    const bool mpg_ok =
+        (manifold_pdf_factors_valid && has_valid_wi && mpg_result.visibility > 0.0f);
 
     float pdf_bsdf_sa = 0.0f;
     float pdf_guided_sa = 0.0f;
@@ -1060,6 +1082,15 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     const float mis_denominator = pdf_bsdf_sa + pdf_guided_sa + pdf_nee + pdf_mpg;
     const float mis_weight =
         (mis_denominator > 0.0f && isfinite_safe(mis_denominator)) ? pdf_mpg / mis_denominator : 0.0f;
+
+    if (pdf_mpg > 0.0f && mis_denominator > 0.0f && isfinite_safe(mis_denominator)) {
+      const float expected_weight = pdf_mpg / mis_denominator;
+      if (isfinite_safe(expected_weight)) {
+        const float diff = fabsf(expected_weight - mis_weight);
+        const float tolerance = fmaxf(1.0e-6f, fabsf(expected_weight) * 1.0e-5f);
+        kernel_assert(diff <= tolerance);
+      }
+    }
 
     manifold_mis_denominator = mis_denominator;
     manifold_mis_weight = mis_weight;
@@ -1128,6 +1159,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                          manifold_mis_denominator,
                                          manifold_mis_weight,
                                          manifold_debug_contribution,
+                                         manifold_pdf_factors_valid,
                                          manifold_gate_mask,
                                          manifold_failure_code,
                                          render_buffer);
