@@ -896,7 +896,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 
       if (summary_available) {
         manifold_gate_pass =
-            (manifold_summary.peak_weight >= kernel_data.integrator.manifold_gate_weight) ||
+            (manifold_summary.peak_weight >= kernel_data.integrator.manifold_gate_weight) &&
             (manifold_summary.kappa >= kernel_data.integrator.manifold_gate_kappa);
         const bool gate_pass = manifold_gate_pass;
         const bool has_direction_strict = (manifold_summary.rbar > 1.0e-3f);
