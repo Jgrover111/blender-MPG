@@ -372,7 +372,7 @@ void evaluate_specular(const ShadingPoint &D,
 
   float cos_theta_i = 0.0f, cos_theta_t = 0.0f, eta = 1.0f;
   const float3 spec_dir = compute_specular(
-      -eval.dir_ds, eval.normal, params, eval.tir, cos_theta_i, cos_theta_t, eta);
+      eval.dir_ds, eval.normal, params, eval.tir, cos_theta_i, cos_theta_t, eta);
   eval.refractive = params.is_refraction;
   eval.eta = eta;
   eval.cos_theta_i = cos_theta_i;
@@ -872,7 +872,7 @@ bool trace_secondary_seed(KernelGlobals kg,
     return false;
   }
 
-  float3 dir_ds = sd.P - primary_point;
+  float3 dir_ds = primary_point - sd.P;
   float distance_ds = len(dir_ds);
   if (!(distance_ds > 1e-6f)) {
     return false;
@@ -887,7 +887,8 @@ bool trace_secondary_seed(KernelGlobals kg,
   float cos_theta_i = 0.0f;
   float cos_theta_t = 0.0f;
   float eta_used = 1.0f;
-  const float3 dir_sl = compute_specular(dir_ds, primary_normal, primary_params, tir, cos_theta_i, cos_theta_t, eta_used);
+  const float3 dir_sl = compute_specular(
+      dir_ds, primary_normal, primary_params, tir, cos_theta_i, cos_theta_t, eta_used);
   (void)cos_theta_i;
   (void)cos_theta_t;
   (void)eta_used;
