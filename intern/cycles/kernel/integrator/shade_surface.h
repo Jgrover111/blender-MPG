@@ -876,12 +876,11 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 #    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
   if (manifold_guiding_enabled && guiding_features_enabled && kg->opgl_surface_sampling_distribution) {
     const float guiding_seed = INTEGRATOR_STATE(state, guiding, sample_surface_guiding_rand);
-    bool guiding_distribution_ready = guiding_surface_prepare_distribution(kg, sd->P, sd->N, guiding_seed);
+    bool guiding_distribution_ready = guiding_surface_init_distribution(kg, sd->P, guiding_seed);
 
     if (!guiding_distribution_ready) {
       const float guiding_seed = path_state_rng_1D(kg, rng_state, PRNG_SURFACE_BSDF_GUIDING);
-      guiding_distribution_ready = guiding_surface_prepare_distribution(
-          kg, sd->P, sd->N, guiding_seed);
+      guiding_distribution_ready = guiding_surface_init_distribution(kg, sd->P, guiding_seed);
     }
 
     if (guiding_distribution_ready) {
@@ -910,6 +909,10 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
           manifold_guiding_ready = true;
         }
       }
+    }
+
+    if (guiding_distribution_ready && surface_guiding_active) {
+      guiding_surface_apply_cosine_product(kg, sd->N);
     }
   }
 #    endif

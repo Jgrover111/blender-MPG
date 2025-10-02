@@ -578,24 +578,43 @@ ccl_device_forceinline void guiding_write_debug_passes(KernelGlobals kg,
 
 /* Guided BSDFs */
 
+ccl_device_forceinline bool guiding_surface_init_distribution(KernelGlobals kg,
+                                                              const float3 P,
+                                                              float rand)
+{
+#if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4 && !defined(__KERNEL_GPU__)
+  if (!kg->opgl_surface_sampling_distribution) {
+    return false;
+  }
+  return guiding_ssd->Init(guiding_guiding_field, guiding_point3f(P), rand);
+#else
+  UNUSED_VARS(kg, P, rand);
+  return false;
+#endif
+}
+
+ccl_device_forceinline void guiding_surface_apply_cosine_product(KernelGlobals kg, const float3 N)
+{
+#if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4 && !defined(__KERNEL_GPU__)
+  (void)kg;
+  guiding_ssd->ApplyCosineProduct(guiding_point3f(N));
+#else
+  UNUSED_VARS(kg, N);
+#endif
+}
+
 ccl_device_forceinline bool guiding_surface_prepare_distribution(KernelGlobals kg,
                                                                  const float3 P,
                                                                  const float3 N,
                                                                  float rand)
 {
 #if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4 && !defined(__KERNEL_GPU__)
-  if (!kg->opgl_surface_sampling_distribution) {
-    return false;
-  }
-  if (guiding_ssd->Init(guiding_guiding_field, guiding_point3f(P), rand)) {
-    guiding_ssd->ApplyCosineProduct(guiding_point3f(N));
+  if (guiding_surface_init_distribution(kg, P, rand)) {
+    guiding_surface_apply_cosine_product(kg, N);
     return true;
   }
 #else
-  (void)kg;
-  (void)P;
-  (void)N;
-  (void)rand;
+  UNUSED_VARS(kg, P, N, rand);
 #endif
   return false;
 }
