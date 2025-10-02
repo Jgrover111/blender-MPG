@@ -70,6 +70,9 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   if (bootstrap_gate) {
     gate_mask |= MPG_GATE_MASK_BOOTSTRAP_PASS;
   }
+  if (!gate_active) {
+    gate_mask |= MPG_GATE_MASK_STRICT_PASS;
+  }
   result.gate_mask = gate_mask;
 
   if (gate_active) {

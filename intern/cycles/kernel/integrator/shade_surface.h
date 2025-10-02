@@ -992,8 +992,9 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     manifold_visibility = mpg_result.visibility;
 
     const bool gate_pass_any_result =
-        (mpg_result.gate_mask & (MPG_GATE_MASK_STRICT_PASS | MPG_GATE_MASK_RELAX_PASS |
-                                 MPG_GATE_MASK_BOOTSTRAP_PASS)) != 0;
+        ((mpg_result.gate_mask & MPG_GATE_MASK_ACTIVE) == 0) ||
+        ((mpg_result.gate_mask & (MPG_GATE_MASK_STRICT_PASS | MPG_GATE_MASK_RELAX_PASS |
+                                  MPG_GATE_MASK_BOOTSTRAP_PASS)) != 0);
     const bool mpg_failure = (mpg_result.failure_code != MPG_FAILURE_NONE);
 
     manifold_seed_pdf = -1.0f;
