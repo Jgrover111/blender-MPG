@@ -140,34 +140,54 @@ bool pgl_estimate_summary(const OpenPGLSurfaceDistribution &dist_world,
     return false;
   }
 
-  float3 mean = zero_float3();
-  for (const float3 &d : samples) {
-    mean += d;
-  }
-  mean /= float(count);
+  const float cone_cos = cosf(cone_half_angle_rad);
+  int best_count = 0;
+  float3 best_sum = zero_float3();
+  float best_sum_len_sq = 0.0f;
 
+  for (int i = 0; i < count; i++) {
+    const float3 &pivot = samples[i];
+    float3 cluster_sum = zero_float3();
+    int cluster_count = 0;
+
+    for (int j = 0; j < count; j++) {
+      const float3 &candidate = samples[j];
+      if (dot(candidate, pivot) >= cone_cos) {
+        cluster_sum += candidate;
+        cluster_count++;
+      }
+    }
+
+    const float cluster_sum_len_sq = dot(cluster_sum, cluster_sum);
+    if (cluster_count > best_count ||
+        (cluster_count == best_count && cluster_sum_len_sq > best_sum_len_sq)) {
+      best_count = cluster_count;
+      best_sum = cluster_sum;
+      best_sum_len_sq = cluster_sum_len_sq;
+    }
+  }
+
+  float3 mean_dir = zero_float3();
   float rbar = 0.0f;
-  float3 mean_dir = safe_normalize_or_zero(mean, rbar);
-  if (rbar < 1.0e-3f) {
+  float peak_weight = 0.0f;
+
+  const bool have_cluster = (best_count > 0) && (best_sum_len_sq > 1.0e-12f) &&
+                            std::isfinite(best_sum_len_sq);
+  if (have_cluster) {
+    const float cluster_sum_len = sqrtf(best_sum_len_sq);
+    mean_dir = best_sum / cluster_sum_len;
+    rbar = clamp(cluster_sum_len / float(best_count), 0.0f, 1.0f);
+    peak_weight = float(best_count) / float(count);
+  }
+  else {
     if (constrain_hemisphere) {
       mean_dir = hemisphere_normal;
     }
     else if (count > 0) {
       mean_dir = samples[0];
     }
-    rbar = max(rbar, 0.0f);
-  }
-
-  float peak_weight = 0.0f;
-  if (!is_zero(mean_dir)) {
-    const float cone_cos = cosf(cone_half_angle_rad);
-    int in_cone = 0;
-    for (const float3 &d : samples) {
-      if (dot(d, mean_dir) >= cone_cos) {
-        in_cone++;
-      }
-    }
-    peak_weight = float(in_cone) / float(count);
+    rbar = 0.0f;
+    peak_weight = 0.0f;
   }
 
   const float kappa = (rbar > 1.0e-3f) ? estimate_kappa_from_rbar(rbar) : 0.0f;
