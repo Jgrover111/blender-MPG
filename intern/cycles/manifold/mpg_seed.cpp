@@ -99,7 +99,8 @@ bool mpg_generate_seed(KernelGlobals kg,
   float3 seed_direction = zero_float3();
   const float3 offset_normal = faceforward(sd.Ng, -sd.wi, sd.Ng);
 
-  const int max_seed_attempts = use_uniform_fallback ? 32 : 16;
+  const bool extra_seed_attempts = bootstrap_seed || use_uniform_fallback;
+  const int max_seed_attempts = extra_seed_attempts ? 32 : 16;
   bool seed_valid = false;
   Intersection isect = {};
   MpgFailureCode last_failure = MPG_FAILURE_SEED;
