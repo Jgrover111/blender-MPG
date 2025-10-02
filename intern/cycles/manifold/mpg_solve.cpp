@@ -380,6 +380,22 @@ void evaluate_specular(const ShadingPoint &D,
   eval.residual = eval.dir_sl - spec_dir;
 }
 
+static bool smooth_normals_at_hit(KernelGlobals kg,
+                                  const Ray &ray,
+                                  const Intersection &isect,
+                                  bool &has_smooth_normals)
+{
+  ShaderData hit_sd = {};
+  shader_setup_from_ray(kg, &hit_sd, &ray, const_cast<Intersection *>(&isect));
+
+  const ConstIntegratorState integrator_state = nullptr;
+  surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
+      kg, integrator_state, &hit_sd, nullptr, PATH_RAY_CAMERA, true);
+
+  has_smooth_normals = (hit_sd.shader & SHADER_SMOOTH_NORMAL) != 0;
+  return true;
+}
+
 bool specular_parameters_from_surface(KernelGlobals kg,
                                       const ShaderData &sd,
                                       const SpecularSurfaceGeometry &geometry,
@@ -909,7 +925,10 @@ bool trace_secondary_seed(KernelGlobals kg,
   secondary_seed.prim = isect.prim;
   secondary_seed.bary_u = isect.u;
   secondary_seed.bary_v = isect.v;
-  secondary_seed.use_smooth_normals = false;
+
+  bool has_smooth_normals = secondary_seed.use_smooth_normals;
+  smooth_normals_at_hit(kg, ray, isect, has_smooth_normals);
+  secondary_seed.use_smooth_normals = has_smooth_normals;
   return true;
 }
 
@@ -929,12 +948,15 @@ bool evaluate_double_bounce(const ShadingPoint &receiver,
                             const float v1,
                             const float u2,
                             const float v2,
+                            const bool primary_use_smooth_normals,
+                            const bool secondary_use_smooth_normals,
                             DoubleBounceEval &eval)
 {
   const float3 secondary_point = surface_point_from_barycentric(secondary_geometry, u2, v2);
 
   MpgSeedRay primary_seed = {};
   primary_seed.light_sample.P = secondary_point;
+  primary_seed.use_smooth_normals = primary_use_smooth_normals;
 
   evaluate_specular(receiver, primary_seed, primary_geometry, primary_params, u1, v1, eval.primary);
   if (!isfinite_safe(eval.primary.distance_ds) || !(eval.primary.distance_ds > 1e-6f)) {
@@ -954,6 +976,7 @@ bool evaluate_double_bounce(const ShadingPoint &receiver,
 
   MpgSeedRay secondary_seed = {};
   secondary_seed.light_sample.P = light_point;
+  secondary_seed.use_smooth_normals = secondary_use_smooth_normals;
 
   evaluate_specular(intermediate_point, secondary_seed, secondary_geometry, secondary_params, u2, v2, eval.secondary);
   if (!isfinite_safe(eval.secondary.distance_ds) || !(eval.secondary.distance_ds > 1e-6f)) {
@@ -991,6 +1014,8 @@ bool compute_double_bounce_jacobian(const ShadingPoint &receiver,
                                     const float v1,
                                     const float u2,
                                     const float v2,
+                                    const bool primary_use_smooth_normals,
+                                    const bool secondary_use_smooth_normals,
                                     const float base_residual[4],
                                     float J[4][4])
 {
@@ -1032,6 +1057,8 @@ bool compute_double_bounce_jacobian(const ShadingPoint &receiver,
                                 offset_v1,
                                 offset_u2,
                                 offset_v2,
+                                primary_use_smooth_normals,
+                                secondary_use_smooth_normals,
                                 offset_eval))
     {
       return false;
@@ -1443,6 +1470,8 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                               primary_v,
                               secondary_u,
                               secondary_v,
+                              seed.use_smooth_normals,
+                              secondary_seed.use_smooth_normals,
                               eval))
   {
     failure_code = (eval.primary.tir || eval.secondary.tir) ? MPG_FAILURE_TOTAL_INTERNAL_REFLECTION :
@@ -1480,6 +1509,8 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                         primary_v,
                                         secondary_u,
                                         secondary_v,
+                                        seed.use_smooth_normals,
+                                        secondary_seed.use_smooth_normals,
                                         eval.residual,
                                         J))
     {
@@ -1526,6 +1557,8 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                 new_primary_v,
                                 new_secondary_u,
                                 new_secondary_v,
+                                seed.use_smooth_normals,
+                                secondary_seed.use_smooth_normals,
                                 new_eval))
     {
       trust_radius *= 0.5f;
@@ -1606,6 +1639,8 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                               primary_v,
                               secondary_u,
                               secondary_v,
+                              seed.use_smooth_normals,
+                              secondary_seed.use_smooth_normals,
                               eval))
   {
     failure_code = (eval.primary.tir || eval.secondary.tir) ? MPG_FAILURE_TOTAL_INTERNAL_REFLECTION :
