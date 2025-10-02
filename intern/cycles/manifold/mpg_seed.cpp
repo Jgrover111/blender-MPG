@@ -99,13 +99,15 @@ bool mpg_generate_seed(KernelGlobals kg,
   float3 seed_direction = zero_float3();
   const float3 offset_normal = faceforward(sd.Ng, -sd.wi, sd.Ng);
 
-  const int max_seed_attempts = bootstrap_seed ? 32 : (use_uniform_fallback ? 32 : 16);
+  const int seed_branch_count = (bootstrap_seed || use_uniform_fallback) ? 32 : 16;
+  const int max_seed_attempts = seed_branch_count;
   bool seed_valid = false;
   Intersection isect = {};
   MpgFailureCode last_failure = MPG_FAILURE_SEED;
 
   for (int attempt = 0; attempt < max_seed_attempts && !seed_valid; ++attempt) {
-    const float2 rand = path_state_rng_2D(kg, &rng_state, PRNG_SURFACE_BSDF + attempt);
+    const float2 rand = path_branched_rng_2D(
+        kg, &rng_state, attempt, seed_branch_count, PRNG_SURFACE_BSDF);
 
     if (use_uniform_fallback) {
       seed_direction = sample_uniform_sphere(rand);
