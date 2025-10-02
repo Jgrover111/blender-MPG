@@ -154,7 +154,7 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     normal = normalize(normal);
 
     float cos_theta_i = has_cos_i ? cos_theta_i_hint : dot(normal, dir_ds);
-    const float cos_theta_o = dot(normal, params.is_refraction ? dir_sl : -dir_sl);
+    const float cos_theta_o = dot(normal, dir_sl);
 
     if (params.is_refraction) {
       if (!has_cos_i) {
@@ -164,7 +164,7 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
         cos_theta_i = fabsf(cos_theta_i);
       }
       else {
-        if (!(cos_theta_i > 0.0f) || cos_theta_o == 0.0f) {
+        if (!(cos_theta_i > 0.0f) || cos_theta_o >= 0.0f) {
           return zero_spectrum();
         }
       }
