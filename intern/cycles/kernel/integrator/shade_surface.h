@@ -895,18 +895,18 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                                manifold_summary);
 
       if (summary_available) {
-        manifold_gate_pass =
+        const bool has_direction_strict = (manifold_summary.rbar > 1.0e-3f);
+        const bool meets_gate_thresholds =
             (manifold_summary.peak_weight >= kernel_data.integrator.manifold_gate_weight) &&
             (manifold_summary.kappa >= kernel_data.integrator.manifold_gate_kappa);
-        const bool gate_pass = manifold_gate_pass;
-        const bool has_direction_strict = (manifold_summary.rbar > 1.0e-3f);
+        manifold_gate_pass = has_direction_strict && meets_gate_thresholds;
 
         if (bootstrap_window) {
           /* Allow bootstrap attempts while the guided summary is still noisy. */
-          relax_gate = (!gate_pass) || !has_direction_strict;
+          relax_gate = !manifold_gate_pass;
         }
 
-        if ((gate_pass && has_direction_strict) || relax_gate) {
+        if (manifold_gate_pass || relax_gate) {
           manifold_guiding_ready = true;
         }
       }
@@ -943,16 +943,16 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     if (has_dir_strict_local) {
       manifold_gate_mask |= MPG_GATE_MASK_HAS_DIRECTION_STRICT;
     }
-    if (manifold_gate_pass) {
+    const bool relaxed_gate_local = relax_gate && has_dir_relaxed_local;
+    const bool bootstrap_gate_local = relax_gate && !has_dir_relaxed_local;
+    if (manifold_gate_pass || !gate_active_local) {
       manifold_gate_mask |= MPG_GATE_MASK_STRICT_PASS;
     }
-    if (relax_gate) {
-      if (has_dir_relaxed_local) {
-        manifold_gate_mask |= MPG_GATE_MASK_RELAX_PASS;
-      }
-      else {
-        manifold_gate_mask |= MPG_GATE_MASK_BOOTSTRAP_PASS;
-      }
+    if (relaxed_gate_local) {
+      manifold_gate_mask |= MPG_GATE_MASK_RELAX_PASS;
+    }
+    if (bootstrap_gate_local) {
+      manifold_gate_mask |= MPG_GATE_MASK_BOOTSTRAP_PASS;
     }
   }
 
