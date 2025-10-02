@@ -120,16 +120,20 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
   if (params.has_microfacet) {
     const MicrofacetBsdf &mf = params.microfacet;
     const float cos_NI = dot(mf.N, dir_ds);
-    const float3 incident_dir = params.is_refraction ? dir_sl : -dir_sl;
-    const float cos_NO = dot(mf.N, incident_dir);
+    const float cos_NO = dot(mf.N, dir_sl);
 
     if (!(fabsf(cos_NI) > 1e-7f && fabsf(cos_NO) > 1e-7f)) {
       return zero_spectrum();
     }
     if (params.is_refraction) {
-      if (cos_NI * cos_NO >= 0.0f) return zero_spectrum();
-    } else {
-      if (cos_NI <= 0.0f || cos_NO <= 0.0f) return zero_spectrum();
+      if (cos_NI * cos_NO >= 0.0f) {
+        return zero_spectrum();
+      }
+    }
+    else {
+      if (cos_NI <= 0.0f || cos_NO <= 0.0f) {
+        return zero_spectrum();
+      }
     }
 
     Spectrum F_refl=zero_spectrum(), F_trans=zero_spectrum();
