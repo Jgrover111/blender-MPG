@@ -81,11 +81,6 @@ MpgResult mpg_try_connect(KernelGlobals kg,
       return result;
     }
   }
-  else if (g.rbar <= 1.0e-5f) {
-    /* Without guiding gate we still require a numerically stable direction. */
-    result.failure_code = MPG_FAILURE_GATE;
-    return result;
-  }
 
   MpgSeedRay seed;
   MpgFailureCode seed_failure = MPG_FAILURE_NONE;
