@@ -798,8 +798,8 @@ bool solve_step(const float3 &J0,
       return false;
     }
 
-    delta.x = (a11 * b0 - a01 * b1) / det;
-    delta.y = (a00 * b1 - a01 * b0) / det;
+    delta.x = (a11d * b0 - a01 * b1) / det;
+    delta.y = (a00d * b1 - a01 * b0) / det;
   }
   else {
     delta.x = (a11 * b0 - a01 * b1) / det;
