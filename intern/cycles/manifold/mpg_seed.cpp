@@ -80,15 +80,17 @@ bool mpg_generate_seed(KernelGlobals kg,
     axis = sd.N;
   }
 
-  const bool bootstrap_seed = (guide.rbar <= 1.0e-4f);
-  const bool use_uniform_fallback = bootstrap_seed || is_zero(axis);
-  if (!use_uniform_fallback) {
+  const bool axis_valid = !is_zero(axis);
+  if (axis_valid) {
     axis = normalize(axis);
   }
 
+  const bool bootstrap_seed = (guide.rbar <= 1.0e-4f);
+  const bool use_uniform_fallback = !axis_valid;
+
   const float min_cone_angle = 0.00872664626f; /* ~0.5 degrees. */
   float jitter = fmaxf(options.angular_jitter, min_cone_angle);
-  if (guide.rbar <= 1.0e-4f) {
+  if (bootstrap_seed) {
     /* With no directional signal yet, explore a wide bootstrap cone similar to the Mitsuba
      * reference implementation. */
     jitter = 0.6f * M_PI_F;
