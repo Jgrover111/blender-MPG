@@ -180,17 +180,18 @@ bool pgl_estimate_summary(const OpenPGLSurfaceDistribution &dist_world,
     peak_weight = float(best_count) / float(count);
   }
   else {
-    if (constrain_hemisphere) {
-      mean_dir = hemisphere_normal;
-    }
-    else if (count > 0) {
-      mean_dir = samples[0];
-    }
     rbar = 0.0f;
     peak_weight = 0.0f;
   }
 
-  const float kappa = (rbar > 1.0e-3f) ? estimate_kappa_from_rbar(rbar) : 0.0f;
+  const bool have_direction = (rbar >= 1.0e-3f) && !is_zero(mean_dir);
+  if (!have_direction) {
+    mean_dir = zero_float3();
+    rbar = 0.0f;
+    peak_weight = 0.0f;
+  }
+
+  const float kappa = have_direction ? estimate_kappa_from_rbar(rbar) : 0.0f;
 
   out.mean_dir = mean_dir;
   out.peak_weight = peak_weight;

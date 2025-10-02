@@ -900,9 +900,13 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
             (manifold_summary.kappa >= kernel_data.integrator.manifold_gate_kappa);
         manifold_gate_pass = has_direction_strict && meets_gate_thresholds;
 
-        if (bootstrap_window) {
-          /* Allow bootstrap attempts while the guided summary is still noisy. */
-          relax_gate = !manifold_gate_pass;
+        if (!manifold_gate_pass) {
+          const bool directionless_summary = (manifold_summary.rbar <= 1.0e-4f);
+          /* Always allow the wide bootstrap seeding path once the guide reports no
+           * meaningful direction, even if we are past the initial bootstrap window.
+           * Otherwise the relaxed attempt would be skipped entirely and debug AOVs
+           * would stop receiving MIS diagnostics. */
+          relax_gate = directionless_summary || bootstrap_window;
         }
 
         if (manifold_gate_pass || relax_gate) {
