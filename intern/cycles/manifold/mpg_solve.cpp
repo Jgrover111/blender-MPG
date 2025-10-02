@@ -296,22 +296,26 @@ float3 compute_specular(const float3 &dir_ds,
                         float &cos_theta_t,
                         float &eta_used)
 {
-  if (!params.is_refraction) {
-    tir = false;
-    cos_theta_i = fabsf(dot(-dir_ds, normal));
-    cos_theta_t = cos_theta_i;
-    eta_used = 1.0f;
-    return reflect_dir(dir_ds, normal);
+  const float3 incident = -dir_ds;
+  float3 oriented_normal = normal;
+  if (dot(oriented_normal, incident) < 0.0f) {
+    oriented_normal = -oriented_normal;
   }
 
-  float3 oriented_normal = normal;
+  if (!params.is_refraction) {
+    tir = false;
+    cos_theta_i = fmaxf(dot(incident, oriented_normal), 0.0f);
+    cos_theta_t = cos_theta_i;
+    eta_used = 1.0f;
+    return reflect_dir(incident, oriented_normal);
+  }
+
   float eta = fmaxf(params.base_eta, 1e-6f);
-  if (dot(-dir_ds, normal) < 0.0f) {
-    oriented_normal = -normal;
+  if (dot(incident, normal) < 0.0f) {
     eta = 1.0f / eta;
   }
 
-  float3 dir = refract_dir(dir_ds, oriented_normal, eta, tir, cos_theta_i, cos_theta_t);
+  float3 dir = refract_dir(incident, oriented_normal, eta, tir, cos_theta_i, cos_theta_t);
   eta_used = eta;
   if (tir) {
     cos_theta_i = fabsf(cos_theta_i);
