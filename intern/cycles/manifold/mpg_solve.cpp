@@ -951,8 +951,7 @@ bool trace_secondary_seed(KernelGlobals kg,
   ray.P = mpg_surface_ray_offset(kg, offset_sd, primary_point, dir_sl);
   ray.D = dir_sl;
   ray.tmin = 0.0f;
-  const float light_distance = len(seed.light_sample.P - primary_point);
-  ray.tmax = (std::isfinite(light_distance) && light_distance > 0.0f) ? light_distance : FLT_MAX;
+  ray.tmax = FLT_MAX;
   ray.time = sd.time;
   ray.self.prim = seed.prim;
   ray.self.object = seed.object;
