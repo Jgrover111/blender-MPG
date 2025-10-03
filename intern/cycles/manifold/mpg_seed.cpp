@@ -121,14 +121,17 @@ bool mpg_generate_seed(KernelGlobals kg,
     axis = normalize(axis);
   }
 
-  const bool bootstrap_seed = (guide.rbar <= 1.0e-4f);
+  const bool relaxed_gate = options.relax_gate;
+  /* Relaxed gating shares the bootstrap cone/budget to aggressively search nearby
+   * speculars, matching the Mitsuba fallback when the guide loses directional signal. */
+  const bool bootstrap_seed = relaxed_gate || (guide.rbar <= 1.0e-4f);
   const bool use_uniform_fallback = !axis_valid;
 
   const float min_cone_angle = 0.00872664626f; /* ~0.5 degrees. */
   float jitter = fmaxf(options.angular_jitter, min_cone_angle);
   if (bootstrap_seed) {
-    /* With no directional signal yet, explore a wide bootstrap cone similar to the Mitsuba
-     * reference implementation. */
+    /* With no directional signal yet, or when the integrator relaxes the gate, explore a wide
+     * bootstrap cone similar to the Mitsuba reference implementation. */
     jitter = 0.6f * M_PI_F;
   }
   float seed_pdf = 0.0f;
