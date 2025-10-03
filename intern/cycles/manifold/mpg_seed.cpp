@@ -7,6 +7,7 @@
 #include "kernel/bvh/bvh.h"
 #include "kernel/bvh/util.h"
 #include "kernel/closure/bsdf_microfacet.h"
+#include "kernel/geom/object.h"
 #include "kernel/geom/triangle.h"
 #include "kernel/light/light.h"
 #include "kernel/sample/mapping.h"
@@ -16,6 +17,7 @@
 
 #include "util/math_base.h"
 #include "util/math_float4.h"
+#include "util/math_intersect.h"
 
 #include <cfloat>
 
@@ -58,6 +60,40 @@ static inline bool has_specular_bsdf_at_hit(KernelGlobals kg,
   return false;
 }
 
+static inline float3 mpg_surface_ray_offset(KernelGlobals kg,
+                                            const ShaderData &sd,
+                                            const float3 ray_P,
+                                            const float3 ray_D)
+{
+  if (!(sd.type & PRIMITIVE_TRIANGLE)) {
+    return ray_P;
+  }
+
+  float3 verts[3];
+  if (sd.type == PRIMITIVE_TRIANGLE) {
+    triangle_vertices(kg, sd.prim, verts);
+  }
+  else {
+    kernel_assert(sd.type == PRIMITIVE_MOTION_TRIANGLE);
+    motion_triangle_vertices(kg, sd.object, sd.prim, sd.time, verts);
+  }
+
+  float3 local_ray_P = ray_P;
+  float3 local_ray_D = ray_D;
+
+  if (!(sd.object_flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+    const Transform itfm = object_get_inverse_transform(kg, &sd);
+    local_ray_P = transform_point(&itfm, local_ray_P);
+    local_ray_D = transform_direction(&itfm, local_ray_D);
+  }
+
+  if (ray_triangle_intersect_self(local_ray_P, local_ray_D, verts)) {
+    return ray_P;
+  }
+
+  return ray_offset(ray_P, sd.Ng);
+}
+
 bool mpg_generate_seed(KernelGlobals kg,
                        const ShaderData &sd,
                        const ShaderClosure &bsdf,
@@ -97,8 +133,6 @@ bool mpg_generate_seed(KernelGlobals kg,
   }
   float seed_pdf = 0.0f;
   float3 seed_direction = zero_float3();
-  const float3 offset_normal = faceforward(sd.Ng, -sd.wi, sd.Ng);
-
   const int seed_branch_count = (bootstrap_seed || use_uniform_fallback) ? 32 : 16;
   const int max_seed_attempts = bootstrap_seed ? 32 : (use_uniform_fallback ? 32 : 16);
   bool seed_valid = false;
@@ -128,7 +162,7 @@ bool mpg_generate_seed(KernelGlobals kg,
 
     /* Trace the seed ray to locate the candidate specular surface. */
     Ray ray;
-    ray.P = ray_offset(sd.P, offset_normal);
+    ray.P = mpg_surface_ray_offset(kg, sd, sd.P, seed_direction);
     ray.D = seed_direction;
     ray.tmin = 0.0f;
     ray.tmax = FLT_MAX;
