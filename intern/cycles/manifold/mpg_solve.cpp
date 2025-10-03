@@ -881,6 +881,13 @@ bool trace_secondary_seed(KernelGlobals kg,
     return false;
   }
 
+  const float3 offset_ng_raw = cross(primary_geometry.dPdu, primary_geometry.dPdv);
+  bool use_offset_ng = !is_zero(offset_ng_raw);
+  float3 offset_ng = use_offset_ng ? safe_normalize(offset_ng_raw) : zero_float3();
+  if (use_offset_ng && is_zero(offset_ng)) {
+    use_offset_ng = false;
+  }
+
   float3 dir_ds = primary_point - sd.P;
   float distance_ds = len(dir_ds);
   if (!(distance_ds > 1e-6f)) {
@@ -892,12 +899,18 @@ bool trace_secondary_seed(KernelGlobals kg,
     primary_normal = -primary_normal;
   }
 
+  float3 specular_normal = use_offset_ng ? offset_ng : primary_normal;
+  if (use_offset_ng && dot(specular_normal, -dir_ds) < 0.0f) {
+    specular_normal = -specular_normal;
+    offset_ng = specular_normal;
+  }
+
   bool tir = false;
   float cos_theta_i = 0.0f;
   float cos_theta_t = 0.0f;
   float eta_used = 1.0f;
   const float3 dir_sl = compute_specular(
-      dir_ds, primary_normal, primary_params, tir, cos_theta_i, cos_theta_t, eta_used);
+      dir_ds, specular_normal, primary_params, tir, cos_theta_i, cos_theta_t, eta_used);
   (void)cos_theta_i;
   (void)cos_theta_t;
   (void)eta_used;
@@ -918,7 +931,7 @@ bool trace_secondary_seed(KernelGlobals kg,
                                                                 PRIMITIVE_TRIANGLE;
   shader_setup_object_transforms(kg, &offset_sd, offset_sd.time);
 
-  float3 offset_n = primary_normal;
+  float3 offset_n = specular_normal;
   if (dot(offset_n, dir_sl) < 0.0f) {
     offset_n = -offset_n;
   }
@@ -926,7 +939,13 @@ bool trace_secondary_seed(KernelGlobals kg,
   if (is_zero(offset_n)) {
     return false;
   }
-  offset_sd.Ng = offset_n;
+  if (use_offset_ng) {
+    offset_ng = offset_n;
+    offset_sd.Ng = offset_ng;
+  }
+  else {
+    offset_sd.Ng = offset_n;
+  }
 
   Ray ray;
   ray.P = mpg_surface_ray_offset(kg, offset_sd, primary_point, dir_sl);
