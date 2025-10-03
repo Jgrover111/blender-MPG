@@ -142,6 +142,52 @@ bool mpg_generate_seed(KernelGlobals kg,
   Intersection isect = {};
   MpgFailureCode last_failure = MPG_FAILURE_SEED;
 
+  auto try_seed_sample = [&](const float3 &candidate_direction,
+                             const float candidate_pdf,
+                             Intersection &out_isect) -> bool {
+    if (is_zero(candidate_direction) || candidate_pdf <= 0.0f) {
+      last_failure = MPG_FAILURE_INVALID_SEED_PDF;
+      return false;
+    }
+
+    const float3 normalized_direction = normalize(candidate_direction);
+    const float clamped_pdf = fmaxf(candidate_pdf, 1.0e-16f);
+
+    Ray ray;
+    ray.P = mpg_surface_ray_offset(kg, sd, sd.P, normalized_direction);
+    ray.D = normalized_direction;
+    ray.tmin = 0.0f;
+    ray.tmax = FLT_MAX;
+    ray.time = sd.time;
+    ray.self.prim = sd.prim;
+    ray.self.object = sd.object;
+    ray.self.light_prim = PRIM_NONE;
+    ray.self.light_object = OBJECT_NONE;
+
+    Intersection candidate_isect = {};
+    if (!scene_intersect(kg, &ray, PATH_RAY_ALL_VISIBILITY, &candidate_isect)) {
+      last_failure = MPG_FAILURE_SEED;
+      return false;
+    }
+
+    if (!(candidate_isect.type & PRIMITIVE_TRIANGLE)) {
+      last_failure = MPG_FAILURE_GEOMETRY;
+      return false;
+    }
+
+    bool has_smooth_normals = false;
+    if (!has_specular_bsdf_at_hit(kg, ray, candidate_isect, has_smooth_normals)) {
+      last_failure = MPG_FAILURE_NO_SPECULAR;
+      return false;
+    }
+
+    out_isect = candidate_isect;
+    seed_direction = normalized_direction;
+    seed_pdf = clamped_pdf;
+    seed.use_smooth_normals = has_smooth_normals;
+    return true;
+  };
+
   for (int attempt = 0; attempt < max_seed_attempts && !seed_valid; ++attempt) {
     const float2 rand = path_branched_rng_2D(
         kg, &rng_state, attempt, seed_branch_count, PRNG_SURFACE_BSDF);
@@ -152,47 +198,35 @@ bool mpg_generate_seed(KernelGlobals kg,
     }
     else {
       float unused_cos = 0.0f;
-      seed_direction = sample_uniform_cone(axis, one_minus_cos(jitter), rand, &unused_cos, &seed_pdf);
+      seed_direction = sample_uniform_cone(
+          axis, one_minus_cos(jitter), rand, &unused_cos, &seed_pdf);
     }
 
-    if (is_zero(seed_direction) || seed_pdf <= 0.0f) {
-      last_failure = MPG_FAILURE_INVALID_SEED_PDF;
-      continue;
+    seed_valid = try_seed_sample(seed_direction, seed_pdf, isect);
+  }
+
+  if (!seed_valid && !use_uniform_fallback) {
+    const int fallback_branch_count = 32;
+    const int fallback_attempts = 32;
+    const int attempt_offset = max_seed_attempts;
+    const float fallback_one_minus_cos = one_minus_cos(0.6f * M_PI_F);
+
+    for (int attempt = 0; attempt < fallback_attempts && !seed_valid; ++attempt) {
+      const float2 rand = path_branched_rng_2D(
+          kg, &rng_state, attempt + attempt_offset, fallback_branch_count, PRNG_SURFACE_BSDF);
+
+      if (axis_valid) {
+        float unused_cos = 0.0f;
+        seed_direction = sample_uniform_cone(
+            axis, fallback_one_minus_cos, rand, &unused_cos, &seed_pdf);
+      }
+      else {
+        seed_direction = sample_uniform_sphere(rand);
+        seed_pdf = M_1_4PI_F;
+      }
+
+      seed_valid = try_seed_sample(seed_direction, seed_pdf, isect);
     }
-
-    seed_direction = normalize(seed_direction);
-    seed_pdf = fmaxf(seed_pdf, 1.0e-16f);
-
-    /* Trace the seed ray to locate the candidate specular surface. */
-    Ray ray;
-    ray.P = mpg_surface_ray_offset(kg, sd, sd.P, seed_direction);
-    ray.D = seed_direction;
-    ray.tmin = 0.0f;
-    ray.tmax = FLT_MAX;
-    ray.time = sd.time;
-    ray.self.prim = sd.prim;
-    ray.self.object = sd.object;
-    ray.self.light_prim = PRIM_NONE;
-    ray.self.light_object = OBJECT_NONE;
-
-    if (!scene_intersect(kg, &ray, PATH_RAY_ALL_VISIBILITY, &isect)) {
-      last_failure = MPG_FAILURE_SEED;
-      continue;
-    }
-
-    if (!(isect.type & PRIMITIVE_TRIANGLE)) {
-      last_failure = MPG_FAILURE_GEOMETRY;
-      continue;
-    }
-
-    bool has_smooth_normals = false;
-    if (!has_specular_bsdf_at_hit(kg, ray, isect, has_smooth_normals)) {
-      last_failure = MPG_FAILURE_NO_SPECULAR;
-      continue;
-    }
-
-    seed.use_smooth_normals = has_smooth_normals;
-    seed_valid = true;
   }
 
   if (!seed_valid) {
