@@ -9,6 +9,13 @@
 
 CCL_NAMESPACE_BEGIN
 
+struct ShaderData;
+
+float3 mpg_surface_ray_offset(KernelGlobals kg,
+                              const ShaderData &sd,
+                              const float3 ray_P,
+                              const float3 ray_D);
+
 bool mpg_generate_seed(KernelGlobals kg,
                        const ShaderData &sd,
                        const ShaderClosure &bsdf,

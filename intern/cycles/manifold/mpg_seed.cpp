@@ -60,10 +60,10 @@ static inline bool has_specular_bsdf_at_hit(KernelGlobals kg,
   return false;
 }
 
-static inline float3 mpg_surface_ray_offset(KernelGlobals kg,
-                                            const ShaderData &sd,
-                                            const float3 ray_P,
-                                            const float3 ray_D)
+float3 mpg_surface_ray_offset(KernelGlobals kg,
+                              const ShaderData &sd,
+                              const float3 ray_P,
+                              const float3 ray_D)
 {
   if (!(sd.type & PRIMITIVE_TRIANGLE)) {
     return ray_P;

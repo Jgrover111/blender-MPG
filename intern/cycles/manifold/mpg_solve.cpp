@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0 */
 
 #include "manifold/mpg_solve.h"
+#include "manifold/mpg_seed.h"
 
 #include "kernel/bvh/bvh.h"
 #include "kernel/bvh/util.h"
@@ -904,12 +905,31 @@ bool trace_secondary_seed(KernelGlobals kg,
     return false;
   }
 
-  Ray ray;
+  if (seed.object == OBJECT_NONE || seed.prim < 0) {
+    return false;
+  }
+
+  ShaderData offset_sd = {};
+  offset_sd.object = seed.object;
+  offset_sd.prim = seed.prim;
+  offset_sd.time = sd.time;
+  offset_sd.object_flag = kernel_data_fetch(object_flag, offset_sd.object);
+  offset_sd.type = (offset_sd.object_flag & SD_OBJECT_MOTION) ? PRIMITIVE_MOTION_TRIANGLE :
+                                                                PRIMITIVE_TRIANGLE;
+  shader_setup_object_transforms(kg, &offset_sd, offset_sd.time);
+
   float3 offset_n = primary_normal;
   if (dot(offset_n, dir_sl) < 0.0f) {
     offset_n = -offset_n;
   }
-  ray.P = ray_offset(primary_point, offset_n);
+  offset_n = safe_normalize(offset_n);
+  if (is_zero(offset_n)) {
+    return false;
+  }
+  offset_sd.Ng = offset_n;
+
+  Ray ray;
+  ray.P = mpg_surface_ray_offset(kg, offset_sd, primary_point, dir_sl);
   ray.D = dir_sl;
   ray.tmin = 0.0f;
   const float light_distance = len(seed.light_sample.P - primary_point);
