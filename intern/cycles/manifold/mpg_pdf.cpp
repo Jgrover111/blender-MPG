@@ -25,7 +25,20 @@ float mpg_light_sample_pdf_solid(KernelGlobals kg,
     return 0.0f;
   }
 
-  return light_sample.pdf;
+  float pdf_solid = light_sample.pdf;
+
+  if (light_sample.t != FLT_MAX) {
+    const float jacobian = light_pdf_area_to_solid_angle(
+      light_sample.Ng, -light_sample.D, light_sample.t);
+
+    if (!(isfinite_safe(jacobian) && jacobian > 0.0f)) {
+      return 0.0f;
+    }
+
+    pdf_solid *= jacobian;
+  }
+
+  return pdf_solid;
 }
 
 bool mpg_evaluate_pdf(KernelGlobals kg,

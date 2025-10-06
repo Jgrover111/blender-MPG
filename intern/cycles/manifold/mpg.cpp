@@ -173,6 +173,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
+  light_sample.pdf = p_light;
+
   const float p_seed = (isfinite_safe(seed.seed_pdf)) ? fmaxf(seed.seed_pdf, 1.0e-16f) : 0.0f;
   if (p_seed <= 0.0f) {
     result.attempt_count = attempt_count;
