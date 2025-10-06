@@ -151,6 +151,7 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     return mf.weight * fw;
   }
   else {
+    const float3 wi = -dir_ds;
     const bool has_cos_i = (cos_theta_i_hint >= 0.0f);
     const bool has_cos_t = (cos_theta_t_hint >= 0.0f);
     float3 normal = params.normal;
@@ -166,11 +167,11 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     if (cos_theta_i_hint < 0.0f) {
       oriented_normal = -oriented_normal;
     }
-    else if (dot(oriented_normal, dir_ds) < 0.0f) {
+    else if (dot(oriented_normal, wi) < 0.0f) {
       oriented_normal = -oriented_normal;
     }
 
-    float cos_theta_i = has_cos_i ? fabsf(cos_theta_i_hint) : dot(oriented_normal, dir_ds);
+    float cos_theta_i = has_cos_i ? fabsf(cos_theta_i_hint) : dot(oriented_normal, wi);
     const float cos_theta_o = dot(oriented_normal, dir_sl);
 
     if (params.is_refraction) {
@@ -216,8 +217,9 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     float cos_theta_t = has_cos_t ? cos_theta_t_hint : 0.0f;
     float relative_eta = eta;
     if (params.is_refraction) {
-      const bool entering = dot(normal, dir_ds) > 0.0f;
-      relative_eta = entering ? (1.0f / eta) : eta;
+      const float dot_wi_normal = dot(normal, wi);
+      const bool entering = dot_wi_normal >= 0.0f;
+      relative_eta = entering ? eta : (1.0f / eta);
       if (!has_cos_t) {
         const float sin2_theta_i = fmaxf(0.0f, 1.0f - cos_theta_i * cos_theta_i);
         const float sin2_theta_t = relative_eta * relative_eta * sin2_theta_i;
