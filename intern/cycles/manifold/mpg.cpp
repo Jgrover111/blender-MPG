@@ -168,13 +168,20 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   light_sample_update(kg, &light_sample, exit_vertex.position, exit_vertex.normal, updated_path_flag);
   LightSample tmp = light_sa;
   light_sample_update(kg, &tmp, sd.P, sd.N, path_flag);
-  const float nee_pdf_sa = mpg_light_sample_pdf_solid(kg, sd, tmp);
-  if (!(isfinite_safe(nee_pdf_sa) && nee_pdf_sa > 0.0f)) {
+  float nee_pdf_sa = mpg_light_sample_pdf_solid(kg, sd, tmp);
+  if (!isfinite_safe(nee_pdf_sa)) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_NEE_PDF;
     result.nee_pdf = 0.0f;
     return result;
   }
+  if (nee_pdf_sa < 0.0f) {
+    result.attempt_count = attempt_count;
+    result.failure_code = MPG_FAILURE_INVALID_NEE_PDF;
+    result.nee_pdf = 0.0f;
+    return result;
+  }
+  nee_pdf_sa = fmaxf(nee_pdf_sa, 0.0f);
   tmp.pdf = nee_pdf_sa;
   result.nee_pdf = nee_pdf_sa;
 
