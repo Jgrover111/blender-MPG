@@ -166,7 +166,9 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_NEE_PDF;
     result.nee_pdf = 0.0f;
+    return result;
   }
+  tmp.pdf = nee_pdf_sa;
   result.nee_pdf = nee_pdf_sa;
 
   const float p_light = mpg_light_sample_pdf_solid(kg, sd, light_sample);
