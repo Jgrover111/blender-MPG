@@ -248,17 +248,11 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     result.nee_pdf = 0.0f;
     return result;
   }
-  if (has_selection_pdf) {
-    nee_pdf_sa *= pdf_selection;
-  }
   nee_pdf_sa = fmaxf(nee_pdf_sa, 0.0f);
   tmp.pdf = nee_pdf_sa;
   result.nee_pdf = nee_pdf_sa;
 
   float p_light = mpg_light_sample_pdf_solid(kg, sd, light_sample);
-  if (has_selection_pdf) {
-    p_light *= pdf_selection;
-  }
   if (p_light <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_LIGHT_PDF;
