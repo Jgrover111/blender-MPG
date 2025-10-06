@@ -30,8 +30,10 @@ MpgResult mpg_try_connect(KernelGlobals kg,
                           const int bounce,
                           RNGState &rng_state)
 {
-  MpgResult result;
+  MpgResult result{};
   result.failure_code = MPG_FAILURE_NONE;
+  result.attempt_count = 0;
+  result.gate_mask = MPG_GATE_MASK_NONE;
 
   if (opt.max_bounces <= 0) {
     result.failure_code = MPG_FAILURE_UNSUPPORTED;
@@ -78,12 +80,14 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   if (gate_active) {
     if (!strict_gate && !relaxed_gate && !bootstrap_gate) {
       result.failure_code = MPG_FAILURE_GATE;
+      result.attempt_count = 0;
       return result;
     }
   }
   else if (g.rbar <= 1.0e-5f) {
     /* Without guiding gate we still require a numerically stable direction. */
     result.failure_code = MPG_FAILURE_GATE;
+    result.attempt_count = 0;
     return result;
   }
 
@@ -91,6 +95,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   MpgFailureCode seed_failure = MPG_FAILURE_NONE;
   if (!mpg_generate_seed(kg, sd, bsdf, g, opt, path_flag, bounce, rng_state, seed, seed_failure)) {
     result.failure_code = (seed_failure != MPG_FAILURE_NONE) ? seed_failure : MPG_FAILURE_SEED;
+    result.attempt_count = 0;
     return result;
   }
   result.seed_pdf = seed.seed_pdf;
@@ -126,11 +131,13 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     if (result.failure_code == MPG_FAILURE_NONE) {
       result.failure_code = (solver_failure != MPG_FAILURE_NONE) ? solver_failure : MPG_FAILURE_NO_SPECULAR;
     }
+    result.attempt_count = attempt_count;
     return result;
   }
 
   if (solution.specular_vertex_count <= 0) {
     result.failure_code = MPG_FAILURE_NO_SPECULAR;
+    result.attempt_count = attempt_count;
     return result;
   }
 
