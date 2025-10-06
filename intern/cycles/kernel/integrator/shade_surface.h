@@ -854,6 +854,8 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                 (current_bounce < bootstrap_depth_limit &&
                                  current_sample < bootstrap_extended_limit);
   bool relax_gate = false;
+  bool relax_gate_summary = false;
+  bool bootstrap_gate = false;
   bool summary_available = false;
   bool manifold_gate_pass = false;
   int manifold_attempt_count = 0;
@@ -894,6 +896,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                                manifold_summary);
 
       if (summary_available) {
+        const bool has_direction_relaxed = (manifold_summary.rbar > 1.0e-4f);
         const bool has_direction_strict = (manifold_summary.rbar > 1.0e-3f);
         const bool meets_gate_thresholds =
             (manifold_summary.peak_weight >= kernel_data.integrator.manifold_gate_weight) &&
@@ -901,16 +904,25 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
         manifold_gate_pass = has_direction_strict && meets_gate_thresholds;
 
         if (!manifold_gate_pass) {
-          const bool directionless_summary = (manifold_summary.rbar <= 1.0e-4f);
-          /* Always allow the wide bootstrap seeding path once the guide reports no
-           * meaningful direction, even if we are past the initial bootstrap window.
-           * Otherwise the relaxed attempt would be skipped entirely and debug AOVs
-           * would stop receiving MIS diagnostics. */
-          relax_gate = directionless_summary || bootstrap_window;
+          if (has_direction_relaxed) {
+            relax_gate_summary = true;
+          }
+          else {
+            bootstrap_gate = true;
+          }
+
+          /* Previously the relaxed attempt required either a directionless summary or
+           * an open bootstrap window. Now we always allow a relaxed attempt whenever
+           * a summary exists but fails the strict gate check, matching the Mitsuba
+           * reference behavior. */
         }
 
-        if (manifold_gate_pass || relax_gate) {
+        if (manifold_gate_pass || relax_gate_summary || bootstrap_gate) {
           manifold_guiding_ready = true;
+        }
+
+        if (relax_gate_summary || bootstrap_gate) {
+          relax_gate = true;
         }
       }
     }
@@ -924,13 +936,15 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   if (manifold_guiding_enabled && !manifold_guiding_ready) {
     if (!summary_available && bootstrap_window) {
       /* Fall back to a diffuse bootstrap seeded around the shading normal when no guide summary
-       * is available yet, matching the Mitsuba reference behaviour. */
+       * is available yet, matching the Mitsuba reference behaviour. Tag this as a bootstrap gate
+       * so debug AOVs and the solver share consistent bookkeeping. */
       manifold_summary.mean_dir = (!is_zero(sd->N)) ? sd->N : sd->Ng;
       manifold_summary.peak_weight = 0.0f;
       manifold_summary.kappa = 0.0f;
       manifold_summary.rbar = 0.0f;
       manifold_guiding_ready = true;
       relax_gate = true;
+      bootstrap_gate = true;
     }
   }
 
@@ -950,15 +964,13 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     if (has_dir_strict_local) {
       manifold_gate_mask |= MPG_GATE_MASK_HAS_DIRECTION_STRICT;
     }
-    const bool relaxed_gate_local = relax_gate && has_dir_relaxed_local;
-    const bool bootstrap_gate_local = relax_gate && !has_dir_relaxed_local;
     if (manifold_gate_pass || !gate_active_local) {
       manifold_gate_mask |= MPG_GATE_MASK_STRICT_PASS;
     }
-    if (relaxed_gate_local) {
+    if (relax_gate_summary) {
       manifold_gate_mask |= MPG_GATE_MASK_RELAX_PASS;
     }
-    if (bootstrap_gate_local) {
+    if (bootstrap_gate) {
       manifold_gate_mask |= MPG_GATE_MASK_BOOTSTRAP_PASS;
     }
   }
@@ -969,7 +981,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                          manifold_summary,
                                          summary_available,
                                          manifold_gate_pass,
-                                         relax_gate,
+                                         relax_gate_summary,
                                          render_buffer);
   }
 
