@@ -120,19 +120,27 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
 {
   if (params.has_microfacet) {
     const MicrofacetBsdf &mf = params.microfacet;
-    const float cos_NI = dot(mf.N, dir_ds);
-    const float cos_NO = dot(mf.N, dir_sl);
+    float3 oriented_normal = mf.N;
+    if (cos_theta_i_hint < 0.0f) {
+      oriented_normal = -oriented_normal;
+    }
+    else if (dot(oriented_normal, dir_ds) < 0.0f) {
+      oriented_normal = -oriented_normal;
+    }
+
+    const float cos_NI = dot(oriented_normal, dir_ds);
+    const float cos_NO = dot(oriented_normal, dir_sl);
 
     if (!(fabsf(cos_NI) > 1e-7f && fabsf(cos_NO) > 1e-7f)) {
       return zero_spectrum();
     }
     if (params.is_refraction) {
-      if (cos_NI * cos_NO >= 0.0f) {
+      if (!(cos_NI > 0.0f) || cos_NO >= 0.0f) {
         return zero_spectrum();
       }
     }
     else {
-      if (cos_NI <= 0.0f || cos_NO <= 0.0f) {
+      if (!(cos_NI > 0.0f) || !(cos_NO > 0.0f)) {
         return zero_spectrum();
       }
     }
@@ -154,8 +162,16 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     }
     normal = normalize(normal);
 
-    float cos_theta_i = has_cos_i ? cos_theta_i_hint : dot(normal, dir_ds);
-    const float cos_theta_o = dot(normal, dir_sl);
+    float3 oriented_normal = normal;
+    if (cos_theta_i_hint < 0.0f) {
+      oriented_normal = -oriented_normal;
+    }
+    else if (dot(oriented_normal, dir_ds) < 0.0f) {
+      oriented_normal = -oriented_normal;
+    }
+
+    float cos_theta_i = has_cos_i ? fabsf(cos_theta_i_hint) : dot(oriented_normal, dir_ds);
+    const float cos_theta_o = dot(oriented_normal, dir_sl);
 
     if (params.is_refraction) {
       if (!has_cos_i) {
