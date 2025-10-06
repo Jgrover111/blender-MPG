@@ -1231,6 +1231,18 @@ float compute_segment_visibility(KernelGlobals kg,
 
 }  // namespace
 
+float mpg_compute_segment_visibility(KernelGlobals kg,
+                                     const float3 &start_point,
+                                     const float3 &start_normal,
+                                     const float3 &end_point,
+                                     const float time,
+                                     const int skip_object,
+                                     const int skip_prim)
+{
+  return compute_segment_visibility(
+      kg, start_point, start_normal, end_point, time, skip_object, skip_prim);
+}
+
 bool mpg_solve_single_bounce(KernelGlobals kg,
                              const ShaderData &sd,
                              const ShaderClosure &bsdf,

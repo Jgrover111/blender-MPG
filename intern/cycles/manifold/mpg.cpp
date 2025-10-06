@@ -21,6 +21,72 @@
 
 CCL_NAMESPACE_BEGIN
 
+namespace {
+
+float3 compute_distant_light_endpoint(const LightSample &light_sample,
+                                      const float3 &origin)
+{
+  float3 dir = light_sample.D;
+  if (is_zero(dir)) {
+    return origin;
+  }
+  dir = normalize(dir);
+  const float distant_length = 1.0e6f;
+  return origin + dir * distant_length;
+}
+
+float compute_visibility_after_update(KernelGlobals kg,
+                                      const ShaderData &sd,
+                                      const LightSample &light_sample,
+                                      const MpgResult &result)
+{
+  if (result.specular_vertex_count <= 0) {
+    return 0.0f;
+  }
+
+  float visibility = 1.0f;
+  float3 segment_start = sd.P;
+  float3 segment_normal = sd.Ng;
+  int skip_object = sd.object;
+  int skip_prim = sd.prim;
+
+  for (int i = 0; i < result.specular_vertex_count; ++i) {
+    const MpgSpecularVertex &vertex = result.specular_vertices[i];
+    visibility *= mpg_compute_segment_visibility(kg,
+                                                 segment_start,
+                                                 segment_normal,
+                                                 vertex.position,
+                                                 sd.time,
+                                                 skip_object,
+                                                 skip_prim);
+    if (visibility == 0.0f) {
+      return 0.0f;
+    }
+
+    segment_start = vertex.position;
+    segment_normal = vertex.normal;
+    skip_object = vertex.object;
+    skip_prim = vertex.prim;
+  }
+
+  float3 light_point = light_sample.P;
+  if (light_sample.t == FLT_MAX) {
+    light_point = compute_distant_light_endpoint(light_sample, segment_start);
+  }
+
+  visibility *= mpg_compute_segment_visibility(kg,
+                                               segment_start,
+                                               segment_normal,
+                                               light_point,
+                                               sd.time,
+                                               skip_object,
+                                               skip_prim);
+
+  return visibility;
+}
+
+}  // namespace
+
 MpgResult mpg_try_connect(KernelGlobals kg,
                           const ShaderData &sd,
                           const ShaderClosure &bsdf,
@@ -194,6 +260,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   }
 
   light_sample.pdf = p_light;
+
+  result.visibility = compute_visibility_after_update(kg, sd, light_sample, result);
 
   const float p_seed = (isfinite_safe(seed.seed_pdf)) ? fmaxf(seed.seed_pdf, 1.0e-16f) : 0.0f;
   if (p_seed <= 0.0f) {

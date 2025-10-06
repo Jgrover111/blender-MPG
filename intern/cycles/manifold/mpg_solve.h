@@ -28,4 +28,12 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                              MpgSolverOutput &result,
                              MpgFailureCode &failure_code);
 
+float mpg_compute_segment_visibility(KernelGlobals kg,
+                                     const float3 &start_point,
+                                     const float3 &start_normal,
+                                     const float3 &end_point,
+                                     float time,
+                                     int skip_object,
+                                     int skip_prim);
+
 CCL_NAMESPACE_END
