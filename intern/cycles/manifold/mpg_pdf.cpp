@@ -28,14 +28,33 @@ float mpg_light_sample_pdf_solid(KernelGlobals kg,
   float pdf_solid = light_sample.pdf;
 
   if (light_sample.t != FLT_MAX) {
-    const float jacobian = light_pdf_area_to_solid_angle(
-      light_sample.Ng, -light_sample.D, light_sample.t);
+    bool needs_conversion = false;
 
-    if (!(isfinite_safe(jacobian) && jacobian > 0.0f)) {
-      return 0.0f;
+    switch (light_sample.type) {
+      case LIGHT_POINT:
+      case LIGHT_SPOT:
+        needs_conversion = true;
+        break;
+      case LIGHT_AREA:
+        if (light_sample.prim != PRIM_NONE) {
+          const ccl_global KernelLight *klight = &kernel_data_fetch(lights, light_sample.prim);
+          needs_conversion = (klight->area.tan_half_spread != 0.0f);
+        }
+        break;
+      default:
+        break;
     }
 
-    pdf_solid *= jacobian;
+    if (needs_conversion) {
+      const float jacobian = light_pdf_area_to_solid_angle(
+          light_sample.Ng, -light_sample.D, light_sample.t);
+
+      if (!(isfinite_safe(jacobian) && jacobian > 0.0f)) {
+        return 0.0f;
+      }
+
+      pdf_solid *= jacobian;
+    }
   }
 
   return pdf_solid;
