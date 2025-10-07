@@ -11,6 +11,7 @@
 #include "manifold/mpg_solve.h"
 
 #include "kernel/light/common.h"
+#include "kernel/light/light.h"
 #include "kernel/light/distribution.h"
 #include "kernel/light/tree.h"
 #include "kernel/device/cpu/globals.h"
@@ -40,13 +41,15 @@ static float mpg_evaluate_light_tree_pdf(KernelGlobals kg,
   return light_tree_pdf(kg, P, N, 0.0f, path_flag, emitter_object, emitter_index, receiver_object);
 }
 
-static bool mpg_update_light_selection_pdf(KernelGlobals kg,
-                                           const MpgSpecularVertex &exit_vertex,
-                                           const uint32_t updated_path_flag,
-                                           const int attempt_count,
-                                           const float pdf_no_selection,
-                                           LightSample &light_sample,
-                                           MpgResult &result)
+}  // namespace
+
+bool mpg_update_light_selection_pdf(KernelGlobals kg,
+                                    const MpgSpecularVertex &exit_vertex,
+                                    const uint32_t updated_path_flag,
+                                    const int attempt_count,
+                                    const float pdf_no_selection,
+                                    LightSample &light_sample,
+                                    MpgResult &result)
 {
 #ifdef __LIGHT_TREE__
   float pdf_selection_updated = kernel_data.integrator.use_light_tree ? 0.0f :
@@ -54,6 +57,9 @@ static bool mpg_update_light_selection_pdf(KernelGlobals kg,
 #else
   float pdf_selection_updated = light_distribution_pdf_lamp(kg);
 #endif
+
+  const int receiver_object = (exit_vertex.object >= 0) ? exit_vertex.object : OBJECT_NONE;
+  const int emitter_object = light_sample.object;
 
 #ifdef __LIGHT_TREE__
   if (kernel_data.integrator.use_light_tree) {
@@ -64,12 +70,24 @@ static bool mpg_update_light_selection_pdf(KernelGlobals kg,
       return false;
     }
 
-    const int receiver_object = (exit_vertex.object >= 0) ? exit_vertex.object : OBJECT_NONE;
-    const int emitter_object = light_sample.object;
-    pdf_selection_updated = mpg_evaluate_light_tree_pdf(
-        kg, exit_vertex.position, exit_vertex.normal, updated_path_flag, emitter_object, uint(light_sample.emitter_id), receiver_object);
+    pdf_selection_updated = mpg_evaluate_light_tree_pdf(kg,
+                                                        exit_vertex.position,
+                                                        exit_vertex.normal,
+                                                        updated_path_flag,
+                                                        emitter_object,
+                                                        uint(light_sample.emitter_id),
+                                                        receiver_object);
   }
+  else
 #endif
+  {
+    if (!light_link_object_match(kg, receiver_object, emitter_object)) {
+      result.attempt_count = attempt_count;
+      result.failure_code = MPG_FAILURE_INVALID_LIGHT_PDF;
+      result.light_pdf = 0.0f;
+      return false;
+    }
+  }
 
   if (!(isfinite_safe(pdf_selection_updated) && pdf_selection_updated > 0.0f)) {
     result.attempt_count = attempt_count;
@@ -78,10 +96,14 @@ static bool mpg_update_light_selection_pdf(KernelGlobals kg,
     return false;
   }
 
+  /* Keep using the uniform lamp distribution. The explicit light-link check above ensures
+   * this probability matches the Mitsuba reference sampler even when receivers exclude the
+   * emitter. */
   light_sample.pdf_selection = pdf_selection_updated;
   light_sample.pdf = pdf_no_selection * pdf_selection_updated;
   return true;
 }
+namespace {
 
 float3 compute_distant_light_endpoint(const LightSample &light_sample,
                                       const float3 &origin)
