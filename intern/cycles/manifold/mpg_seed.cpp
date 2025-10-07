@@ -121,17 +121,18 @@ bool mpg_generate_seed(KernelGlobals kg,
     axis = normalize(axis);
   }
 
-  const bool relaxed_gate = options.relax_gate;
-  /* Relaxed gating shares the bootstrap cone/budget to aggressively search nearby
-   * speculars, matching the Mitsuba fallback when the guide loses directional signal. */
-  const bool bootstrap_seed = relaxed_gate || (guide.rbar <= 1.0e-4f);
+  const bool has_direction_relaxed = (guide.rbar > 1.0e-4f);
+  /* The wide bootstrap cone is reserved for the "no direction" fallback, mirroring the
+   * mpg_try_connect gating thresholds so relaxed gating alone keeps directional seeds
+   * narrow whenever the guide provides a stable mean. */
+  const bool bootstrap_seed = !has_direction_relaxed;
   const bool use_uniform_fallback = !axis_valid;
 
   const float min_cone_angle = 0.00872664626f; /* ~0.5 degrees. */
   float jitter = fmaxf(options.angular_jitter, min_cone_angle);
   if (bootstrap_seed) {
-    /* With no directional signal yet, or when the integrator relaxes the gate, explore a wide
-     * bootstrap cone similar to the Mitsuba reference implementation. */
+    /* Without directional signal from the guide we explore a wide bootstrap cone, matching
+     * the Mitsuba fallback behaviour until a stable direction emerges. */
     jitter = 0.6f * M_PI_F;
   }
   float candidate_pdf = 0.0f;
