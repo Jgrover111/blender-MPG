@@ -36,12 +36,14 @@ struct MpgResult {
   float visibility = 0.0f;
   float jacobian_total = 0.0f;
   float seed_pdf = 0.0f;
+  float seed_pdf_raw = 0.0f;
   float light_pdf = 0.0f;
   Spectrum spec_weight = zero_spectrum();
   LightSample light = {};
   int specular_vertex_count = 0;
   MpgSpecularVertex specular_vertices[2];
   int attempt_count = 0;
+  int seed_trial_count = 0;
   uint32_t gate_mask = MPG_GATE_MASK_NONE;
   MpgFailureCode failure_code = MPG_FAILURE_NONE;
 };

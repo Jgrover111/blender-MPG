@@ -134,17 +134,20 @@ bool mpg_generate_seed(KernelGlobals kg,
      * bootstrap cone similar to the Mitsuba reference implementation. */
     jitter = 0.6f * M_PI_F;
   }
-  float seed_pdf = 0.0f;
+  float candidate_pdf = 0.0f;
   float3 seed_direction = zero_float3();
   const int seed_branch_count = (bootstrap_seed || use_uniform_fallback) ? 32 : 16;
   const int max_seed_attempts = bootstrap_seed ? 32 : (use_uniform_fallback ? 32 : 16);
   bool seed_valid = false;
   Intersection isect = {};
   MpgFailureCode last_failure = MPG_FAILURE_SEED;
+  int candidate_trials = 0;
+  float accepted_seed_pdf = 0.0f;
 
   auto try_seed_sample = [&](const float3 &candidate_direction,
                              const float candidate_pdf,
                              Intersection &out_isect) -> bool {
+    ++candidate_trials;
     if (is_zero(candidate_direction) || candidate_pdf <= 0.0f) {
       last_failure = MPG_FAILURE_INVALID_SEED_PDF;
       return false;
@@ -183,7 +186,7 @@ bool mpg_generate_seed(KernelGlobals kg,
 
     out_isect = candidate_isect;
     seed_direction = normalized_direction;
-    seed_pdf = clamped_pdf;
+    accepted_seed_pdf = clamped_pdf;
     seed.use_smooth_normals = has_smooth_normals;
     return true;
   };
@@ -194,15 +197,15 @@ bool mpg_generate_seed(KernelGlobals kg,
 
     if (use_uniform_fallback) {
       seed_direction = sample_uniform_sphere(rand);
-      seed_pdf = M_1_4PI_F;
+      candidate_pdf = M_1_4PI_F;
     }
     else {
       float unused_cos = 0.0f;
       seed_direction = sample_uniform_cone(
-          axis, one_minus_cos(jitter), rand, &unused_cos, &seed_pdf);
+          axis, one_minus_cos(jitter), rand, &unused_cos, &candidate_pdf);
     }
 
-    seed_valid = try_seed_sample(seed_direction, seed_pdf, isect);
+    seed_valid = try_seed_sample(seed_direction, candidate_pdf, isect);
   }
 
   if (!seed_valid && !use_uniform_fallback) {
@@ -218,14 +221,14 @@ bool mpg_generate_seed(KernelGlobals kg,
       if (axis_valid) {
         float unused_cos = 0.0f;
         seed_direction = sample_uniform_cone(
-            axis, fallback_one_minus_cos, rand, &unused_cos, &seed_pdf);
+            axis, fallback_one_minus_cos, rand, &unused_cos, &candidate_pdf);
       }
       else {
         seed_direction = sample_uniform_sphere(rand);
-        seed_pdf = M_1_4PI_F;
+        candidate_pdf = M_1_4PI_F;
       }
 
-      seed_valid = try_seed_sample(seed_direction, seed_pdf, isect);
+      seed_valid = try_seed_sample(seed_direction, candidate_pdf, isect);
     }
   }
 
@@ -233,6 +236,10 @@ bool mpg_generate_seed(KernelGlobals kg,
     failure_code = last_failure;
     return false;
   }
+
+  const float inv_acceptance_probability = (candidate_trials > 0) ? float(candidate_trials) : 1.0f;
+  const float renormalized_seed_pdf =
+      fmaxf(accepted_seed_pdf * inv_acceptance_probability, 1.0e-16f);
 
   /* Sample an emitter using the Cycles light sampling routine. */
   const float3 rand_light = path_state_rng_3D(kg, &rng_state, PRNG_LIGHT);
@@ -258,7 +265,9 @@ bool mpg_generate_seed(KernelGlobals kg,
   }
 
   seed.direction = seed_direction;
-  seed.seed_pdf = seed_pdf;
+  seed.seed_pdf = renormalized_seed_pdf;
+  seed.seed_pdf_raw = accepted_seed_pdf;
+  seed.trial_count = candidate_trials;
   seed.light_sample = light_sample;
   seed.path_flag = path_flag;
   const float light_distance = (light_sample.t == FLT_MAX) ? 1.0e6f : light_sample.t;

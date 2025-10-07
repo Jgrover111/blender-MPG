@@ -21,6 +21,10 @@
 #include <cfloat>
 #include <cmath>
 
+#ifdef WITH_CYCLES_DEBUG
+#  include "util/log.h"
+#endif
+
 CCL_NAMESPACE_BEGIN
 
 namespace {
@@ -221,6 +225,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
   result.seed_pdf = seed.seed_pdf;
+  result.seed_pdf_raw = seed.seed_pdf_raw;
+  result.seed_trial_count = seed.trial_count;
   result.light = seed.light_sample;
   if (!is_zero(seed.direction)) {
     result.wi = normalize(seed.direction);
@@ -334,6 +340,20 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.visibility = compute_visibility_after_update(kg, sd, light_sample, result);
 
   const float p_seed = (isfinite_safe(seed.seed_pdf)) ? fmaxf(seed.seed_pdf, 1.0e-16f) : 0.0f;
+#ifdef WITH_CYCLES_DEBUG
+  if (seed.trial_count > 1) {
+    const float mitsuba_seed_pdf = seed.seed_pdf_raw * float(seed.trial_count);
+    if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
+      LOG_DEBUG << "MPG seed pdf parity (trials=" << seed.trial_count
+                << "): cycles=" << p_seed << ", Mitsuba=" << mitsuba_seed_pdf
+                << ", raw=" << seed.seed_pdf_raw;
+    }
+    if (isfinite_safe(p_seed) && isfinite_safe(mitsuba_seed_pdf)) {
+      const float tolerance = fmaxf(fabsf(mitsuba_seed_pdf), 1.0e-16f) * 1.0e-4f;
+      DCHECK(fabsf(p_seed - mitsuba_seed_pdf) <= tolerance);
+    }
+  }
+#endif
   if (p_seed <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_SEED_PDF;
@@ -362,9 +382,11 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.wi = solution.wi;
   result.pdf = pdf;
   result.seed_pdf = p_seed;
+  result.seed_pdf_raw = seed.seed_pdf_raw;
   result.light_pdf = p_light;
   result.light = light_sample;
   result.attempt_count = attempt_count;
+  result.seed_trial_count = seed.trial_count;
 
   return result;
 }

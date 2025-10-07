@@ -52,12 +52,14 @@ struct ShadingPoint {
 struct MpgSeedRay {
   float3 direction = zero_float3();
   float seed_pdf = 0.0f;
+  float seed_pdf_raw = 0.0f;
   LightSample light_sample = {};
   uint32_t path_flag = 0;
   int object = -1;
   int prim = -1;
   float bary_u = 0.0f;
   float bary_v = 0.0f;
+  int trial_count = 0;
   bool use_smooth_normals = false;
 };
 
