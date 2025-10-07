@@ -11,6 +11,8 @@
 #include "manifold/mpg_solve.h"
 
 #include "kernel/light/common.h"
+#include "kernel/light/distribution.h"
+#include "kernel/light/tree.h"
 #include "kernel/device/cpu/globals.h"
 #include "kernel/integrator/path_state.h"
 #include "kernel/svm/types.h"
@@ -22,6 +24,60 @@
 CCL_NAMESPACE_BEGIN
 
 namespace {
+static float mpg_evaluate_light_tree_pdf(KernelGlobals kg,
+                                         const float3 &P,
+                                         const float3 &N,
+                                         const uint32_t path_flag,
+                                         const int emitter_object,
+                                         const uint emitter_index,
+                                         const int receiver_object)
+{
+
+  return light_tree_pdf(kg, P, N, 0.0f, path_flag, emitter_object, emitter_index, receiver_object);
+}
+
+static bool mpg_update_light_selection_pdf(KernelGlobals kg,
+                                           const MpgSpecularVertex &exit_vertex,
+                                           const uint32_t updated_path_flag,
+                                           const int attempt_count,
+                                           const float pdf_no_selection,
+                                           LightSample &light_sample,
+                                           MpgResult &result)
+{
+#ifdef __LIGHT_TREE__
+  float pdf_selection_updated = kernel_data.integrator.use_light_tree ? 0.0f :
+                                                                     light_distribution_pdf_lamp(kg);
+#else
+  float pdf_selection_updated = light_distribution_pdf_lamp(kg);
+#endif
+
+#ifdef __LIGHT_TREE__
+  if (kernel_data.integrator.use_light_tree) {
+    if (light_sample.emitter_id < 0) {
+      result.attempt_count = attempt_count;
+      result.failure_code = MPG_FAILURE_INVALID_LIGHT_PDF;
+      result.light_pdf = 0.0f;
+      return false;
+    }
+
+    const int receiver_object = (exit_vertex.object >= 0) ? exit_vertex.object : OBJECT_NONE;
+    const int emitter_object = light_sample.object;
+    pdf_selection_updated = mpg_evaluate_light_tree_pdf(
+        kg, exit_vertex.position, exit_vertex.normal, updated_path_flag, emitter_object, uint(light_sample.emitter_id), receiver_object);
+  }
+#endif
+
+  if (!(isfinite_safe(pdf_selection_updated) && pdf_selection_updated > 0.0f)) {
+    result.attempt_count = attempt_count;
+    result.failure_code = MPG_FAILURE_INVALID_LIGHT_PDF;
+    result.light_pdf = 0.0f;
+    return false;
+  }
+
+  light_sample.pdf_selection = pdf_selection_updated;
+  light_sample.pdf = pdf_no_selection * pdf_selection_updated;
+  return true;
+}
 
 float3 compute_distant_light_endpoint(const LightSample &light_sample,
                                       const float3 &origin)
@@ -220,8 +276,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   LightSample light_sample = seed.light_sample;
   const float pdf_selection = light_sample.pdf_selection;
-  const bool has_selection_pdf = pdf_selection > 0.0f;
-  if (has_selection_pdf) {
+  if (pdf_selection > 0.0f) {
     /* `light_sample_update` expects `ls->pdf` without the selection term. */
     light_sample.pdf /= pdf_selection;
   }
@@ -232,7 +287,21 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   }
 
   LightSample light_sa = light_sample;
+  light_sample.pdf_selection = 1.0f;
   light_sample_update(kg, &light_sample, exit_vertex.position, exit_vertex.normal, updated_path_flag);
+
+  const float pdf_no_selection = light_sample.pdf;
+  if (!mpg_update_light_selection_pdf(kg,
+                                      exit_vertex,
+                                      updated_path_flag,
+                                      attempt_count,
+                                      pdf_no_selection,
+                                      light_sample,
+                                      result))
+  {
+    return result;
+  }
+
   LightSample tmp = light_sa;
   light_sample_update(kg, &tmp, sd.P, sd.N, path_flag);
   float nee_pdf_sa = mpg_light_sample_pdf_solid(kg, sd, tmp);
