@@ -1119,7 +1119,32 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     {
       ShaderDataCausticsStorage mpg_emission_sd_storage;
       ccl_private ShaderData *mpg_emission_sd = AS_SHADER_DATA(&mpg_emission_sd_storage);
+
+      /* Mirror the temporary bounce adjustment in mnee_path_contribution so Light Path nodes
+       * observe the MPG specular chain with the correct history. */
+      const int diffuse_bounce = INTEGRATOR_STATE(state, path, diffuse_bounce);
+      const int transmission_bounce = INTEGRATOR_STATE(state, path, transmission_bounce);
+      const int bounce = INTEGRATOR_STATE(state, path, bounce);
+      const int specular_count = (mpg_result.specular_vertex_count > 0) ?
+                                     mpg_result.specular_vertex_count :
+                                     0;
+      int refractive_count = 0;
+      for (int i = 0; i < specular_count; ++i) {
+        if (mpg_result.specular_vertices[i].is_refraction) {
+          refractive_count++;
+        }
+      }
+
+      INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce + 1;
+      INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce +
+                                                                 refractive_count;
+      INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce + specular_count;
+
       Spectrum light_eval = light_sample_shader_eval(kg, state, mpg_emission_sd, &mpg_light, sd->time);
+
+      INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce;
+      INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
+      INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce;
 
       if (!is_zero(light_eval)) {
         BsdfEval mpg_bsdf_eval;
