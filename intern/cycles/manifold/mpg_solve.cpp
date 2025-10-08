@@ -1454,7 +1454,11 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   MpgSpecularVertex &vertex = result.specular_vertices[0];
   vertex.position = eval.point;
   vertex.normal = eval.normal;
-  vertex.dir_in = eval.dir_ds;
+  /* Store the incoming direction pointing toward the previous vertex. The
+   * solver keeps `eval.dir_ds` as the ray direction leaving the receiver, so
+   * flip it here to match the convention used elsewhere (see the double bounce
+   * solver below). */
+  vertex.dir_in = -eval.dir_ds;
   vertex.dir_out = eval.dir_sl;
   vertex.distance_in = eval.distance_ds;
   vertex.distance_out = eval.distance_sl;

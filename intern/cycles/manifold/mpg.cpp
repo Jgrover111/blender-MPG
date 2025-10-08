@@ -156,12 +156,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
       return result;
     }
   }
-  else if (g.rbar <= 1.0e-5f) {
-    /* Without guiding gate we still require a numerically stable direction. */
-    result.failure_code = MPG_FAILURE_GATE;
-    result.attempt_count = 0;
-    return result;
-  }
+  /* When the gate is disabled we still attempt a bootstrap seed even if the guide has no
+   * dominant direction. This mirrors the Mitsuba reference fallback behaviour. */
 
   MpgSeedRay seed;
   MpgFailureCode seed_failure = MPG_FAILURE_NONE;

@@ -1087,7 +1087,15 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     pdf_bsdf_sa = fmaxf(pdf_bsdf_sa, 0.0f);
     pdf_guided_sa = fmaxf(pdf_guided_sa, 0.0f);
     const float pdf_mpg = mpg_ok ? pdf_mpg_sa : 0.0f;
-    const float pdf_nee = fmaxf(pdf_nee_sa, 0.0f);
+
+    /* Standard NEE cannot reproduce the MPG path whenever at least one specular
+     * vertex is present in the solved chain. In that case the straight shadow
+     * ray traced by the NEE technique would be blocked by the specular surface,
+     * so it should not be considered a competing proposal in the MIS balance.
+     */
+    const float pdf_nee_candidate = fmaxf(pdf_nee_sa, 0.0f);
+    const bool nee_competes = (mpg_result.specular_vertex_count == 0);
+    const float pdf_nee = nee_competes ? pdf_nee_candidate : 0.0f;
 
     manifold_weighted_bsdf_pdf = pdf_bsdf_sa;
     manifold_weighted_guided_pdf = pdf_guided_sa;
