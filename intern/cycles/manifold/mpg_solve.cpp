@@ -41,6 +41,8 @@ struct SpecularParameters {
   FresnelConductor fresnel_conductor = {};
   FresnelGeneralizedSchlick fresnel_generalized_schlick = {};
   FresnelF82Tint fresnel_f82_tint = {};
+  Spectrum singular_reflection_weight = zero_spectrum();
+  bool use_singular_reflection_weight = false;
   float3 normal = zero_float3();
   bool has_normal = false;
   bool has_conductor_fresnel = false;
@@ -238,8 +240,11 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     const float F = params.is_refraction ?
                         fresnel_dielectric(cos_theta_i, relative_eta, &cos_theta_t_eval) :
                         fresnel_dielectric_cos(cos_theta_i, eta);
-
-    return params.is_refraction ? make_spectrum(1.0f - F) : make_spectrum(F);
+    Spectrum result = params.is_refraction ? make_spectrum(1.0f - F) : make_spectrum(F);
+    if (!params.is_refraction && params.use_singular_reflection_weight) {
+      result *= params.singular_reflection_weight;
+    }
+    return result;
   }
 }
 
@@ -546,9 +551,13 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     if (reflection_microfacet != nullptr) {
       params.normal = safe_normalize(reflection_microfacet->N);
       params.has_normal = !is_zero(params.normal);
+      const MicrofacetFresnel fresnel_type =
+          static_cast<MicrofacetFresnel>(reflection_microfacet->fresnel_type);
+      if (fresnel_type == MicrofacetFresnel::NONE) {
+        params.singular_reflection_weight = reflection_microfacet->weight;
+        params.use_singular_reflection_weight = true;
+      }
       if (reflection_microfacet->fresnel != nullptr) {
-        const MicrofacetFresnel fresnel_type =
-            static_cast<MicrofacetFresnel>(reflection_microfacet->fresnel_type);
         if (fresnel_type == MicrofacetFresnel::CONDUCTOR) {
           params.has_conductor_fresnel = true;
           const FresnelConductor *fresnel = reinterpret_cast<const FresnelConductor *>(
@@ -566,7 +575,7 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     }
     if (has_shading_normal && !params.has_normal) {
       params.normal = shading_normal;
-      params.has_normal = true;
+        params.has_normal = true;
     }
     return true;
   }
