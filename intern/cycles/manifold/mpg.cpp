@@ -272,7 +272,6 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     updated_path_flag |= PATH_RAY_MIS_HAD_TRANSMISSION;
   }
 
-  LightSample light_sa = light_sample;
   light_sample.pdf_selection = 1.0f;
   light_sample_update(kg, &light_sample, exit_vertex.position, exit_vertex.normal, updated_path_flag);
   /* Restore the receiver-side selection probability rather than recomputing
@@ -281,10 +280,10 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   light_sample.pdf *= pdf_selection;
   light_sample.pdf_selection = pdf_selection;
 
-  LightSample tmp = light_sa;
+  LightSample tmp = seed.light_sample;
   /* Recompute the pre-MPG NEE pdf at the receiver. The light update routine expects
- * `ls->pdf` without the light-selection probability and multiplies it back in, so
- * temporarily strip it to avoid squaring the factor. */
+   * `ls->pdf` without the light-selection probability and multiplies it back in, so
+   * temporarily strip it to avoid squaring the factor. */
   tmp.pdf /= pdf_selection;
   tmp.pdf_selection = 1.0f;
   light_sample_update(kg, &tmp, sd.P, sd.N, path_flag);
