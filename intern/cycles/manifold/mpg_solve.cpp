@@ -236,14 +236,15 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
       return zero_spectrum();
     }
 
+    if (!params.is_refraction && params.use_singular_reflection_weight) {
+      return params.singular_reflection_weight;
+    }
+
     float cos_theta_t_eval = cos_theta_t;
     const float F = params.is_refraction ?
                         fresnel_dielectric(cos_theta_i, relative_eta, &cos_theta_t_eval) :
                         fresnel_dielectric_cos(cos_theta_i, eta);
     Spectrum result = params.is_refraction ? make_spectrum(1.0f - F) : make_spectrum(F);
-    if (!params.is_refraction && params.use_singular_reflection_weight) {
-      result *= params.singular_reflection_weight;
-    }
     return result;
   }
 }
