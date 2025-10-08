@@ -236,7 +236,7 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     if (params.is_refraction) {
       const float dot_wi_normal = dot(normal, wi);
       const bool entering = dot_wi_normal >= 0.0f;
-      relative_eta = entering ? eta : (1.0f / eta);
+      relative_eta = entering ? (1.0f / eta) : eta;
       if (!has_cos_t) {
         const float sin2_theta_i = fmaxf(0.0f, 1.0f - cos_theta_i * cos_theta_i);
         const float sin2_theta_t = relative_eta * relative_eta * sin2_theta_i;
@@ -358,7 +358,7 @@ float3 compute_specular(const float3 &dir_ds,
   }
 
   const float safe_base_eta = fmaxf(params.base_eta, 1e-6f);
-  const float eta_ratio = entering ? safe_base_eta : (1.0f / safe_base_eta);
+  const float eta_ratio = entering ? (1.0f / safe_base_eta) : safe_base_eta;
   const float safe_eta_ratio = fmaxf(eta_ratio, 1e-6f);
 
   float3 dir = refract_dir(incident, oriented_normal, safe_eta_ratio, tir, cos_theta_i, cos_theta_t);
