@@ -25,7 +25,7 @@ Implement MPG for **1–2 specular bounces** at surface hits in Cycles and MIS�
 ## 2) Scope (v1)
 
 * **Chains:** `D→S→L` and `D→S→S→L`.
-* **Materials:** ideal reflection/refraction on meshes (ignore bump/normal map perturbs in the solver).
+* **Materials:** ideal reflection/refraction on meshes (ignore bump/normal map perturbs in the solver). Cover all Cycles materials that can produce sharp reflective or refractive lobes (Principled BSDF glass/transmission, Glass BSDF, Glossy BSDF, Shader Nodes with Sharp refraction, etc.).
 * **Lights:** area, sun/distant, environment (sun‑disc OK).
 * **Where:** CPU surface integrator only.
 * **OpenPGL usage:** sampling‑based **GuideSummary** at the hit (dominant dir, peak mass in cone, κ estimate) for *gating & seeding*.
