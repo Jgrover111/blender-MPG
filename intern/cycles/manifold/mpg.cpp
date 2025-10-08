@@ -30,6 +30,37 @@ CCL_NAMESPACE_BEGIN
 
 namespace {
 
+GuideSummary sanitize_guide_summary(const GuideSummary &input)
+{
+  GuideSummary result = input;
+
+  if (!(isfinite_safe(result.mean_dir.x) && isfinite_safe(result.mean_dir.y) &&
+        isfinite_safe(result.mean_dir.z)))
+  {
+    result.mean_dir = zero_float3();
+  }
+
+  if (!isfinite_safe(result.peak_weight)) {
+    result.peak_weight = 0.0f;
+  }
+  else {
+    result.peak_weight = fminf(fmaxf(result.peak_weight, 0.0f), 1.0f);
+  }
+
+  if (!isfinite_safe(result.kappa) || result.kappa < 0.0f) {
+    result.kappa = 0.0f;
+  }
+
+  if (!isfinite_safe(result.rbar)) {
+    result.rbar = 0.0f;
+  }
+  else {
+    result.rbar = fminf(fmaxf(result.rbar, 0.0f), 1.0f);
+  }
+
+  return result;
+}
+
 float3 compute_distant_light_endpoint(const LightSample &light_sample,
                                       const float3 &origin)
 {
@@ -111,6 +142,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.attempt_count = 0;
   result.gate_mask = MPG_GATE_MASK_NONE;
 
+  const GuideSummary guide = sanitize_guide_summary(g);
+
   if (opt.max_bounces <= 0) {
     result.failure_code = MPG_FAILURE_UNSUPPORTED;
     return result;
@@ -122,10 +155,10 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   }
 
   const bool gate_active = (opt.gate_w > 0.0f) || (opt.gate_kappa > 0.0f);
-  const bool has_direction_relaxed = (g.rbar > 1.0e-4f);
-  const bool has_direction_strict = (g.rbar > 1.0e-3f);
-  const bool strict_gate = has_direction_strict && (g.peak_weight >= opt.gate_w) &&
-                           (g.kappa >= opt.gate_kappa);
+  const bool has_direction_relaxed = (guide.rbar > 1.0e-4f);
+  const bool has_direction_strict = (guide.rbar > 1.0e-3f);
+  const bool strict_gate = has_direction_strict && (guide.peak_weight >= opt.gate_w) &&
+                           (guide.kappa >= opt.gate_kappa);
   const bool relaxed_gate = opt.relax_gate && has_direction_relaxed;
   const bool bootstrap_gate = opt.relax_gate && !has_direction_relaxed;
 
@@ -165,7 +198,9 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   MpgSeedRay seed;
   MpgFailureCode seed_failure = MPG_FAILURE_NONE;
-  if (!mpg_generate_seed(kg, sd, bsdf, g, opt, path_flag, bounce, rng_state, seed, seed_failure)) {
+  if (!mpg_generate_seed(
+          kg, sd, bsdf, guide, opt, path_flag, bounce, rng_state, seed, seed_failure))
+  {
     result.failure_code = (seed_failure != MPG_FAILURE_NONE) ? seed_failure : MPG_FAILURE_SEED;
     result.attempt_count = 0;
     return result;

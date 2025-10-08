@@ -826,7 +826,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   /* BSDF closure, sample direction. */
 #ifdef WITH_CYCLES_MANIFOLD
 #  if !defined(__KERNEL_GPU__)
-  ccl_attr_maybe_unused GuideSummary manifold_summary;
+  ccl_attr_maybe_unused GuideSummary manifold_summary = GuideSummary();
   ccl_attr_maybe_unused bool manifold_guiding_ready = false;
   ccl_attr_maybe_unused MpgOptions manifold_options = MpgOptions();
   manifold_options.max_bounces = kernel_data.integrator.manifold_max_bounces;
