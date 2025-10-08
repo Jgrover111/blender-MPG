@@ -32,13 +32,13 @@ namespace {
 static float mpg_evaluate_light_tree_pdf(KernelGlobals kg,
                                          const float3 &P,
                                          const float3 &N,
+                                         const float dt,
                                          const uint32_t path_flag,
                                          const int emitter_object,
                                          const uint emitter_index,
                                          const int receiver_object)
 {
-
-  return light_tree_pdf(kg, P, N, 0.0f, path_flag, emitter_object, emitter_index, receiver_object);
+  return light_tree_pdf(kg, P, N, dt, path_flag, emitter_object, emitter_index, receiver_object);
 }
 
 }  // namespace
@@ -70,9 +70,11 @@ bool mpg_update_light_selection_pdf(KernelGlobals kg,
       return false;
     }
 
+    const float dt = fmaxf(exit_vertex.distance_in, 0.0f);
     pdf_selection_updated = mpg_evaluate_light_tree_pdf(kg,
                                                         exit_vertex.position,
                                                         exit_vertex.normal,
+                                                        dt,
                                                         updated_path_flag,
                                                         emitter_object,
                                                         uint(light_sample.emitter_id),
