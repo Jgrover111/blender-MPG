@@ -5,7 +5,9 @@ reflection and refraction events on triangle meshes. The API exposes
 `mpg_try_connect()` which attempts to connect a diffuse shading point to a light via a
 specular surface using Newton-style manifold refinement. The implementation keeps the
 PDF in solid angle at the shading point and expects MIS with other proposals in the
-same measure.
+same measure. MPG is developed independently from the existing Cycles MNEE feature and
+does not consult per-object *Cast/Receive Shadow Caustics* or per-light *Shadow
+Caustics* toggles.
 
 ## Scope and limitations
 

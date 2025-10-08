@@ -1,7 +1,7 @@
 # AGENTS.md — Cycles CPU Manifold Path Guiding (MPG)
 
 **Purpose**
-Make the Cycles CPU MPG implementation **match the Mitsuba reference logic** (repo: `extern/mpg_ref`) for chains up to **2 specular bounces**: `D → S → L` and `D → S → S → L`. Avoid placeholders; align PDFs, measures, order-of-operations, and MIS exactly.
+Make the Cycles CPU MPG implementation **match the Mitsuba reference logic** (repo: `extern/mpg_ref`) for chains up to **2 specular bounces**: `D → S → L` and `D → S → S → L`. Avoid placeholders; align PDFs, measures, order-of-operations, and MIS exactly. This MPG work is **completely separate from the existing Cycles MNEE implementation** and therefore must not rely on the per-object *Cast/Receive Shadow Caustics* or per-light *Shadow Caustics* flags.
 
 ---
 
