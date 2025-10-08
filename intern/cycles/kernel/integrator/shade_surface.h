@@ -935,16 +935,13 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 
   if (manifold_guiding_enabled && !manifold_guiding_ready) {
     if (!summary_available && bootstrap_window) {
-      /* Fall back to a diffuse bootstrap seeded around the shading normal when no guide summary
-       * is available yet, matching the Mitsuba reference behaviour. Tag this as a bootstrap gate
-       * so debug AOVs and the solver share consistent bookkeeping. */
-      manifold_summary.mean_dir = (!is_zero(sd->N)) ? sd->N : sd->Ng;
+      /* Bootstrap remains disabled until a real OpenPGL summary is available. Leave the summary
+       * zeroed so MPG is skipped entirely for this bounce and record the failure for diagnostics. */
+      manifold_summary.mean_dir = make_float3(0.0f, 0.0f, 0.0f);
       manifold_summary.peak_weight = 0.0f;
       manifold_summary.kappa = 0.0f;
       manifold_summary.rbar = 0.0f;
-      manifold_guiding_ready = true;
-      relax_gate = true;
-      bootstrap_gate = true;
+      manifold_failure_code = int(MPG_FAILURE_GATE);
     }
   }
 
