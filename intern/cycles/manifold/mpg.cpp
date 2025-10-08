@@ -64,7 +64,9 @@ float compute_visibility_after_update(KernelGlobals kg,
                                                  vertex.position,
                                                  sd.time,
                                                  skip_object,
-                                                 skip_prim);
+                                                 skip_prim,
+                                                 OBJECT_NONE,
+                                                 PRIM_NONE);
     if (visibility == 0.0f) {
       return 0.0f;
     }
@@ -86,7 +88,9 @@ float compute_visibility_after_update(KernelGlobals kg,
                                                light_point,
                                                sd.time,
                                                skip_object,
-                                               skip_prim);
+                                               skip_prim,
+                                               light_sample.object,
+                                               light_sample.prim);
 
   return visibility;
 }
@@ -278,7 +282,14 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   light_sample.pdf_selection = pdf_selection;
 
   LightSample tmp = light_sa;
+  /* Recompute the pre-MPG NEE pdf at the receiver. The light update routine expects
+ * `ls->pdf` without the light-selection probability and multiplies it back in, so
+ * temporarily strip it to avoid squaring the factor. */
+  tmp.pdf /= pdf_selection;
+  tmp.pdf_selection = 1.0f;
   light_sample_update(kg, &tmp, sd.P, sd.N, path_flag);
+  tmp.pdf *= pdf_selection;
+  tmp.pdf_selection = pdf_selection;
   float nee_pdf_sa = mpg_light_sample_pdf_solid(kg, sd, tmp);
   if (!isfinite_safe(nee_pdf_sa)) {
     result.attempt_count = attempt_count;

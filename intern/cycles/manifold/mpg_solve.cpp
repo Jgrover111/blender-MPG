@@ -748,8 +748,8 @@ float compute_visibility(KernelGlobals kg,
   shadow_ray.time = sd.time;
   shadow_ray.self.prim = seed.prim;
   shadow_ray.self.object = seed.object;
-  shadow_ray.self.light_prim = PRIM_NONE;
-  shadow_ray.self.light_object = OBJECT_NONE;
+  shadow_ray.self.light_prim = seed.light_sample.prim;
+  shadow_ray.self.light_object = seed.light_sample.object;
 
   const bool occluded = scene_intersect_shadow(kg, &shadow_ray, PATH_RAY_SHADOW);
   return occluded ? 0.0f : 1.0f;
@@ -1264,7 +1264,9 @@ float compute_segment_visibility(KernelGlobals kg,
                                  const float3 &end_point,
                                  const float time,
                                  const int skip_object,
-                                 const int skip_prim)
+                                 const int skip_prim,
+                                 const int skip_light_object,
+                                 const int skip_light_prim)
 {
   float3 dir = end_point - start_point;
   const float distance = len(dir);
@@ -1289,8 +1291,8 @@ float compute_segment_visibility(KernelGlobals kg,
   ray.time = time;
   ray.self.prim = skip_prim;
   ray.self.object = skip_object;
-  ray.self.light_prim = PRIM_NONE;
-  ray.self.light_object = OBJECT_NONE;
+  ray.self.light_prim = skip_light_prim;
+  ray.self.light_object = skip_light_object;
 
   const bool occluded = scene_intersect_shadow(kg, &ray, PATH_RAY_SHADOW);
   return occluded ? 0.0f : 1.0f;
@@ -1304,10 +1306,19 @@ float mpg_compute_segment_visibility(KernelGlobals kg,
                                      const float3 &end_point,
                                      const float time,
                                      const int skip_object,
-                                     const int skip_prim)
+                                     const int skip_prim,
+                                     const int skip_light_object,
+                                     const int skip_light_prim)
 {
-  return compute_segment_visibility(
-      kg, start_point, start_normal, end_point, time, skip_object, skip_prim);
+  return compute_segment_visibility(kg,
+                                    start_point,
+                                    start_normal,
+                                    end_point,
+                                    time,
+                                    skip_object,
+                                    skip_prim,
+                                    skip_light_object,
+                                    skip_light_prim);
 }
 
 bool mpg_solve_single_bounce(KernelGlobals kg,
@@ -1917,10 +1928,24 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     return false;
   }
 
-  const float visibility_primary = compute_segment_visibility(
-      kg, sd.P, sd.Ng, eval.primary.point, sd.time, sd.object, sd.prim);
-  const float visibility_intermediate = compute_segment_visibility(
-      kg, eval.primary.point, eval.primary.normal, eval.secondary.point, sd.time, seed.object, seed.prim);
+  const float visibility_primary = compute_segment_visibility(kg,
+                                                              sd.P,
+                                                              sd.Ng,
+                                                              eval.primary.point,
+                                                              sd.time,
+                                                              sd.object,
+                                                              sd.prim,
+                                                              OBJECT_NONE,
+                                                              PRIM_NONE);
+  const float visibility_intermediate = compute_segment_visibility(kg,
+                                                                   eval.primary.point,
+                                                                   eval.primary.normal,
+                                                                   eval.secondary.point,
+                                                                   sd.time,
+                                                                   seed.object,
+                                                                   seed.prim,
+                                                                   OBJECT_NONE,
+                                                                   PRIM_NONE);
   const float3 secondary_light_point =
       compute_distant_visibility_endpoint(seed.light_sample, eval.secondary.point);
   const float visibility_secondary = compute_segment_visibility(kg,
@@ -1929,7 +1954,9 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                                                 secondary_light_point,
                                                                 sd.time,
                                                                 secondary_seed.object,
-                                                                secondary_seed.prim);
+                                                                secondary_seed.prim,
+                                                                seed.light_sample.object,
+                                                                seed.light_sample.prim);
   const float visibility = visibility_primary * visibility_intermediate * visibility_secondary;
 
   result.success = true;

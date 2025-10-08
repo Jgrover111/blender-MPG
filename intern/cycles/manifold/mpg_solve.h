@@ -34,6 +34,8 @@ float mpg_compute_segment_visibility(KernelGlobals kg,
                                      const float3 &end_point,
                                      float time,
                                      int skip_object,
-                                     int skip_prim);
+                                     int skip_prim,
+                                     int skip_light_object,
+                                     int skip_light_prim);
 
 CCL_NAMESPACE_END
