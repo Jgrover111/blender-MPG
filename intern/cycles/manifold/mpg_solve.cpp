@@ -1526,6 +1526,31 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   primary_sd.prim = seed.prim;
   primary_sd.object = seed.object;
 
+  float3 primary_geom_normal = cross(primary_geometry.dPdu, primary_geometry.dPdv);
+  if (!is_zero(primary_geom_normal)) {
+    primary_geom_normal = safe_normalize(primary_geom_normal);
+  }
+  else {
+    primary_geom_normal = surface_normal_from_barycentric(primary_geometry, primary_u, primary_v);
+    if (!is_zero(primary_geom_normal)) {
+      primary_geom_normal = safe_normalize(primary_geom_normal);
+    }
+  }
+  if (is_zero(primary_geom_normal)) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+    return false;
+  }
+
+  const float3 receiver_to_primary = primary_sd.P - sd.P;
+  if (!is_zero(receiver_to_primary) && dot(primary_geom_normal, receiver_to_primary) < 0.0f) {
+    primary_geom_normal = -primary_geom_normal;
+  }
+
+  /* The oriented geometric normal is needed so specular_parameters_from_surface can offset the
+   * probe ray exactly like Mitsuba's implementation. */
+  primary_sd.Ng = primary_geom_normal;
+  primary_sd.N = primary_geom_normal;
+
   SpecularParameters secondary_params;
   if (!specular_parameters_from_surface(
           kg, primary_sd, secondary_geometry, secondary_seed, secondary_u, secondary_v, secondary_params))
