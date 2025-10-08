@@ -1527,19 +1527,12 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
 
   const float area_element = len(cross(eval.dXdu, eval.dXdv));
   const float cos_theta = fabsf(dot(eval.normal, -result.wi));
-  const float dist2 = fmaxf(result.distance_ds * result.distance_ds, 1e-8f);
   if (area_element <= 0.0f || cos_theta <= 0.0f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
-  const float area_to_solid = area_element * cos_theta / dist2;
-  if (!isfinite_safe(area_to_solid) || area_to_solid <= 0.0f) {
-    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
-    return false;
-  }
-
-  result.jacobian_total = fabsf(determinant) * area_to_solid;
+  result.jacobian_total = fabsf(determinant);
   result.jacobian = result.jacobian_total;
   vertex.jacobian = result.jacobian_total;
 
@@ -1850,17 +1843,11 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   const float area_primary = len(cross(eval.primary.dXdu, eval.primary.dXdv));
   const float cos_primary = fabsf(dot(eval.primary.normal, -eval.primary.dir_ds));
-  const float dist_primary_sq = fmaxf(eval.primary.distance_ds * eval.primary.distance_ds, 1.0e-8f);
   if (!(area_primary > 0.0f) || !(cos_primary > 0.0f)) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
-  const float area_to_solid_primary = area_primary * cos_primary / dist_primary_sq;
-  if (!isfinite_safe(area_to_solid_primary) || area_to_solid_primary <= 0.0f) {
-    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
-    return false;
-  }
-  const float jacobian_primary = fabsf(determinant_primary) * area_to_solid_primary;
+  const float jacobian_primary = fabsf(determinant_primary);
 
   ShadingPoint intermediate_point = receiver;
   intermediate_point.position = eval.primary.point;
@@ -1882,17 +1869,11 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   const float area_secondary = len(cross(eval.secondary.dXdu, eval.secondary.dXdv));
   const float cos_secondary = fabsf(dot(eval.secondary.normal, -eval.secondary.dir_sl));
-  const float dist_secondary_sq = fmaxf(eval.secondary.distance_sl * eval.secondary.distance_sl, 1.0e-8f);
   if (!(area_secondary > 0.0f) || !(cos_secondary > 0.0f)) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
-  const float area_to_solid_secondary = area_secondary * cos_secondary / dist_secondary_sq;
-  if (!isfinite_safe(area_to_solid_secondary) || area_to_solid_secondary <= 0.0f) {
-    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
-    return false;
-  }
-  const float jacobian_secondary = fabsf(determinant_secondary) * area_to_solid_secondary;
+  const float jacobian_secondary = fabsf(determinant_secondary);
 
   const float jacobian_total = jacobian_primary * jacobian_secondary;
   if (!isfinite_safe(jacobian_total) || fabsf(jacobian_total) <= 1.0e-12f) {

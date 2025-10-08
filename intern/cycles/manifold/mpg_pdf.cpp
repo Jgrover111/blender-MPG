@@ -38,7 +38,12 @@ float mpg_light_sample_pdf_solid(KernelGlobals kg,
       case LIGHT_AREA:
         if (light_sample.prim != PRIM_NONE) {
           const ccl_global KernelLight *klight = &kernel_data_fetch(lights, light_sample.prim);
-          needs_conversion = (klight->area.tan_half_spread != 0.0f);
+          /* Area lights that sample from an elliptical shape keep the PDF in area
+           * measure even when the spread is zero. Convert those (and any spread
+           * configurations) back to solid angle to match Mitsuba's measure. */
+          const bool is_elliptical = (klight->area.invarea < 0.0f);
+          const bool has_spread = (klight->area.tan_half_spread != 0.0f);
+          needs_conversion = (has_spread || is_elliptical);
         }
         break;
       default:

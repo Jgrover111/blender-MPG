@@ -205,7 +205,6 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     result.attempt_count = 0;
     return result;
   }
-  result.seed_pdf = seed.seed_pdf;
   result.seed_pdf_raw = seed.seed_pdf_raw;
   result.seed_trial_count = seed.trial_count;
   result.light = seed.light_sample;
@@ -374,6 +373,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     result.seed_pdf = p_seed;
     return result;
   }
+
+  result.seed_pdf = p_seed;
 
   const float J_total = (isfinite_safe(solution.jacobian_total)) ?
                             fmaxf(fabsf(solution.jacobian_total), 0.0f) :
