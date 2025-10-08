@@ -73,9 +73,37 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
                       const MpgSolverOutput &solution,
                       float &pdf)
 {
+  (void)bsdf;
+  (void)guide;
+
   pdf = 0.0f;
-  const float p_seed  = fmaxf(seed.seed_pdf, 1.0e-16f);
-  const float p_light = mpg_light_sample_pdf_solid(kg, sd, seed.light_sample);
+
+  const float p_seed = (isfinite_safe(seed.seed_pdf)) ? fmaxf(seed.seed_pdf, 1.0e-16f) : 0.0f;
+  if (!(p_seed > 0.0f)) {
+    return false;
+  }
+
+  const int vertex_count = solution.specular_vertex_count;
+  if (vertex_count <= 0) {
+    return false;
+  }
+
+  LightSample light_sample = seed.light_sample;
+  const float pdf_selection = light_sample.pdf_selection;
+  if (!(isfinite_safe(pdf_selection) && pdf_selection > 0.0f)) {
+    return false;
+  }
+
+  light_sample.pdf /= pdf_selection;
+  light_sample.pdf_selection = 1.0f;
+
+  const MpgSpecularVertex &exit_vertex = solution.specular_vertices[vertex_count - 1];
+  light_sample_update(kg, &light_sample, exit_vertex.position, exit_vertex.normal, seed.path_flag);
+
+  light_sample.pdf *= pdf_selection;
+  light_sample.pdf_selection = pdf_selection;
+
+  const float p_light = mpg_light_sample_pdf_solid(kg, sd, light_sample);
   if (!(isfinite_safe(p_light) && p_light > 0.0f)) {
     return false;
   }
@@ -89,6 +117,7 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
   if (!(isfinite_safe(p) && p > 0.0f)) {
     return false;
   }
+
   pdf = p;
   return true;
 }
