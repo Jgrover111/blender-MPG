@@ -115,8 +115,7 @@ float3 compute_distant_light_endpoint(const LightSample &light_sample,
     return origin;
   }
   dir = normalize(dir);
-  const float distant_length = 1.0e6f;
-  return origin + dir * distant_length;
+  return origin + dir * MPG_DISTANT_LIGHT_VISIBILITY_DISTANCE;
 }
 
 float compute_visibility_after_update(KernelGlobals kg,

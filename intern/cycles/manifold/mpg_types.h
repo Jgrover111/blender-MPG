@@ -12,6 +12,11 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Length used when tracing visibility rays toward directional emitters. The value only
+ * affects shadow rays and stays large enough to exit typical scene bounds without
+ * perturbing the Jacobian computations that operate on normalized segments. */
+static constexpr float MPG_DISTANT_LIGHT_VISIBILITY_DISTANCE = 1.0e6f;
+
 enum MpgFailureCode : int {
   MPG_FAILURE_NONE = 0,
   MPG_FAILURE_SEED = 1,

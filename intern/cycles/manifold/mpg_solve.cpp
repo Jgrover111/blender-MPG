@@ -68,6 +68,21 @@ struct SpecularEval {
   bool refractive = false;
 };
 
+float3 compute_distant_visibility_endpoint(const LightSample &light_sample, const float3 &origin)
+{
+  if (light_sample.t != FLT_MAX) {
+    return light_sample.P;
+  }
+
+  float3 dir = light_sample.D;
+  if (is_zero(dir)) {
+    return origin;
+  }
+
+  dir = normalize(dir);
+  return origin + dir * MPG_DISTANT_LIGHT_VISIBILITY_DISTANCE;
+}
+
 void copy_microfacet_to_parameters(const MicrofacetBsdf *microfacet, SpecularParameters &params)
 {
   params.has_microfacet = (microfacet != nullptr);
@@ -691,7 +706,11 @@ float compute_visibility(KernelGlobals kg,
   shadow_ray.P = ray_offset(eval.point, offset_normal);
   shadow_ray.D = eval.dir_sl;
   shadow_ray.tmin = 0.0f;
-  shadow_ray.tmax = fmaxf(eval.distance_sl - 1e-4f, 0.0f);
+  float ray_length = eval.distance_sl;
+  if (seed.light_sample.t == FLT_MAX) {
+    ray_length = MPG_DISTANT_LIGHT_VISIBILITY_DISTANCE;
+  }
+  shadow_ray.tmax = fmaxf(ray_length - 1e-4f, 0.0f);
   shadow_ray.time = sd.time;
   shadow_ray.self.prim = seed.prim;
   shadow_ray.self.object = seed.object;
@@ -1862,10 +1881,12 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
       kg, sd.P, sd.Ng, eval.primary.point, sd.time, sd.object, sd.prim);
   const float visibility_intermediate = compute_segment_visibility(
       kg, eval.primary.point, eval.primary.normal, eval.secondary.point, sd.time, seed.object, seed.prim);
+  const float3 secondary_light_point =
+      compute_distant_visibility_endpoint(seed.light_sample, eval.secondary.point);
   const float visibility_secondary = compute_segment_visibility(kg,
                                                                 eval.secondary.point,
                                                                 eval.secondary.normal,
-                                                                seed.light_sample.P,
+                                                                secondary_light_point,
                                                                 sd.time,
                                                                 secondary_seed.object,
                                                                 secondary_seed.prim);
