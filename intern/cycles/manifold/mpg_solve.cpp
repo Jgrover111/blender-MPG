@@ -354,10 +354,7 @@ float3 compute_specular(const float3 &dir_ds,
     return reflect_dir(incident, oriented_normal);
   }
 
-  float eta = fmaxf(params.base_eta, 1e-6f);
-  if (dot(dir_ds, normal) < 0.0f) {
-    eta = 1.0f / eta;
-  }
+  const float eta = fmaxf(params.base_eta, 1e-6f);
 
   float3 dir = refract_dir(incident, oriented_normal, eta, tir, cos_theta_i, cos_theta_t);
   eta_used = eta;
