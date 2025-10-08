@@ -355,7 +355,7 @@ float3 compute_specular(const float3 &dir_ds,
   }
 
   float eta = fmaxf(params.base_eta, 1e-6f);
-  if (dot(incident, normal) < 0.0f) {
+  if (dot(dir_ds, normal) < 0.0f) {
     eta = 1.0f / eta;
   }
 
