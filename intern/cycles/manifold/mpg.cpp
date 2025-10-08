@@ -234,7 +234,10 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   /* Validate the stored selection probability before reusing it. The Mitsuba
    * reference keeps the receiver-side probability, so only perform light-link
    * compatibility checks here to preserve existing failure codes. */
-  const int receiver_object = (exit_vertex.object >= 0) ? exit_vertex.object : OBJECT_NONE;
+  /* Light linking is evaluated at the diffuse receiver. Keep the original object id
+   * from the shading point instead of the specular vertex to avoid rejecting valid
+   * connections when intermediate specular surfaces belong to a different object. */
+  const int receiver_object = light_link_receiver_nee(kg, &sd);
   const int emitter_object = light_sample.object;
 
 #ifdef __LIGHT_TREE__

@@ -253,8 +253,9 @@ bool mpg_generate_seed(KernelGlobals kg,
     return false;
   }
 
+  const int total_trials = guided_trials + fallback_trials;
   const int branch_trials = (successful_branch == SeedTrialBranch::Guided) ? guided_trials :
-                                                                            fallback_trials;
+                                                                            total_trials;
   const float inv_acceptance_probability = (branch_trials > 0) ? float(branch_trials) : 1.0f;
   const float renormalized_seed_pdf =
       fmaxf(accepted_seed_pdf * inv_acceptance_probability, 1.0e-16f);

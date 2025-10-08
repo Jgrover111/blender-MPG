@@ -933,23 +933,33 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   }
 #    endif
 
+  const bool gate_active_local = (manifold_options.gate_w > 0.0f) ||
+                                 (manifold_options.gate_kappa > 0.0f);
+
   if (manifold_guiding_enabled && !manifold_guiding_ready) {
-    if (!summary_available && bootstrap_window) {
-      /* Bootstrap remains disabled until a real OpenPGL summary is available. Leave the summary
-       * zeroed so MPG is skipped entirely for this bounce and record the failure for diagnostics. */
-      manifold_summary.mean_dir = make_float3(0.0f, 0.0f, 0.0f);
-      manifold_summary.peak_weight = 0.0f;
-      manifold_summary.kappa = 0.0f;
-      manifold_summary.rbar = 0.0f;
-      manifold_failure_code = int(MPG_FAILURE_GATE);
+    if (!summary_available) {
+      if (!gate_active_local || bootstrap_window) {
+        /* Allow a bootstrap attempt without an OpenPGL summary by mirroring the Mitsuba
+         * fallback: relax the gate and flag the bootstrap path so mpg_try_connect() can emit a
+         * wide seed around the shading normal. */
+        bootstrap_gate = true;
+        relax_gate = true;
+        manifold_guiding_ready = true;
+      }
+      else {
+        /* Outside the bootstrap window we still record the gate failure for diagnostics. */
+        manifold_summary.mean_dir = make_float3(0.0f, 0.0f, 0.0f);
+        manifold_summary.peak_weight = 0.0f;
+        manifold_summary.kappa = 0.0f;
+        manifold_summary.rbar = 0.0f;
+        manifold_failure_code = int(MPG_FAILURE_GATE);
+      }
     }
   }
 
   manifold_options.relax_gate = relax_gate;
 
   if (manifold_guiding_enabled) {
-    const bool gate_active_local = (manifold_options.gate_w > 0.0f) ||
-                                   (manifold_options.gate_kappa > 0.0f);
     const bool has_dir_relaxed_local = (manifold_summary.rbar > 1.0e-4f);
     const bool has_dir_strict_local = (manifold_summary.rbar > 1.0e-3f);
     if (gate_active_local) {
