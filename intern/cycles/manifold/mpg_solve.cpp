@@ -968,11 +968,13 @@ bool trace_secondary_seed(KernelGlobals kg,
   Ray ray;
   ray.P = mpg_surface_ray_offset(kg, offset_sd, primary_point, dir_sl);
   ray.D = dir_sl;
-  ray.tmin = 0.0f;
+  ray.tmin = 1e-4f;
   ray.tmax = FLT_MAX;
   ray.time = sd.time;
-  ray.self.prim = seed.prim;
-  ray.self.object = seed.object;
+  /* Leave self references clear so refraction chains can re-hit the same triangle from
+   * the opposite side when tracing the exit interface (regression: thin pane double bounce). */
+  ray.self.prim = PRIM_NONE;
+  ray.self.object = OBJECT_NONE;
   ray.self.light_prim = PRIM_NONE;
   ray.self.light_object = OBJECT_NONE;
 
