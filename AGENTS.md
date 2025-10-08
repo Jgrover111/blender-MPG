@@ -13,6 +13,7 @@ Make the Cycles CPU MPG implementation **match the Mitsuba reference logic** (re
 * **Unbiasedness preserved.** MPG is an *additional* proposal, combined by MIS with existing proposals (BSDF, NEE, OpenPGL) **in the same measure**.
 * **Minimal blast radius.** Keep all new code in `intern/cycles/manifold/`. Only surgical touches in integrator/UI/build.
 * **No OpenPGL internals.** Only public `sample()`/`pdf()` for the summary estimator.
+* **Path Guiding dependency is intentional.** MPG must stay hard-wired to the Path Guiding/OpenPGL summary for gating and seeding. Do **not** add fallbacks that run MPG without Path Guiding enabled or try to remove/relax this dependency.
 
 ---
 

@@ -7,7 +7,9 @@ specular surface using Newton-style manifold refinement. The implementation keep
 PDF in solid angle at the shading point and expects MIS with other proposals in the
 same measure. MPG is developed independently from the existing Cycles MNEE feature and
 does not consult per-object *Cast/Receive Shadow Caustics* or per-light *Shadow
-Caustics* toggles.
+Caustics* toggles. MPG is intentionally hard-wired to the Path Guiding (OpenPGL)
+summary for gating and seeding; attempting to run it without Path Guiding enabled is
+unsupported and out of scope.
 
 ## Scope and limitations
 
@@ -23,8 +25,9 @@ Caustics* toggles.
 * The solver rejects configurations that trigger total internal reflection, run out of
   iterations, or violate barycentric bounds.
 * Seeding depends on OpenPGL `GuideSummary` parameters and jitters the dominant guided
-  direction. Seeds are rejected when no specular triangle is intersected or when lights
-  cannot provide a deterministic endpoint.
+  direction. There is no fallback seeding path; Path Guiding must stay active so MPG
+  can derive its initial guesses. Seeds are rejected when no specular triangle is
+  intersected or when lights cannot provide a deterministic endpoint.
 * The proposal PDF multiplies the seed density, the light's solid-angle pdf at the
   shading point, the solver's surface Jacobian `|dX/du × dX/dv| / r_ds²`, and the
   specular cosine term. All components are evaluated explicitly so MIS combines in
