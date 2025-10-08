@@ -288,11 +288,26 @@ bool mpg_generate_seed(KernelGlobals kg,
   seed.trial_count = branch_trials;
   seed.light_sample = light_sample;
   seed.path_flag = path_flag;
-  const float light_distance = (light_sample.t == FLT_MAX) ? 1.0e6f : light_sample.t;
-  seed.light_sample.P = sd.P + light_sample.D * light_distance;
+  const bool has_light_direction = !is_zero(light_sample.D);
+  float3 normalized_light_dir = light_sample.D;
+  if (has_light_direction) {
+    normalized_light_dir = normalize(light_sample.D);
+  }
 
-  if (!is_zero(seed.light_sample.D)) {
-    seed.light_sample.D = normalize(seed.light_sample.D);
+  if (light_sample.t == FLT_MAX) {
+    /* Directional emitters carry their endpoint at infinity. Offset the endpoint by a unit
+     * step along the sampled direction so the solver receives a normalized segment for the
+     * secondary leg, matching the Mitsuba reference behaviour. */
+    seed.light_sample.P = sd.P + (has_light_direction ? normalized_light_dir : zero_float3());
+  }
+  else {
+    /* Finite-distance lights keep their original distance-based endpoint so the solver works
+     * with the actual light vertex location. */
+    seed.light_sample.P = sd.P + light_sample.D * light_sample.t;
+  }
+
+  if (has_light_direction) {
+    seed.light_sample.D = normalized_light_dir;
   }
 
   seed.object = isect.object;
