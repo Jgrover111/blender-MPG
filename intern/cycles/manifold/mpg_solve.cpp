@@ -341,8 +341,11 @@ float3 compute_specular(const float3 &dir_ds,
                         float &eta_used)
 {
   const float3 incident = -dir_ds;
+  const float dot_normal_incident = dot(normal, incident);
+  const bool entering = dot_normal_incident >= 0.0f;
+
   float3 oriented_normal = normal;
-  if (dot(oriented_normal, incident) < 0.0f) {
+  if (dot_normal_incident < 0.0f) {
     oriented_normal = -oriented_normal;
   }
 
@@ -354,10 +357,12 @@ float3 compute_specular(const float3 &dir_ds,
     return reflect_dir(incident, oriented_normal);
   }
 
-  const float eta = fmaxf(params.base_eta, 1e-6f);
+  const float safe_base_eta = fmaxf(params.base_eta, 1e-6f);
+  const float eta_ratio = entering ? (1.0f / safe_base_eta) : safe_base_eta;
+  const float safe_eta_ratio = fmaxf(eta_ratio, 1e-6f);
 
-  float3 dir = refract_dir(incident, oriented_normal, eta, tir, cos_theta_i, cos_theta_t);
-  eta_used = eta;
+  float3 dir = refract_dir(incident, oriented_normal, safe_eta_ratio, tir, cos_theta_i, cos_theta_t);
+  eta_used = safe_eta_ratio;
   if (tir) {
     cos_theta_i = fabsf(cos_theta_i);
     cos_theta_t = 0.0f;
