@@ -382,6 +382,39 @@ float3 derivative_normalized(const float3 &vector, const float3 &d_vector)
   return (d_vector * len_v - vector * (dot(vector, d_vector) / len_v)) / (len_v * len_v);
 }
 
+void compute_light_sample_direction(const LightSample &light_sample,
+                                    const float3 &point,
+                                    float3 &direction,
+                                    float &distance)
+{
+  if (light_sample.t == FLT_MAX) {
+    direction = is_zero(light_sample.D) ? make_float3(0.0f, 0.0f, 1.0f) : safe_normalize(light_sample.D);
+    distance = MPG_DISTANT_LIGHT_VISIBILITY_DISTANCE;
+    return;
+  }
+
+  float3 delta = light_sample.P - point;
+  distance = len(delta);
+  if (distance > 0.0f) {
+    direction = delta / distance;
+  }
+  else {
+    direction = is_zero(delta) ? make_float3(0.0f, 0.0f, 1.0f) : safe_normalize(delta);
+    distance = 0.0f;
+  }
+}
+
+float3 compute_light_sample_direction_derivative(const LightSample &light_sample,
+                                                 const float3 &point,
+                                                 const float3 &d_point)
+{
+  if (light_sample.t == FLT_MAX) {
+    return zero_float3();
+  }
+
+  return derivative_normalized(light_sample.P - point, -d_point);
+}
+
 void evaluate_specular(const ShadingPoint &D,
                        const MpgSeedRay &seed,
                        const SpecularSurfaceGeometry &geometry,
@@ -399,10 +432,7 @@ void evaluate_specular(const ShadingPoint &D,
   eval.dir_ds = (eval.distance_ds > 0.0f) ? (eval.dir_ds / eval.distance_ds) :
                                            make_float3(0.0f, 0.0f, 1.0f);
 
-  eval.dir_sl = seed.light_sample.P - eval.point;
-  eval.distance_sl = len(eval.dir_sl);
-  eval.dir_sl = (eval.distance_sl > 0.0f) ? (eval.dir_sl / eval.distance_sl) :
-                                           make_float3(0.0f, 0.0f, 1.0f);
+  compute_light_sample_direction(seed.light_sample, eval.point, eval.dir_sl, eval.distance_sl);
 
   if (seed.use_smooth_normals) {
     eval.normal = combine_vertex_normals(geometry, u, v);
@@ -620,7 +650,9 @@ bool specular_parameters_from_surface(KernelGlobals kg,
                               geometry.verts[1] * u +
                               geometry.verts[2] * v;
     const float3 dir_ds = normalize(spec_point - sd.P);
-    const float3 dir_sl = normalize(seed.light_sample.P - spec_point);
+    float tmp_distance = 0.0f;
+    float3 dir_sl;
+    compute_light_sample_direction(seed.light_sample, spec_point, dir_sl, tmp_distance);
     const float3 incident  = dir_ds;
     const float3 outgoing  = params.is_refraction ? dir_sl : -dir_sl;
     const float s = dot(params.microfacet.N, incident) * dot(params.microfacet.N, outgoing);
@@ -759,8 +791,10 @@ void compute_jacobian(const ShadingPoint &D,
   const float3 d_dir_ds_du = derivative_normalized(eval.point - D.position, geometry.dPdu);
   const float3 d_dir_ds_dv = derivative_normalized(eval.point - D.position, geometry.dPdv);
 
-  const float3 d_dir_sl_du = derivative_normalized(seed.light_sample.P - eval.point, -geometry.dPdu);
-  const float3 d_dir_sl_dv = derivative_normalized(seed.light_sample.P - eval.point, -geometry.dPdv);
+  const float3 d_dir_sl_du = compute_light_sample_direction_derivative(
+      seed.light_sample, eval.point, geometry.dPdu);
+  const float3 d_dir_sl_dv = compute_light_sample_direction_derivative(
+      seed.light_sample, eval.point, geometry.dPdv);
 
   float3 d_spec_du, d_spec_dv;
   if (!eval.refractive) {
@@ -1039,7 +1073,7 @@ bool evaluate_double_bounce(const ShadingPoint &receiver,
                             const SpecularParameters &primary_params,
                             const SpecularSurfaceGeometry &secondary_geometry,
                             const SpecularParameters &secondary_params,
-                            const float3 &light_point,
+                            const LightSample &light_sample,
                             const float u1,
                             const float v1,
                             const float u2,
@@ -1071,7 +1105,7 @@ bool evaluate_double_bounce(const ShadingPoint &receiver,
   intermediate_point.shading_normal = eval.primary.normal;
 
   MpgSeedRay secondary_seed = {};
-  secondary_seed.light_sample.P = light_point;
+  secondary_seed.light_sample = light_sample;
   secondary_seed.use_smooth_normals = secondary_use_smooth_normals;
 
   evaluate_specular(intermediate_point, secondary_seed, secondary_geometry, secondary_params, u2, v2, eval.secondary);
@@ -1105,7 +1139,7 @@ bool compute_double_bounce_jacobian(const ShadingPoint &receiver,
                                     const SpecularParameters &primary_params,
                                     const SpecularSurfaceGeometry &secondary_geometry,
                                     const SpecularParameters &secondary_params,
-                                    const float3 &light_point,
+                                    const LightSample &light_sample,
                                     const float u1,
                                     const float v1,
                                     const float u2,
@@ -1148,7 +1182,7 @@ bool compute_double_bounce_jacobian(const ShadingPoint &receiver,
                                 primary_params,
                                 secondary_geometry,
                                 secondary_params,
-                                light_point,
+                                light_sample,
                                 offset_u1,
                                 offset_v1,
                                 offset_u2,
@@ -1598,7 +1632,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                               primary_params,
                               secondary_geometry,
                               secondary_params,
-                              seed.light_sample.P,
+                              seed.light_sample,
                               primary_u,
                               primary_v,
                               secondary_u,
@@ -1637,7 +1671,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                         primary_params,
                                         secondary_geometry,
                                         secondary_params,
-                                        seed.light_sample.P,
+                                        seed.light_sample,
                                         primary_u,
                                         primary_v,
                                         secondary_u,
@@ -1685,7 +1719,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                 primary_params,
                                 secondary_geometry,
                                 secondary_params,
-                                seed.light_sample.P,
+                                seed.light_sample,
                                 new_primary_u,
                                 new_primary_v,
                                 new_secondary_u,
@@ -1767,7 +1801,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                               primary_params,
                               secondary_geometry,
                               secondary_params,
-                              seed.light_sample.P,
+                              seed.light_sample,
                               primary_u,
                               primary_v,
                               secondary_u,
