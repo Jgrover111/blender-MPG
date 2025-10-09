@@ -20,6 +20,7 @@
 #include "util/math_intersect.h"
 
 #include <cfloat>
+#include <cmath>
 
 CCL_NAMESPACE_BEGIN
 
@@ -129,7 +130,99 @@ bool mpg_generate_seed(KernelGlobals kg,
   seed = MpgSeedRay();
   failure_code = MPG_FAILURE_NONE;
 
-  (void)bsdf;
+  enum class SeedLobe {
+    Reflection,
+    Transmission,
+    Dual
+  };
+
+  const auto classify_seed_lobe = [](const ShaderClosure &closure) {
+    if (CLOSURE_IS_BSDF_TRANSPARENT(closure.type) ||
+        CLOSURE_IS_BSDF_TRANSMISSION(closure.type))
+    {
+      return SeedLobe::Transmission;
+    }
+    if (CLOSURE_IS_GLASS(closure.type)) {
+      return SeedLobe::Dual;
+    }
+    return SeedLobe::Reflection;
+  };
+
+  const SeedLobe seed_lobe = classify_seed_lobe(bsdf);
+
+  float3 shading_normal = sd.N;
+  bool shading_normal_valid = !is_zero(shading_normal);
+  if (shading_normal_valid) {
+    shading_normal = safe_normalize(shading_normal);
+    shading_normal_valid = !is_zero(shading_normal);
+  }
+
+  float3 geometric_normal = sd.Ng;
+  bool geometric_normal_valid = !is_zero(geometric_normal);
+  if (geometric_normal_valid) {
+    geometric_normal = safe_normalize(geometric_normal);
+    geometric_normal_valid = !is_zero(geometric_normal);
+  }
+
+  if (!shading_normal_valid && geometric_normal_valid) {
+    shading_normal = geometric_normal;
+    shading_normal_valid = true;
+  }
+  if (!geometric_normal_valid && shading_normal_valid) {
+    geometric_normal = shading_normal;
+    geometric_normal_valid = true;
+  }
+  if (!shading_normal_valid && !geometric_normal_valid) {
+    shading_normal = make_float3(0.0f, 0.0f, 1.0f);
+    shading_normal_valid = true;
+    geometric_normal = shading_normal;
+    geometric_normal_valid = true;
+  }
+
+  float3 reflection_normal = shading_normal;
+  float3 transmission_normal = geometric_normal;
+
+  bool prefer_transmission = (seed_lobe == SeedLobe::Transmission);
+  if (seed_lobe == SeedLobe::Dual) {
+    if (!prefer_transmission) {
+      /* Use the guided axis (when available) to decide whether we should bias the seed toward
+       * the refractive or reflective hemisphere. Falling back to the view direction provides a
+       * deterministic choice when the guide has no dominant direction yet. */
+      const float3 reference_dir = (!is_zero(guide.mean_dir)) ? guide.mean_dir : sd.wi;
+      const bool reference_valid = !is_zero(reference_dir);
+      if (reference_valid) {
+        const float ref_dot_trans = dot(reference_dir, transmission_normal);
+        const float ref_dot_refl = dot(reference_dir, reflection_normal);
+        prefer_transmission = fabsf(ref_dot_trans) > fabsf(ref_dot_refl);
+      }
+    }
+  }
+
+  bool using_transmission_hemisphere = prefer_transmission && geometric_normal_valid;
+  float3 hemisphere_normal = using_transmission_hemisphere ? transmission_normal : reflection_normal;
+  bool hemisphere_valid = !is_zero(hemisphere_normal);
+  if (!hemisphere_valid) {
+    hemisphere_normal = reflection_normal;
+    hemisphere_valid = !is_zero(hemisphere_normal);
+    using_transmission_hemisphere = false;
+  }
+
+  float hemisphere_sign = 1.0f;
+  if (using_transmission_hemisphere) {
+    const float dot_ng_wi = dot(transmission_normal, sd.wi);
+    hemisphere_sign = (dot_ng_wi >= 0.0f) ? -1.0f : 1.0f;
+  }
+
+  const auto matches_hemisphere = [&](const float3 &direction) {
+    if (!hemisphere_valid) {
+      return true;
+    }
+    const float dot_val = dot(direction, hemisphere_normal);
+    if (using_transmission_hemisphere) {
+      return (hemisphere_sign > 0.0f) ? (dot_val >= 0.0f) : (dot_val <= 0.0f);
+    }
+    return dot_val >= 0.0f;
+  };
 
   /* Determine the dominant seed direction from the guided mean with optional jitter. */
   float3 axis = guide.mean_dir;
@@ -146,6 +239,12 @@ bool mpg_generate_seed(KernelGlobals kg,
 
   bool axis_valid = !is_zero(axis);
   if (axis_valid) {
+    axis = safe_normalize(axis);
+    axis_valid = !is_zero(axis);
+  }
+
+  if (axis_valid && !matches_hemisphere(axis)) {
+    axis = -axis;
     axis = safe_normalize(axis);
     axis_valid = !is_zero(axis);
   }
@@ -187,6 +286,11 @@ bool mpg_generate_seed(KernelGlobals kg,
       return false;
     }
 
+    if (!matches_hemisphere(candidate_direction)) {
+      last_failure = MPG_FAILURE_SEED;
+      return false;
+    }
+
     const float3 normalized_direction = normalize(candidate_direction);
     const float clamped_pdf = fmaxf(candidate_pdf, 1.0e-16f);
 
@@ -221,7 +325,7 @@ bool mpg_generate_seed(KernelGlobals kg,
     out_isect = candidate_isect;
     seed_direction = normalized_direction;
     accepted_seed_pdf = clamped_pdf;
-    seed.use_smooth_normals = has_smooth_normals;
+    seed.use_smooth_normals = has_smooth_normals && !using_transmission_hemisphere;
     successful_branch = branch;
     return true;
   };
