@@ -116,19 +116,19 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
   light_sample.pdf_selection = pdf_selection;
 
   float p_light = mpg_light_sample_pdf_solid(kg, sd, light_sample);
-  if (!isfinite_safe(p_light) || p_light < 0.0f) {
+  if (!isfinite_safe(p_light) || p_light <= 0.0f) {
     return false;
   }
   p_light = fmaxf(p_light, 1.0e-16f);
 
   float J = fabsf(solution.jacobian_total);
-  if (!isfinite_safe(J)) {
+  if (!isfinite_safe(J) || J <= 0.0f) {
     return false;
   }
   J = fmaxf(J, 1.0e-16f);
 
   const float pdf_product = p_seed * p_light * J;
-  if (!isfinite_safe(pdf_product) || pdf_product < 0.0f) {
+  if (!isfinite_safe(pdf_product) || pdf_product <= 0.0f) {
     return false;
   }
 

@@ -405,7 +405,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.nee_pdf = nee_pdf_sa;
 
   float p_light = mpg_light_sample_pdf_solid(kg, sd, light_sample);
-  if (!isfinite_safe(p_light) || p_light < 0.0f) {
+  if (!isfinite_safe(p_light) || p_light <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_LIGHT_PDF;
     result.light_pdf = p_light;
@@ -445,7 +445,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   }
 
   float J_total = fabsf(solution.jacobian_total);
-  if (!isfinite_safe(J_total)) {
+  if (!isfinite_safe(J_total) || J_total <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_JACOBIAN_ZERO;
     return result;
@@ -453,7 +453,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   J_total = fmaxf(J_total, 1.0e-16f);
 
   const float pdf_product = p_seed * p_light * J_total;
-  if (!isfinite_safe(pdf_product) || pdf_product < 0.0f) {
+  if (!isfinite_safe(pdf_product) || pdf_product <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_PDF;
     return result;
