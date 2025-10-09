@@ -342,22 +342,18 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   tmp.pdf = nee_pdf_sa;
   result.nee_pdf = nee_pdf_sa;
 
-  float p_light = mpg_light_sample_pdf_solid(kg, sd, light_sample);
+  const float p_light = mpg_light_sample_pdf_solid(kg, sd, light_sample);
   if (!isfinite_safe(p_light) || p_light <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_LIGHT_PDF;
     result.light_pdf = p_light;
     return result;
   }
-
-  /* Prevent vanishing light pdfs from creating arbitrarily large MIS weights. */
-  p_light = fmaxf(p_light, 1.0e-16f);
-
   light_sample.pdf = p_light;
 
   result.visibility = compute_visibility_after_update(kg, sd, light_sample, result);
 
-  const float p_seed = (isfinite_safe(seed.seed_pdf)) ? fmaxf(seed.seed_pdf, 1.0e-16f) : 0.0f;
+  const float p_seed = seed.seed_pdf;
 #ifdef WITH_CYCLES_DEBUG
   if (seed.accepted_trial_count > 0) {
     const float mitsuba_seed_pdf = seed.seed_pdf_raw * float(seed.accepted_trial_count);
@@ -372,7 +368,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     }
   }
 #endif
-  if (p_seed <= 0.0f) {
+  if (!isfinite_safe(p_seed) || p_seed <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_SEED_PDF;
     result.seed_pdf = p_seed;
@@ -382,7 +378,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.seed_pdf = p_seed;
 
   const float J_total = (isfinite_safe(solution.jacobian_total)) ?
-                            fmaxf(fabsf(solution.jacobian_total), 1.0e-16f) :
+                            fabsf(solution.jacobian_total) :
                             0.0f;
   if (J_total <= 0.0f) {
     result.attempt_count = attempt_count;

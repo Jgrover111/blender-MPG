@@ -98,7 +98,11 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
   light_sample.pdf_selection = 1.0f;
 
   const MpgSpecularVertex &exit_vertex = solution.specular_vertices[vertex_count - 1];
-  light_sample_update(kg, &light_sample, exit_vertex.position, exit_vertex.normal, seed.path_flag);
+  uint32_t updated_path_flag = seed.path_flag;
+  if (solution.is_refraction) {
+    updated_path_flag |= PATH_RAY_MIS_HAD_TRANSMISSION;
+  }
+  light_sample_update(kg, &light_sample, exit_vertex.position, exit_vertex.normal, updated_path_flag);
 
   light_sample.pdf *= pdf_selection;
   light_sample.pdf_selection = pdf_selection;
