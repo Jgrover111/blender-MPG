@@ -113,9 +113,6 @@ bool mpg_generate_seed(KernelGlobals kg,
   /* Determine the dominant seed direction from the guided mean with optional jitter. */
   float3 axis = guide.mean_dir;
   if (is_zero(axis)) {
-    axis = sd.Ng;
-  }
-  if (is_zero(axis)) {
     axis = sd.N;
   }
 
@@ -125,17 +122,17 @@ bool mpg_generate_seed(KernelGlobals kg,
   }
 
   const bool has_direction_relaxed = (guide.rbar > 1.0e-4f);
-  /* The bootstrap fallback mirrors the mpg_try_connect gating thresholds so relaxed gating
-   * alone keeps directional seeds narrow whenever the guide provides a stable mean. Without
-   * any directional signal we fall back to uniform sphere sampling. */
+  /* The wide bootstrap cone is reserved for the "no direction" fallback, mirroring the
+   * mpg_try_connect gating thresholds so relaxed gating alone keeps directional seeds
+   * narrow whenever the guide provides a stable mean. */
   const bool bootstrap_seed = !has_direction_relaxed;
   const bool use_uniform_fallback = !axis_valid;
 
   const float min_cone_angle = 0.00872664626f; /* ~0.5 degrees. */
   float jitter = fmaxf(options.angular_jitter, min_cone_angle);
   if (bootstrap_seed) {
-    /* Retain the wide cone parameter so the fallback sweep matches the Mitsuba reference
-     * once a valid direction appears. */
+    /* Without directional signal from the guide we explore a wide bootstrap cone, matching
+     * the Mitsuba fallback behaviour until a stable direction emerges. */
     jitter = 0.6f * M_PI_F;
   }
   float candidate_pdf = 0.0f;
@@ -209,11 +206,11 @@ bool mpg_generate_seed(KernelGlobals kg,
     const float2 rand = path_branched_rng_2D(
         kg, &rng_state, attempt, seed_branch_count, PRNG_SURFACE_BSDF);
 
-    const bool sample_uniform_sphere = bootstrap_seed || use_uniform_fallback;
-    const SeedTrialBranch branch = sample_uniform_sphere ? SeedTrialBranch::Fallback :
-                                                              SeedTrialBranch::Guided;
+    const SeedTrialBranch branch = (bootstrap_seed || use_uniform_fallback) ?
+                                       SeedTrialBranch::Fallback :
+                                       SeedTrialBranch::Guided;
 
-    if (sample_uniform_sphere) {
+    if (use_uniform_fallback) {
       seed_direction = sample_uniform_sphere(rand);
       candidate_pdf = M_1_4PI_F;
     }
@@ -236,7 +233,7 @@ bool mpg_generate_seed(KernelGlobals kg,
       const float2 rand = path_branched_rng_2D(
           kg, &rng_state, attempt + attempt_offset, fallback_branch_count, PRNG_SURFACE_BSDF);
 
-      if (axis_valid && !bootstrap_seed) {
+      if (axis_valid) {
         float unused_cos = 0.0f;
         seed_direction = sample_uniform_cone(
             axis, fallback_one_minus_cos, rand, &unused_cos, &candidate_pdf);
