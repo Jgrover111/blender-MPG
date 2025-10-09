@@ -291,7 +291,13 @@ bool mpg_generate_seed(KernelGlobals kg,
       return false;
     }
 
-    if (!matches_hemisphere(candidate_direction)) {
+    /* Bootstrap seeds and uniform fallbacks explore the full sphere and let the solver
+     * decide the valid manifold branch. Directional seeds must still respect the
+     * reflection/transmission hemisphere filtering. */
+    const bool skip_hemisphere_test = bootstrap_seed ||
+                                      (use_uniform_fallback &&
+                                       branch == SeedTrialBranch::Fallback);
+    if (!skip_hemisphere_test && !matches_hemisphere(candidate_direction)) {
       last_failure = MPG_FAILURE_SEED;
       return false;
     }
