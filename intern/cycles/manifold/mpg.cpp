@@ -343,12 +343,15 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.nee_pdf = nee_pdf_sa;
 
   float p_light = mpg_light_sample_pdf_solid(kg, sd, light_sample);
-  if (p_light <= 0.0f) {
+  if (!isfinite_safe(p_light) || p_light <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_LIGHT_PDF;
     result.light_pdf = p_light;
     return result;
   }
+
+  /* Prevent vanishing light pdfs from creating arbitrarily large MIS weights. */
+  p_light = fmaxf(p_light, 1.0e-16f);
 
   light_sample.pdf = p_light;
 
@@ -356,10 +359,10 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   const float p_seed = (isfinite_safe(seed.seed_pdf)) ? fmaxf(seed.seed_pdf, 1.0e-16f) : 0.0f;
 #ifdef WITH_CYCLES_DEBUG
-  if (seed.trial_count > 1) {
-    const float mitsuba_seed_pdf = seed.seed_pdf_raw * float(seed.trial_count);
+  if (seed.accepted_trial_count > 0) {
+    const float mitsuba_seed_pdf = seed.seed_pdf_raw * float(seed.accepted_trial_count);
     if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
-      LOG_DEBUG << "MPG seed pdf parity (trials=" << seed.trial_count
+      LOG_DEBUG << "MPG seed pdf parity (trials=" << seed.accepted_trial_count
                 << "): cycles=" << p_seed << ", Mitsuba=" << mitsuba_seed_pdf
                 << ", raw=" << seed.seed_pdf_raw;
     }
@@ -379,7 +382,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.seed_pdf = p_seed;
 
   const float J_total = (isfinite_safe(solution.jacobian_total)) ?
-                            fmaxf(fabsf(solution.jacobian_total), 0.0f) :
+                            fmaxf(fabsf(solution.jacobian_total), 1.0e-16f) :
                             0.0f;
   if (J_total <= 0.0f) {
     result.attempt_count = attempt_count;
@@ -404,6 +407,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.light = light_sample;
   result.attempt_count = attempt_count;
   result.seed_trial_count = seed.trial_count;
+  result.seed_accepted_trial_count = seed.accepted_trial_count;
 
   return result;
 }

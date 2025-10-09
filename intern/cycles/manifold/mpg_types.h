@@ -65,6 +65,7 @@ struct MpgSeedRay {
   float bary_u = 0.0f;
   float bary_v = 0.0f;
   int trial_count = 0;
+  int accepted_trial_count = 0;
   bool use_smooth_normals = false;
 };
 

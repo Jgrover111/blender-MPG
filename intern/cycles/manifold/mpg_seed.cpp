@@ -254,11 +254,13 @@ bool mpg_generate_seed(KernelGlobals kg,
   }
 
   const int total_trials = guided_trials + fallback_trials;
-  /* Rejection sampling normalizes the candidate density by the acceptance probability. When a
-   * fallback branch succeeds after exhausting all guided attempts we still spent those failed
-   * trials, so the acceptance probability must use the *total* number of tries. Otherwise the
-   * seed PDF would be underestimated, leading to an over-weighted MPG contribution. */
-  const float inv_acceptance_probability = (total_trials > 0) ? float(total_trials) : 1.0f;
+  const int accepted_trials = (successful_branch == SeedTrialBranch::Guided) ? guided_trials :
+                                                                        fallback_trials;
+  /* The candidate density must be renormalized by the acceptance probability of the branch that
+   * produced a valid specular hit. Guided and fallback cones are independent proposals, so only
+   * the attempts made with the successful branch affect the normalization. */
+  const int branch_trials = (accepted_trials > 0) ? accepted_trials : total_trials;
+  const float inv_acceptance_probability = (branch_trials > 0) ? float(branch_trials) : 1.0f;
   const float renormalized_seed_pdf =
       fmaxf(accepted_seed_pdf * inv_acceptance_probability, 1.0e-16f);
 
@@ -289,6 +291,7 @@ bool mpg_generate_seed(KernelGlobals kg,
   seed.seed_pdf = renormalized_seed_pdf;
   seed.seed_pdf_raw = accepted_seed_pdf;
   seed.trial_count = total_trials;
+  seed.accepted_trial_count = branch_trials;
   seed.light_sample = light_sample;
   seed.path_flag = path_flag;
   /* Keep the light endpoint provided by the Cycles light sampler. For distant/background
