@@ -23,6 +23,26 @@
 
 CCL_NAMESPACE_BEGIN
 
+float mpg_rebuild_seed_pdf(const MpgSeedRay &seed)
+{
+  const float raw_pdf = seed.seed_pdf_raw;
+  if (!(isfinite_safe(raw_pdf) && raw_pdf > 0.0f)) {
+    return 0.0f;
+  }
+
+  int acceptance_trials = seed.accepted_trial_count;
+  if (acceptance_trials <= 0) {
+    acceptance_trials = (seed.trial_count > 0) ? seed.trial_count : 1;
+  }
+
+  const float normalized_pdf = raw_pdf * float(acceptance_trials);
+  if (!(isfinite_safe(normalized_pdf) && normalized_pdf > 0.0f)) {
+    return 0.0f;
+  }
+
+  return fmaxf(normalized_pdf, 1.0e-16f);
+}
+
 static inline bool has_specular_bsdf_at_hit(KernelGlobals kg,
                                             const Ray &ray,
                                             const Intersection &isect,
@@ -263,10 +283,6 @@ bool mpg_generate_seed(KernelGlobals kg,
    * produced a valid specular hit. Guided and fallback cones are independent proposals, so only
    * the attempts made with the successful branch affect the normalization. */
   const int branch_trials = (accepted_trials > 0) ? accepted_trials : total_trials;
-  const float inv_acceptance_probability = (branch_trials > 0) ? float(branch_trials) : 1.0f;
-  const float renormalized_seed_pdf =
-      fmaxf(accepted_seed_pdf * inv_acceptance_probability, 1.0e-16f);
-
   /* Sample an emitter using the Cycles light sampling routine. */
   const float3 rand_light = path_state_rng_3D(kg, &rng_state, PRNG_LIGHT);
   LightSample light_sample;
@@ -291,10 +307,14 @@ bool mpg_generate_seed(KernelGlobals kg,
   }
 
   seed.direction = seed_direction;
-  seed.seed_pdf = renormalized_seed_pdf;
   seed.seed_pdf_raw = accepted_seed_pdf;
   seed.trial_count = total_trials;
   seed.accepted_trial_count = branch_trials;
+  seed.seed_pdf = mpg_rebuild_seed_pdf(seed);
+  if (seed.seed_pdf <= 0.0f) {
+    failure_code = MPG_FAILURE_INVALID_SEED_PDF;
+    return false;
+  }
   seed.light_sample = light_sample;
   seed.path_flag = path_flag;
   /* Keep the light endpoint provided by the Cycles light sampler. For distant/background

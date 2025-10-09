@@ -259,13 +259,16 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
 
   if (kernel_data.film.pass_manifold_pdf_factors != PASS_UNUSED) {
     const float3 factor_values = make_float3(seed_pdf, light_pdf, jacobian);
-    const bool value_valid =
-        (factor_values.x >= 0.0f && factor_values.y >= 0.0f && factor_values.z >= 0.0f);
+    const bool value_valid = (isfinite_safe(factor_values.x) && factor_values.x >= 0.0f &&
+                              isfinite_safe(factor_values.y) && factor_values.y >= 0.0f &&
+                              isfinite_safe(factor_values.z) && factor_values.z >= 0.0f);
     float3 stored_values = value_valid ? factor_values : make_float3(0.0f, 0.0f, 0.0f);
 
     if (sample > 0) {
       const float3 prev = kernel_read_pass_float3(buffer + kernel_data.film.pass_manifold_pdf_factors);
-      const bool prev_valid = (prev.x >= 0.0f && prev.y >= 0.0f && prev.z >= 0.0f);
+      const bool prev_valid = (isfinite_safe(prev.x) && prev.x >= 0.0f &&
+                               isfinite_safe(prev.y) && prev.y >= 0.0f &&
+                               isfinite_safe(prev.z) && prev.z >= 0.0f);
 
       if (prev_valid && value_valid) {
         stored_values = (prev * prev_weight) + (factor_values * inv_sample);
@@ -281,8 +284,14 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
 
   if (kernel_data.film.pass_manifold_competing_pdfs != PASS_UNUSED) {
     if (manifold_pdf_factors_valid || sample == 0) {
-      const float3 competing_values = make_float3(
+      float3 competing_values = make_float3(
           weighted_bsdf_pdf, weighted_guided_pdf, weighted_nee_pdf);
+      const bool competing_valid = (isfinite_safe(competing_values.x) &&
+                                    isfinite_safe(competing_values.y) &&
+                                    isfinite_safe(competing_values.z));
+      if (!competing_valid) {
+        competing_values = make_float3(0.0f, 0.0f, 0.0f);
+      }
       manifold_debug_store_average_float3(state,
                                           buffer + kernel_data.film.pass_manifold_competing_pdfs,
                                           competing_values);
@@ -291,7 +300,13 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
 
   if (kernel_data.film.pass_manifold_mis != PASS_UNUSED) {
     if (manifold_pdf_factors_valid || sample == 0) {
-      const float3 mis_values = make_float3(pdf_mpg, mis_denominator, mis_weight);
+      float3 mis_values = make_float3(pdf_mpg, mis_denominator, mis_weight);
+      const bool mis_valid = (isfinite_safe(mis_values.x) &&
+                              isfinite_safe(mis_values.y) &&
+                              isfinite_safe(mis_values.z));
+      if (!mis_valid) {
+        mis_values = make_float3(0.0f, 0.0f, 0.0f);
+      }
       manifold_debug_store_average_float3(
           state, buffer + kernel_data.film.pass_manifold_mis, mis_values);
     }
@@ -1037,15 +1052,21 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     LightSample mpg_light = mpg_result.light;
     const float3 wi_mpg = mpg_result.wi;
     const bool has_valid_wi = !is_zero(wi_mpg);
-    const float pdf_mpg_sa =
-        (isfinite_safe(mpg_result.pdf) && mpg_result.pdf > 0.0f) ? mpg_result.pdf : 0.0f;
-    const float pdf_nee_sa =
-        (isfinite_safe(mpg_result.nee_pdf) && mpg_result.nee_pdf > 0.0f) ? mpg_result.nee_pdf : 0.0f;
-    const float jacobian_abs = fabsf(mpg_result.jacobian_total);
+    const float pdf_mpg_sa = (isfinite_safe(mpg_result.pdf) && mpg_result.pdf > 0.0f) ?
+                                 fmaxf(mpg_result.pdf, 1.0e-16f) :
+                                 0.0f;
+    const float pdf_nee_sa = (isfinite_safe(mpg_result.nee_pdf) && mpg_result.nee_pdf > 0.0f) ?
+                                 fmaxf(mpg_result.nee_pdf, 1.0e-16f) :
+                                 0.0f;
+    const float jacobian_abs = (isfinite_safe(mpg_result.jacobian_total)) ?
+                                   fmaxf(fabsf(mpg_result.jacobian_total), 1.0e-16f) :
+                                   0.0f;
+    const bool seed_pdf_valid = (isfinite_safe(mpg_result.seed_pdf) && mpg_result.seed_pdf > 0.0f);
+    const bool light_pdf_valid = (isfinite_safe(mpg_result.light_pdf) && mpg_result.light_pdf > 0.0f);
 
     manifold_pdf_factors_valid = (gate_pass_any_result && !mpg_failure && mpg_result.success &&
-                                  mpg_result.seed_pdf > 0.0f && mpg_result.light_pdf > 0.0f &&
-                                  jacobian_abs > 0.0f && pdf_mpg_sa > 0.0f);
+                                  seed_pdf_valid && light_pdf_valid && jacobian_abs > 0.0f &&
+                                  pdf_mpg_sa > 0.0f);
 
     if (manifold_pdf_factors_valid) {
       manifold_seed_pdf = mpg_result.seed_pdf;
@@ -1055,8 +1076,8 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     }
 
     if (manifold_guiding_ready && gate_pass_any_result && !mpg_failure) {
-      kernel_assert(mpg_result.seed_pdf > 0.0f);
-      kernel_assert(mpg_result.light_pdf > 0.0f);
+      kernel_assert(seed_pdf_valid);
+      kernel_assert(light_pdf_valid);
       kernel_assert(jacobian_abs > 0.0f);
       kernel_assert(pdf_mpg_sa > 0.0f);
       kernel_assert(pdf_nee_sa > 0.0f);

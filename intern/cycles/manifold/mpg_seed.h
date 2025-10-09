@@ -27,4 +27,6 @@ bool mpg_generate_seed(KernelGlobals kg,
                        MpgSeedRay &seed,
                        MpgFailureCode &failure_code);
 
+float mpg_rebuild_seed_pdf(const MpgSeedRay &seed);
+
 CCL_NAMESPACE_END

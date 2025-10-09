@@ -4,6 +4,8 @@
 
 #include "manifold/mpg_pdf.h"
 
+#include "manifold/mpg_seed.h"
+
 #include "kernel/light/common.h"
 #include "kernel/light/sample.h"
 #include "kernel/types.h"
@@ -51,8 +53,14 @@ float mpg_light_sample_pdf_solid(KernelGlobals kg,
     }
 
     if (needs_conversion) {
+      float3 light_dir = light_sample.D;
+      if (is_zero(light_dir)) {
+        return 0.0f;
+      }
+      light_dir = normalize(light_dir);
+
       const float jacobian = light_pdf_area_to_solid_angle(
-          light_sample.Ng, -light_sample.D, light_sample.t);
+          light_sample.Ng, -light_dir, light_sample.t);
 
       if (!(isfinite_safe(jacobian) && jacobian > 0.0f)) {
         return 0.0f;
@@ -78,7 +86,7 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
 
   pdf = 0.0f;
 
-  const float p_seed = (isfinite_safe(seed.seed_pdf)) ? fmaxf(seed.seed_pdf, 1.0e-16f) : 0.0f;
+  const float p_seed = mpg_rebuild_seed_pdf(seed);
   if (!(p_seed > 0.0f)) {
     return false;
   }
@@ -107,22 +115,24 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
   light_sample.pdf *= pdf_selection;
   light_sample.pdf_selection = pdf_selection;
 
-  const float p_light = mpg_light_sample_pdf_solid(kg, sd, light_sample);
-  if (!(isfinite_safe(p_light) && p_light > 0.0f)) {
+  float p_light = mpg_light_sample_pdf_solid(kg, sd, light_sample);
+  if (!isfinite_safe(p_light) || p_light < 0.0f) {
+    return false;
+  }
+  p_light = fmaxf(p_light, 1.0e-16f);
+
+  float J = fabsf(solution.jacobian_total);
+  if (!isfinite_safe(J)) {
+    return false;
+  }
+  J = fmaxf(J, 1.0e-16f);
+
+  const float pdf_product = p_seed * p_light * J;
+  if (!isfinite_safe(pdf_product) || pdf_product < 0.0f) {
     return false;
   }
 
-  const float J = fabsf(solution.jacobian_total);
-  if (!(isfinite_safe(J) && J > 0.0f)) {
-    return false;
-  }
-
-  const float p = p_seed * p_light * J;
-  if (!(isfinite_safe(p) && p > 0.0f)) {
-    return false;
-  }
-
-  pdf = p;
+  pdf = fmaxf(pdf_product, 1.0e-16f);
   return true;
 }
 
