@@ -419,7 +419,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
                                        ((seed.trial_count > 0) ? seed.trial_count : 1);
   const float mitsuba_seed_pdf =
       (isfinite_safe(seed.seed_pdf_raw) && seed.seed_pdf_raw > 0.0f) ?
-          fmaxf(seed.seed_pdf_raw * float(acceptance_trials), 1.0e-16f) :
+          (seed.seed_pdf_raw * float(acceptance_trials)) :
           0.0f;
   if (acceptance_trials > 0 && mitsuba_seed_pdf > 0.0f) {
     if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {

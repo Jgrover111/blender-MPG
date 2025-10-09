@@ -41,7 +41,7 @@ float mpg_rebuild_seed_pdf(const MpgSeedRay &seed)
     return 0.0f;
   }
 
-  return fmaxf(normalized_pdf, 1.0e-16f);
+  return normalized_pdf;
 }
 
 static inline bool has_specular_bsdf_at_hit(KernelGlobals kg,
@@ -292,7 +292,6 @@ bool mpg_generate_seed(KernelGlobals kg,
     }
 
     const float3 normalized_direction = normalize(candidate_direction);
-    const float clamped_pdf = fmaxf(candidate_pdf, 1.0e-16f);
 
     Ray ray;
     ray.P = mpg_surface_ray_offset(kg, sd, sd.P, normalized_direction);
@@ -324,7 +323,7 @@ bool mpg_generate_seed(KernelGlobals kg,
 
     out_isect = candidate_isect;
     seed_direction = normalized_direction;
-    accepted_seed_pdf = clamped_pdf;
+    accepted_seed_pdf = candidate_pdf;
     seed.use_smooth_normals = has_smooth_normals && !using_transmission_hemisphere;
     successful_branch = branch;
     return true;
