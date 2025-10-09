@@ -89,6 +89,8 @@ float compute_visibility_after_update(KernelGlobals kg,
 
   for (int i = 0; i < result.specular_vertex_count; ++i) {
     const MpgSpecularVertex &vertex = result.specular_vertices[i];
+    const float3 vertex_geometric_normal = safe_normalize(cross(vertex.dXdu, vertex.dXdv));
+    const float3 visibility_normal = is_zero(vertex_geometric_normal) ? vertex.normal : vertex_geometric_normal;
     visibility *= mpg_compute_segment_visibility(kg,
                                                  segment_start,
                                                  segment_normal,
@@ -103,7 +105,7 @@ float compute_visibility_after_update(KernelGlobals kg,
     }
 
     segment_start = vertex.position;
-    segment_normal = vertex.normal;
+    segment_normal = visibility_normal;
     skip_object = vertex.object;
     skip_prim = vertex.prim;
   }

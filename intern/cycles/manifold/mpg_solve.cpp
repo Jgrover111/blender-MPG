@@ -260,6 +260,13 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
                         fresnel_dielectric(cos_theta_i, relative_eta, &cos_theta_t_eval) :
                         fresnel_dielectric_cos(cos_theta_i, eta);
     Spectrum result = params.is_refraction ? make_spectrum(1.0f - F) : make_spectrum(F);
+    if (params.is_refraction) {
+      const float eta_scale = relative_eta * relative_eta;
+      if (!(eta_scale > 0.0f)) {
+        return zero_spectrum();
+      }
+      result *= eta_scale;
+    }
     return result;
   }
 }
