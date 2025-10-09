@@ -495,6 +495,8 @@ bool specular_parameters_from_surface(KernelGlobals kg,
 
   const float w = 1.0f - u - v;
   const float3 spec_point = geometry.verts[0] * w + geometry.verts[1] * u + geometry.verts[2] * v;
+  const float3 geometric_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+  const bool has_geometric_normal = !is_zero(geometric_normal);
   float3 ray_dir = spec_point - sd.P;
   const float distance = len(ray_dir);
   if (!(distance > 1e-6f)) {
@@ -592,6 +594,10 @@ bool specular_parameters_from_surface(KernelGlobals kg,
           params.normal = shading_normal;
           params.has_normal = true;
         }
+        else if (has_geometric_normal) {
+          params.normal = geometric_normal;
+          params.has_normal = true;
+        }
         return true;
       }
       have_singular_reflection = true;
@@ -630,7 +636,11 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     }
     if (has_shading_normal && !params.has_normal) {
       params.normal = shading_normal;
-        params.has_normal = true;
+      params.has_normal = true;
+    }
+    else if (!params.has_normal && has_geometric_normal) {
+      params.normal = geometric_normal;
+      params.has_normal = true;
     }
     return true;
   }
@@ -652,6 +662,10 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   params.microfacet.N = normalize(params.microfacet.N);
   if (has_shading_normal) {
     params.normal = shading_normal;
+    params.has_normal = true;
+  }
+  else if (has_geometric_normal) {
+    params.normal = geometric_normal;
     params.has_normal = true;
   }
   {
