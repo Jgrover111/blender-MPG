@@ -254,7 +254,6 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
-  result.jacobian_total = solution.jacobian_total;
   result.visibility = solution.visibility;
   result.spec_weight = solution.specular_throughput;
   result.specular_vertex_count = solution.specular_vertex_count;
@@ -398,6 +397,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   result.success = true;
   result.failure_code = MPG_FAILURE_NONE;
+  result.jacobian_total = J_total;
   result.wi = solution.wi;
   result.pdf = pdf;
   result.seed_pdf = p_seed;
