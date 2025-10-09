@@ -113,12 +113,20 @@ bool mpg_generate_seed(KernelGlobals kg,
   /* Determine the dominant seed direction from the guided mean with optional jitter. */
   float3 axis = guide.mean_dir;
   if (is_zero(axis)) {
-    axis = sd.N;
+    /* Bootstrap seeds rely on a stable geometric frame. Ignore shading normal
+     * perturbations when no guided mean is available to mirror the reference
+     * solver and to avoid exploring directions that immediately graze the
+     * receiver. */
+    axis = sd.Ng;
+    if (is_zero(axis)) {
+      axis = sd.N;
+    }
   }
 
-  const bool axis_valid = !is_zero(axis);
+  bool axis_valid = !is_zero(axis);
   if (axis_valid) {
-    axis = normalize(axis);
+    axis = safe_normalize(axis);
+    axis_valid = !is_zero(axis);
   }
 
   const bool has_direction_relaxed = (guide.rbar > 1.0e-4f);
