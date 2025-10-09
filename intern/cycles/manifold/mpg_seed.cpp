@@ -210,7 +210,7 @@ bool mpg_generate_seed(KernelGlobals kg,
   float hemisphere_sign = 1.0f;
   if (using_transmission_hemisphere) {
     const float dot_ng_wi = dot(transmission_normal, sd.wi);
-    hemisphere_sign = (dot_ng_wi >= 0.0f) ? 1.0f : -1.0f;
+    hemisphere_sign = (dot_ng_wi >= 0.0f) ? -1.0f : 1.0f;
   }
 
   const auto matches_hemisphere = [&](const float3 &direction) {
@@ -219,7 +219,7 @@ bool mpg_generate_seed(KernelGlobals kg,
     }
     if (using_transmission_hemisphere) {
       const float dot_ng_dir = dot(direction, transmission_normal);
-      return (hemisphere_sign >= 0.0f) ? (dot_ng_dir >= 0.0f) : (dot_ng_dir <= 0.0f);
+      return dot_ng_dir * hemisphere_sign >= 0.0f;
     }
     return dot(direction, hemisphere_normal) >= 0.0f;
   };
