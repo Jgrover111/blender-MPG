@@ -1524,8 +1524,12 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   result.prim = vertex.prim;
   result.is_refraction = vertex.is_refraction;
 
+  /* Evaluate the specular weight using the incident direction that points from the specular
+   * vertex back to the receiver. This matches the convention used by the double-bounce solver
+   * while keeping `result.dir_ds`/`result.wi` as the receiver -> specular direction for callers.
+   */
   result.spec_weight = evaluate_specular_weight(
-      kg, params, result.dir_ds, result.dir_sl, vertex.cos_theta_in, vertex.cos_theta_out);
+      kg, params, vertex.dir_in, result.dir_sl, vertex.cos_theta_in, vertex.cos_theta_out);
   if (is_zero(result.spec_weight)) {
     failure_code = MPG_FAILURE_ZERO_THROUGHPUT;
     return false;
