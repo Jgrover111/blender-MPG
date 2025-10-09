@@ -31,9 +31,9 @@ float mpg_rebuild_seed_pdf(const MpgSeedRay &seed)
     return 0.0f;
   }
 
-  int acceptance_trials = seed.accepted_trial_count;
+  const int acceptance_trials = seed.accepted_trial_count;
   if (acceptance_trials <= 0) {
-    acceptance_trials = (seed.trial_count > 0) ? seed.trial_count : 1;
+    return 0.0f;
   }
 
   const float normalized_pdf = raw_pdf * float(acceptance_trials);
@@ -400,10 +400,14 @@ bool mpg_generate_seed(KernelGlobals kg,
   const int total_trials = guided_trials + fallback_trials;
   const int accepted_trials = (successful_branch == SeedTrialBranch::Guided) ? guided_trials :
                                                                         fallback_trials;
+  if (accepted_trials <= 0) {
+    failure_code = MPG_FAILURE_INVALID_SEED_PDF;
+    return false;
+  }
   /* The candidate density must be renormalized by the acceptance probability of the branch that
    * produced a valid specular hit. Guided and fallback cones are independent proposals, so only
    * the attempts made with the successful branch affect the normalization. */
-  const int branch_trials = (accepted_trials > 0) ? accepted_trials : total_trials;
+  const int branch_trials = accepted_trials;
   /* Sample an emitter using the Cycles light sampling routine. */
   const float3 rand_light = path_state_rng_3D(kg, &rng_state, PRNG_LIGHT);
   LightSample light_sample;

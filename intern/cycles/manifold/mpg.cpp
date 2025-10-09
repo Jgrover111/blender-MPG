@@ -414,11 +414,9 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   const float p_seed = mpg_rebuild_seed_pdf(seed);
 #ifdef WITH_CYCLES_DEBUG
-  const int acceptance_trials =
-      (seed.accepted_trial_count > 0) ? seed.accepted_trial_count :
-                                       ((seed.trial_count > 0) ? seed.trial_count : 1);
+  const int acceptance_trials = seed.accepted_trial_count;
   const float mitsuba_seed_pdf =
-      (isfinite_safe(seed.seed_pdf_raw) && seed.seed_pdf_raw > 0.0f) ?
+      (isfinite_safe(seed.seed_pdf_raw) && seed.seed_pdf_raw > 0.0f && acceptance_trials > 0) ?
           (seed.seed_pdf_raw * float(acceptance_trials)) :
           0.0f;
   if (acceptance_trials > 0 && mitsuba_seed_pdf > 0.0f) {
