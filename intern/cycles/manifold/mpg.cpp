@@ -205,6 +205,9 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   {
     result.failure_code = (seed_failure != MPG_FAILURE_NONE) ? seed_failure : MPG_FAILURE_SEED;
     result.attempt_count = 0;
+    result.seed_trial_count = seed.trial_count;
+    result.seed_accepted_trial_count = seed.accepted_trial_count;
+    result.seed_pdf_raw = seed.seed_pdf_raw;
     return result;
   }
   result.seed_pdf_raw = seed.seed_pdf_raw;

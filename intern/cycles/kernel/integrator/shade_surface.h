@@ -160,7 +160,8 @@ ccl_device_inline void surface_write_manifold_debug_summary(KernelGlobals kg,
                                                            const GuideSummary &summary,
                                                            const bool summary_available,
                                                            const bool gate_pass,
-                                                           const bool relax_or_bootstrap_gate,
+                                                           const bool relax_gate_summary,
+                                                           const bool bootstrap_gate,
                                                            ccl_global float *ccl_restrict
                                                                render_buffer)
 {
@@ -186,6 +187,7 @@ ccl_device_inline void surface_write_manifold_debug_summary(KernelGlobals kg,
   }
 
   if (kernel_data.film.pass_manifold_gate != PASS_UNUSED) {
+    const bool relax_or_bootstrap_gate = (relax_gate_summary || bootstrap_gate);
     const float3 gate_values = make_float3(summary_available ? 1.0f : 0.0f,
                                            gate_pass ? 1.0f : 0.0f,
                                            relax_or_bootstrap_gate ? 1.0f : 0.0f);
@@ -197,7 +199,8 @@ ccl_device_inline void surface_write_manifold_debug_summary(KernelGlobals kg,
   (void)summary;
   (void)summary_available;
   (void)gate_pass;
-  (void)relax_or_bootstrap_gate;
+  (void)relax_gate_summary;
+  (void)bootstrap_gate;
   (void)render_buffer;
 #    endif
 }
@@ -326,7 +329,8 @@ ccl_device_inline void surface_write_manifold_debug_summary(KernelGlobals kg,
                                                            const GuideSummary &summary,
                                                            const bool summary_available,
                                                            const bool gate_pass,
-                                                           const bool relax_or_bootstrap_gate,
+                                                           const bool relax_gate_summary,
+                                                           const bool bootstrap_gate,
                                                            ccl_global float *ccl_restrict
                                                                render_buffer)
 {
@@ -335,7 +339,8 @@ ccl_device_inline void surface_write_manifold_debug_summary(KernelGlobals kg,
   (void)summary;
   (void)summary_available;
   (void)gate_pass;
-  (void)relax_or_bootstrap_gate;
+  (void)relax_gate_summary;
+  (void)bootstrap_gate;
   (void)render_buffer;
 }
 
@@ -983,13 +988,13 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   }
 
   if (manifold_guiding_enabled) {
-    const bool relax_or_bootstrap_gate = (relax_gate_summary || bootstrap_gate);
     surface_write_manifold_debug_summary(kg,
                                          state,
                                          manifold_summary,
                                          summary_available,
                                          manifold_gate_pass,
-                                         relax_or_bootstrap_gate,
+                                         relax_gate_summary,
+                                         bootstrap_gate,
                                          render_buffer);
   }
 
