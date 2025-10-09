@@ -259,24 +259,71 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
 
   if (kernel_data.film.pass_manifold_pdf_factors != PASS_UNUSED) {
     const float3 factor_values = make_float3(seed_pdf, light_pdf, jacobian);
-    const bool value_valid = (isfinite_safe(factor_values.x) && factor_values.x >= 0.0f &&
-                              isfinite_safe(factor_values.y) && factor_values.y >= 0.0f &&
-                              isfinite_safe(factor_values.z) && factor_values.z >= 0.0f);
-    float3 stored_values = value_valid ? factor_values : make_float3(0.0f, 0.0f, 0.0f);
+    const float invalid_sentinel_offset = 1.0f;
+    /* Invalid PDF components are stored as -(abs(value) + offset) so the sign flags the
+     * failure while the magnitude retains the previously accumulated average. Downstream tools
+     * can detect a failure by checking for negative components and recover the stored magnitude
+     * as fabs(component) - invalid_sentinel_offset. */
 
-    if (sample > 0) {
-      const float3 prev = kernel_read_pass_float3(buffer + kernel_data.film.pass_manifold_pdf_factors);
-      const bool prev_valid = (isfinite_safe(prev.x) && prev.x >= 0.0f &&
-                               isfinite_safe(prev.y) && prev.y >= 0.0f &&
-                               isfinite_safe(prev.z) && prev.z >= 0.0f);
+    const float3 prev_components = (sample > 0) ?
+                                       kernel_read_pass_float3(buffer +
+                                                               kernel_data.film.pass_manifold_pdf_factors) :
+                                       make_float3(0.0f, 0.0f, 0.0f);
 
-      if (prev_valid && value_valid) {
-        stored_values = (prev * prev_weight) + (factor_values * inv_sample);
-      } else if (!value_valid && prev_valid) {
-        stored_values = prev;
-      } else if (!value_valid) {
-        stored_values = make_float3(0.0f, 0.0f, 0.0f);
-      }
+    const bool prev_x_valid = (sample > 0) && isfinite_safe(prev_components.x);
+    const bool prev_y_valid = (sample > 0) && isfinite_safe(prev_components.y);
+    const bool prev_z_valid = (sample > 0) && isfinite_safe(prev_components.z);
+
+    const float prev_x = prev_x_valid ?
+                              ((prev_components.x < 0.0f) ?
+                                   (-prev_components.x - invalid_sentinel_offset) :
+                                   prev_components.x) :
+                              0.0f;
+    const float prev_y = prev_y_valid ?
+                              ((prev_components.y < 0.0f) ?
+                                   (-prev_components.y - invalid_sentinel_offset) :
+                                   prev_components.y) :
+                              0.0f;
+    const float prev_z = prev_z_valid ?
+                              ((prev_components.z < 0.0f) ?
+                                   (-prev_components.z - invalid_sentinel_offset) :
+                                   prev_components.z) :
+                              0.0f;
+
+    const bool value_x_valid = (isfinite_safe(factor_values.x) && factor_values.x >= 0.0f);
+    const bool value_y_valid = (isfinite_safe(factor_values.y) && factor_values.y >= 0.0f);
+    const bool value_z_valid = (isfinite_safe(factor_values.z) && factor_values.z >= 0.0f);
+
+    float3 stored_values;
+
+    if (value_x_valid) {
+      stored_values.x = prev_x_valid ? (prev_x * prev_weight) + (factor_values.x * inv_sample) :
+                                       factor_values.x;
+    }
+    else {
+      stored_values.x = prev_x_valid ?
+                           -(fabsf(prev_x) + invalid_sentinel_offset) :
+                           -(invalid_sentinel_offset);
+    }
+
+    if (value_y_valid) {
+      stored_values.y = prev_y_valid ? (prev_y * prev_weight) + (factor_values.y * inv_sample) :
+                                       factor_values.y;
+    }
+    else {
+      stored_values.y = prev_y_valid ?
+                           -(fabsf(prev_y) + invalid_sentinel_offset) :
+                           -(invalid_sentinel_offset);
+    }
+
+    if (value_z_valid) {
+      stored_values.z = prev_z_valid ? (prev_z * prev_weight) + (factor_values.z * inv_sample) :
+                                       factor_values.z;
+    }
+    else {
+      stored_values.z = prev_z_valid ?
+                           -(fabsf(prev_z) + invalid_sentinel_offset) :
+                           -(invalid_sentinel_offset);
     }
 
     film_overwrite_pass_float3(buffer + kernel_data.film.pass_manifold_pdf_factors, stored_values);
