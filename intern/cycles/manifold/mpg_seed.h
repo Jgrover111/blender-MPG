@@ -25,7 +25,8 @@ bool mpg_generate_seed(KernelGlobals kg,
                        const int bounce,
                        const RNGState &rng_state,
                        MpgSeedRay &seed,
-                       MpgFailureCode &failure_code);
+                       MpgFailureCode &failure_code,
+                       const int rng_branch_offset = 0);
 
 float mpg_rebuild_seed_pdf(const MpgSeedRay &seed);
 

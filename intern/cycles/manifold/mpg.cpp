@@ -30,6 +30,8 @@ CCL_NAMESPACE_BEGIN
 
 namespace {
 
+constexpr int MPG_BOOTSTRAP_RNG_OFFSET = 128;
+
 GuideSummary sanitize_guide_summary(const GuideSummary &input)
 {
   GuideSummary result = input;
@@ -198,11 +200,62 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   /* When the gate is disabled we still attempt a bootstrap seed even if the guide has no
    * dominant direction. This mirrors the Mitsuba reference fallback behaviour. */
 
+  const bool bootstrap_gate_pass = (gate_mask & MPG_GATE_MASK_BOOTSTRAP_PASS) != 0;
+
   MpgSeedRay seed;
   MpgFailureCode seed_failure = MPG_FAILURE_NONE;
-  if (!mpg_generate_seed(
-          kg, sd, bsdf, guide, opt, path_flag, bounce, rng_state, seed, seed_failure))
-  {
+  bool seed_success = mpg_generate_seed(
+      kg, sd, bsdf, guide, opt, path_flag, bounce, rng_state, seed, seed_failure);
+
+  bool attempted_bootstrap_fallback = false;
+  bool used_bootstrap_seed = false;
+
+  if (!seed_success && bootstrap_gate_pass) {
+    attempted_bootstrap_fallback = true;
+
+    GuideSummary bootstrap_summary = guide;
+    bootstrap_summary.mean_dir = zero_float3();
+    bootstrap_summary.peak_weight = 0.0f;
+    bootstrap_summary.kappa = 0.0f;
+    bootstrap_summary.rbar = 0.0f;
+
+    MpgFailureCode bootstrap_failure = MPG_FAILURE_NONE;
+    seed_success = mpg_generate_seed(kg,
+                                     sd,
+                                     bsdf,
+                                     bootstrap_summary,
+                                     opt,
+                                     path_flag,
+                                     bounce,
+                                     rng_state,
+                                     seed,
+                                     bootstrap_failure,
+                                     MPG_BOOTSTRAP_RNG_OFFSET);
+
+    if (!seed_success) {
+      if (bootstrap_failure != MPG_FAILURE_NONE) {
+        seed_failure = bootstrap_failure;
+      }
+    }
+    else {
+      seed_failure = MPG_FAILURE_NONE;
+      used_bootstrap_seed = true;
+#ifdef WITH_CYCLES_DEBUG
+      if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
+        LOG_DEBUG << "MPG bootstrap gating fallback seed succeeded";
+      }
+#endif
+    }
+  }
+
+  if (!seed_success) {
+#ifdef WITH_CYCLES_DEBUG
+    if (bootstrap_gate_pass && LOG_IS_ON(LOG_LEVEL_DEBUG)) {
+      LOG_DEBUG << "MPG bootstrap gating exhausted seeds (fallback="
+                << (attempted_bootstrap_fallback ? "yes" : "no")
+                << ", failure=" << static_cast<int>(seed_failure) << ")";
+    }
+#endif
     result.failure_code = (seed_failure != MPG_FAILURE_NONE) ? seed_failure : MPG_FAILURE_SEED;
     result.attempt_count = 0;
     result.seed_trial_count = seed.trial_count;
@@ -245,6 +298,13 @@ MpgResult mpg_try_connect(KernelGlobals kg,
       result.failure_code = (solver_failure != MPG_FAILURE_NONE) ? solver_failure : MPG_FAILURE_NO_SPECULAR;
     }
     result.attempt_count = attempt_count;
+#ifdef WITH_CYCLES_DEBUG
+    if (bootstrap_gate_pass && LOG_IS_ON(LOG_LEVEL_DEBUG)) {
+      LOG_DEBUG << "MPG bootstrap gate solver attempts=" << attempt_count
+                << " (used_bootstrap_seed=" << (used_bootstrap_seed ? "yes" : "no")
+                << ", failure=" << static_cast<int>(result.failure_code) << ")";
+    }
+#endif
     return result;
   }
 
@@ -415,6 +475,11 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.seed_accepted_trial_count = seed.accepted_trial_count;
 
 #ifdef WITH_CYCLES_DEBUG
+  if (bootstrap_gate_pass && LOG_IS_ON(LOG_LEVEL_DEBUG)) {
+    LOG_DEBUG << "MPG bootstrap gate solver attempts=" << attempt_count
+              << " (used_bootstrap_seed=" << (used_bootstrap_seed ? "yes" : "no")
+              << ", success)";
+  }
   if ((result.gate_mask & MPG_GATE_MASK_STRICT_PASS) != 0) {
     DCHECK(isfinite_safe(result.seed_pdf) && result.seed_pdf >= 1.0e-16f);
     DCHECK(isfinite_safe(result.light_pdf) && result.light_pdf >= 1.0e-16f);

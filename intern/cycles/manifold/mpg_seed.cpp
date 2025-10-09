@@ -123,7 +123,8 @@ bool mpg_generate_seed(KernelGlobals kg,
                        const int bounce,
                        const RNGState &rng_state,
                        MpgSeedRay &seed,
-                       MpgFailureCode &failure_code)
+                       MpgFailureCode &failure_code,
+                       const int rng_branch_offset)
 {
   seed = MpgSeedRay();
   failure_code = MPG_FAILURE_NONE;
@@ -226,8 +227,11 @@ bool mpg_generate_seed(KernelGlobals kg,
   };
 
   for (int attempt = 0; attempt < max_seed_attempts && !seed_valid; ++attempt) {
-    const float2 rand = path_branched_rng_2D(
-        kg, &rng_state, attempt, seed_branch_count, PRNG_SURFACE_BSDF);
+    const float2 rand = path_branched_rng_2D(kg,
+                                             &rng_state,
+                                             attempt + rng_branch_offset,
+                                             seed_branch_count,
+                                             PRNG_SURFACE_BSDF);
 
     const SeedTrialBranch branch = (bootstrap_seed || use_uniform_fallback) ?
                                        SeedTrialBranch::Fallback :
@@ -253,8 +257,11 @@ bool mpg_generate_seed(KernelGlobals kg,
     const float fallback_one_minus_cos = one_minus_cos(0.6f * M_PI_F);
 
     for (int attempt = 0; attempt < fallback_attempts && !seed_valid; ++attempt) {
-      const float2 rand = path_branched_rng_2D(
-          kg, &rng_state, attempt + attempt_offset, fallback_branch_count, PRNG_SURFACE_BSDF);
+      const float2 rand = path_branched_rng_2D(kg,
+                                               &rng_state,
+                                               attempt + attempt_offset + rng_branch_offset,
+                                               fallback_branch_count,
+                                               PRNG_SURFACE_BSDF);
 
       if (axis_valid && !bootstrap_seed) {
         float unused_cos = 0.0f;
