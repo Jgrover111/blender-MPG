@@ -210,18 +210,18 @@ bool mpg_generate_seed(KernelGlobals kg,
   float hemisphere_sign = 1.0f;
   if (using_transmission_hemisphere) {
     const float dot_ng_wi = dot(transmission_normal, sd.wi);
-    hemisphere_sign = (dot_ng_wi >= 0.0f) ? -1.0f : 1.0f;
+    hemisphere_sign = (dot_ng_wi >= 0.0f) ? 1.0f : -1.0f;
   }
 
   const auto matches_hemisphere = [&](const float3 &direction) {
     if (!hemisphere_valid) {
       return true;
     }
-    const float dot_val = dot(direction, hemisphere_normal);
     if (using_transmission_hemisphere) {
-      return (hemisphere_sign > 0.0f) ? (dot_val >= 0.0f) : (dot_val <= 0.0f);
+      const float dot_ng_dir = dot(direction, transmission_normal);
+      return (hemisphere_sign >= 0.0f) ? (dot_ng_dir >= 0.0f) : (dot_ng_dir <= 0.0f);
     }
-    return dot_val >= 0.0f;
+    return dot(direction, hemisphere_normal) >= 0.0f;
   };
 
   /* Determine the dominant seed direction from the guided mean with optional jitter. */
@@ -244,9 +244,14 @@ bool mpg_generate_seed(KernelGlobals kg,
   }
 
   if (axis_valid && !matches_hemisphere(axis)) {
-    axis = -axis;
-    axis = safe_normalize(axis);
-    axis_valid = !is_zero(axis);
+    if (!using_transmission_hemisphere) {
+      axis = -axis;
+      axis = safe_normalize(axis);
+      axis_valid = !is_zero(axis);
+    }
+    else {
+      axis_valid = false;
+    }
   }
 
   const bool has_direction_relaxed = (guide.rbar > 1.0e-4f);
