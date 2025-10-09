@@ -388,30 +388,26 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   tmp.pdf *= pdf_selection;
   tmp.pdf_selection = pdf_selection;
   float nee_pdf_sa = mpg_light_sample_pdf_solid(kg, sd, tmp);
+  result.nee_pdf = nee_pdf_sa;
   if (!isfinite_safe(nee_pdf_sa)) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_NEE_PDF;
-    result.nee_pdf = 0.0f;
     return result;
   }
-  if (nee_pdf_sa < 0.0f) {
+  if (nee_pdf_sa <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_NEE_PDF;
-    result.nee_pdf = 0.0f;
     return result;
   }
-  nee_pdf_sa = fmaxf(nee_pdf_sa, 1.0e-16f);
   tmp.pdf = nee_pdf_sa;
-  result.nee_pdf = nee_pdf_sa;
 
   float p_light = mpg_light_sample_pdf_solid(kg, sd, light_sample);
+  result.light_pdf = p_light;
   if (!isfinite_safe(p_light) || p_light <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_LIGHT_PDF;
-    result.light_pdf = p_light;
     return result;
   }
-  p_light = fmaxf(p_light, 1.0e-16f);
   light_sample.pdf = p_light;
 
   result.visibility = compute_visibility_after_update(kg, sd, light_sample, result);
@@ -445,30 +441,26 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   }
 
   float J_total = fabsf(solution.jacobian_total);
+  result.jacobian_total = J_total;
   if (!isfinite_safe(J_total) || J_total <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_JACOBIAN_ZERO;
     return result;
   }
-  J_total = fmaxf(J_total, 1.0e-16f);
 
   const float pdf_product = p_seed * p_light * J_total;
+  result.pdf = pdf_product;
   if (!isfinite_safe(pdf_product) || pdf_product <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_PDF;
     return result;
   }
 
-  const float pdf = fmaxf(pdf_product, 1.0e-16f);
-
   result.success = true;
   result.failure_code = MPG_FAILURE_NONE;
-  result.jacobian_total = J_total;
   result.wi = solution.wi;
-  result.pdf = pdf;
   result.seed_pdf = p_seed;
   result.seed_pdf_raw = seed.seed_pdf_raw;
-  result.light_pdf = p_light;
   result.light = light_sample;
   result.attempt_count = attempt_count;
   result.seed_trial_count = seed.trial_count;
@@ -481,10 +473,10 @@ MpgResult mpg_try_connect(KernelGlobals kg,
               << ", success)";
   }
   if ((result.gate_mask & MPG_GATE_MASK_STRICT_PASS) != 0) {
-    DCHECK(isfinite_safe(result.seed_pdf) && result.seed_pdf >= 1.0e-16f);
-    DCHECK(isfinite_safe(result.light_pdf) && result.light_pdf >= 1.0e-16f);
-    DCHECK(isfinite_safe(result.jacobian_total) && result.jacobian_total >= 1.0e-16f);
-    DCHECK(isfinite_safe(result.pdf) && result.pdf >= 1.0e-16f);
+    DCHECK(isfinite_safe(result.seed_pdf) && result.seed_pdf > 0.0f);
+    DCHECK(isfinite_safe(result.light_pdf) && result.light_pdf > 0.0f);
+    DCHECK(isfinite_safe(result.jacobian_total) && result.jacobian_total > 0.0f);
+    DCHECK(isfinite_safe(result.pdf) && result.pdf > 0.0f);
     if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
       LOG_DEBUG << "MPG strict gate factors: seed=" << result.seed_pdf
                 << ", light=" << result.light_pdf << ", J=" << result.jacobian_total
