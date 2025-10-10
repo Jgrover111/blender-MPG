@@ -86,10 +86,17 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
 
   pdf = 0.0f;
 
-  const float p_seed = seed.seed_pdf;
-  if (!(isfinite_safe(p_seed) && p_seed > 0.0f)) {
+  const float p_seed_raw = seed.seed_pdf;
+  if (!(isfinite_safe(p_seed_raw) && p_seed_raw > 0.0f)) {
     return false;
   }
+  const float p_seed = fmaxf(p_seed_raw, 1.0e-16f);
+
+  const float p_bounce_raw = seed.bounce_pdf;
+  if (!(isfinite_safe(p_bounce_raw) && p_bounce_raw > 0.0f)) {
+    return false;
+  }
+  const float p_bounce = fmaxf(p_bounce_raw, 1.0e-16f);
 
   const int vertex_count = solution.specular_vertex_count;
   if (vertex_count <= 0) {
@@ -127,7 +134,7 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
   }
   J = fmaxf(J, 1.0e-16f);
 
-  const float pdf_product = p_seed * p_light * J;
+  const float pdf_product = p_bounce * p_seed * p_light * J;
   if (!isfinite_safe(pdf_product) || pdf_product <= 0.0f) {
     return false;
   }
