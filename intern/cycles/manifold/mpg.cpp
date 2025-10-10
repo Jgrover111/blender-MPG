@@ -438,13 +438,13 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
-  float J_total = fabsf(solution.jacobian_total);
-  result.jacobian_total = J_total;
+  const float J_total = fabsf(solution.jacobian_total);
   if (!isfinite_safe(J_total) || J_total <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_JACOBIAN_ZERO;
     return result;
   }
+  result.jacobian_total = J_total;
 
   const float pdf_product = p_seed * p_light * J_total;
   result.pdf = pdf_product;

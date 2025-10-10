@@ -260,12 +260,13 @@ bool mpg_generate_seed(KernelGlobals kg,
    * directional seeds narrow whenever the guide provides a stable mean. */
   const bool bootstrap_seed = !has_direction_relaxed;
   const bool use_uniform_fallback = !axis_valid;
+  const bool use_uniform_sphere_sampling = bootstrap_seed || use_uniform_fallback;
 
   const float min_cone_angle = 0.00872664626f; /* ~0.5 degrees. */
   float jitter = fmaxf(options.angular_jitter, min_cone_angle);
   float candidate_pdf = 0.0f;
   float3 seed_direction = zero_float3();
-  const int seed_branch_count = (bootstrap_seed || use_uniform_fallback) ? 32 : 16;
+  const int seed_branch_count = use_uniform_sphere_sampling ? 32 : 16;
   const int max_seed_attempts = bootstrap_seed ? 32 : (use_uniform_fallback ? 32 : 16);
   bool seed_valid = false;
   Intersection isect = {};
@@ -347,11 +348,11 @@ bool mpg_generate_seed(KernelGlobals kg,
                                              seed_branch_count,
                                              PRNG_SURFACE_BSDF);
 
-    const SeedTrialBranch branch = (bootstrap_seed || use_uniform_fallback) ?
+    const SeedTrialBranch branch = use_uniform_sphere_sampling ?
                                        SeedTrialBranch::Fallback :
                                        SeedTrialBranch::Guided;
 
-    if (use_uniform_fallback || bootstrap_seed) {
+    if (use_uniform_sphere_sampling) {
       seed_direction = sample_uniform_sphere(rand);
       candidate_pdf = M_1_4PI_F;
     }
@@ -377,7 +378,8 @@ bool mpg_generate_seed(KernelGlobals kg,
                                                fallback_branch_count,
                                                PRNG_SURFACE_BSDF);
 
-      if (axis_valid && !bootstrap_seed) {
+      const bool fallback_uses_uniform_sphere = bootstrap_seed || !axis_valid;
+      if (!fallback_uses_uniform_sphere) {
         float unused_cos = 0.0f;
         seed_direction = sample_uniform_cone(
             axis, fallback_one_minus_cos, rand, &unused_cos, &candidate_pdf);
