@@ -361,6 +361,31 @@ bool mpg_generate_seed(KernelGlobals kg,
   const bool use_uniform_fallback = !axis_valid;
   const bool use_uniform_sphere_sampling = bootstrap_seed || use_uniform_fallback;
 
+  const bool fallback_uniform_sphere_enforces_hemisphere =
+      (bootstrap_seed || !axis_valid) && hemisphere_valid;
+
+  float3 fallback_uniform_hemisphere_axis = zero_float3();
+  if (fallback_uniform_sphere_enforces_hemisphere) {
+    if (using_transmission_hemisphere) {
+      const float3 transmission_axis = (hemisphere_sign >= 0.0f) ? transmission_normal :
+                                                                           -transmission_normal;
+      fallback_uniform_hemisphere_axis = transmission_axis;
+    }
+    else {
+      fallback_uniform_hemisphere_axis = hemisphere_normal;
+    }
+
+    if (!is_zero(fallback_uniform_hemisphere_axis)) {
+      fallback_uniform_hemisphere_axis = normalize(fallback_uniform_hemisphere_axis);
+    }
+    else {
+      fallback_uniform_hemisphere_axis = zero_float3();
+    }
+  }
+
+  const bool fallback_uniform_hemisphere_axis_valid =
+      !is_zero(fallback_uniform_hemisphere_axis);
+
   const int max_supported_bounces = clamp(options.max_bounces, 1, 2);
   const bool allow_double_bounce = (max_supported_bounces >= 2);
 
@@ -587,9 +612,20 @@ bool mpg_generate_seed(KernelGlobals kg,
         candidate_direction = sample_uniform_cone(
             axis, fallback_one_minus_cos, rand_dir, &unused_cos, &direction_pdf);
       }
+      else if (fallback_uniform_hemisphere_axis_valid) {
+        float unused_cos = 0.0f;
+        candidate_direction = sample_uniform_cone(fallback_uniform_hemisphere_axis,
+                                                  1.0f,
+                                                  rand_dir,
+                                                  &unused_cos,
+                                                  &direction_pdf);
+      }
       else {
         candidate_direction = sample_uniform_sphere(rand_dir);
         direction_pdf = M_1_4PI_F;
+        if (fallback_uniform_sphere_enforces_hemisphere) {
+          direction_pdf *= 2.0f;
+        }
       }
     }
 
