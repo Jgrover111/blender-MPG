@@ -350,8 +350,7 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
     if (manifold_pdf_factors_valid || sample == 0) {
       const bool denominator_valid = (isfinite_safe(mis_denominator) && mis_denominator >= 0.0f);
       const bool bounce_valid = (isfinite_safe(bounce_pdf) && bounce_pdf >= 0.0f);
-      /* Store the technique pdf, final MIS weight (including the bounce correction),
-       * and the bounce-selection pdf for parity comparisons. */
+      /* Store the technique pdf, MIS weight, and the bounce-selection pdf for parity comparisons. */
       float3 mis_values = make_float3(
           pdf_mpg, mis_weight, bounce_valid ? bounce_pdf : 0.0f);
       const bool mis_valid = (isfinite_safe(mis_values.x) &&
@@ -1207,14 +1206,11 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     float mis_weight = 0.0f;
     if (pdf_mpg > 0.0f &&
         mis_denominator > 0.0f &&
-        isfinite_safe(mis_denominator) &&
-        bounce_pdf_valid) {
-      const float base_weight = pdf_mpg / mis_denominator;
-      const float inv_p_bounce = 1.0f / fmaxf(mpg_result.bounce_pdf, 1.0e-16f);
-      mis_weight = base_weight * inv_p_bounce;
+        isfinite_safe(mis_denominator)) {
+      mis_weight = pdf_mpg / mis_denominator;
 
-      if (isfinite_safe(base_weight) && isfinite_safe(mis_weight)) {
-        const float expected_weight = base_weight * inv_p_bounce;
+      if (isfinite_safe(mis_weight)) {
+        const float expected_weight = pdf_mpg / mis_denominator;
         const float diff = fabsf(expected_weight - mis_weight);
         const float tolerance = fmaxf(1.0e-6f, fabsf(expected_weight) * 1.0e-5f);
         kernel_assert(diff <= tolerance);

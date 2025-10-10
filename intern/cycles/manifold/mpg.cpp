@@ -495,7 +495,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.jacobian_total = J_total;
   result.light_pdf *= result.jacobian_total;
 
-  const float pdf_product = p_seed * result.light_pdf;
+  const float pdf_product = p_bounce * p_seed * result.light_pdf;
   result.pdf = pdf_product;
   if (!isfinite_safe(pdf_product) || pdf_product <= 0.0f) {
     result.attempt_count = attempt_count;
