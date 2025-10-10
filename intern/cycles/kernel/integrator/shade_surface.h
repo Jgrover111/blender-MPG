@@ -258,6 +258,7 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
 
   if (kernel_data.film.pass_manifold_pdf_factors != PASS_UNUSED) {
     const float3 factor_values = make_float3(seed_pdf, light_pdf, jacobian);
+    /* `light_pdf` is stored in receiver solid angle and already includes the Jacobian. */
     const float invalid_sentinel_offset = 1.0f;
     /* Invalid PDF components are stored as -(abs(value) + offset) so the sign flags the
      * failure while the magnitude retains the previously accumulated average. Downstream tools

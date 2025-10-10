@@ -14,6 +14,7 @@ pairs:
 checklist:
   - When is the light pdf evaluated (before/after moving the light sample)?
   - Exact formula for technique pdf: p_mpg = p_seed * p_light(spec_pt) * J (receiver solid angle).
+  - `mpg_try_connect` stores `result.light_pdf = p_light(spec_pt) * J`, matching the receiver-side technique pdf.
   - Which pdfs are in the MIS denominator (p_bsdf, p_light(NEE), p_mpg) and are they all same measure?
   - Where is the Jacobian applied (once, not twice)?
   - Does the two-bounce solver populate both specular vertices and accumulate `J_S1 * J_S2`?

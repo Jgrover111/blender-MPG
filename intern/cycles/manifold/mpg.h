@@ -42,6 +42,7 @@ struct MpgResult {
   float seed_direction_pdf = 0.0f;
   float bounce_pdf = 1.0f;
   float bounce_pdf_raw = 1.0f;
+  /* Light pdf converted to receiver solid angle (includes jacobian_total). */
   float light_pdf = 0.0f;
   Spectrum spec_weight = zero_spectrum();
   LightSample light = {};

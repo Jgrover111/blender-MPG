@@ -491,8 +491,9 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
   result.jacobian_total = J_total;
+  result.light_pdf *= result.jacobian_total;
 
-  const float pdf_product = p_bounce * p_seed * p_light * J_total;
+  const float pdf_product = p_bounce * p_seed * result.light_pdf;
   result.pdf = pdf_product;
   if (!isfinite_safe(pdf_product) || pdf_product <= 0.0f) {
     result.attempt_count = attempt_count;
@@ -526,7 +527,9 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     DCHECK(isfinite_safe(result.pdf) && result.pdf > 0.0f);
     if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
       LOG_DEBUG << "MPG strict gate factors: bounce=" << result.bounce_pdf
-                << ", seed=" << result.seed_pdf << ", light=" << result.light_pdf
+                << ", seed=" << result.seed_pdf
+                << ", light_receiver=" << result.light_pdf
+                << " (light_spec=" << p_light << ")"
                 << ", J=" << result.jacobian_total << ", pdf=" << result.pdf;
     }
   }
