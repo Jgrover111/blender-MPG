@@ -66,6 +66,8 @@ struct MpgSeedRay {
   float seed_pdf_raw = 0.0f;
   float seed_branch_pdf = 0.0f;
   float seed_direction_pdf = 0.0f;
+  float bounce_pdf = 1.0f;
+  float bounce_pdf_raw = 1.0f;
   LightSample light_sample = {};
   uint32_t path_flag = 0;
   int object = -1;
@@ -78,6 +80,7 @@ struct MpgSeedRay {
   int fallback_trial_count = 0;
   float seed_resample_factor = 0.0f;
   MpgSeedBranch branch = MPG_SEED_BRANCH_NONE;
+  int bounce_count = 1;
   bool use_smooth_normals = false;
 };
 

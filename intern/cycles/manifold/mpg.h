@@ -40,6 +40,8 @@ struct MpgResult {
   float seed_resample_factor = 0.0f;
   float seed_branch_pdf = 0.0f;
   float seed_direction_pdf = 0.0f;
+  float bounce_pdf = 1.0f;
+  float bounce_pdf_raw = 1.0f;
   float light_pdf = 0.0f;
   Spectrum spec_weight = zero_spectrum();
   LightSample light = {};
@@ -51,6 +53,7 @@ struct MpgResult {
   int seed_guided_trial_count = 0;
   int seed_fallback_trial_count = 0;
   MpgSeedBranch seed_branch = MPG_SEED_BRANCH_NONE;
+  int bounce_count = 1;
   uint32_t gate_mask = MPG_GATE_MASK_NONE;
   MpgFailureCode failure_code = MPG_FAILURE_NONE;
 };

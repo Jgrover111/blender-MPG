@@ -18,6 +18,7 @@
 #include "util/math_base.h"
 #include "util/math_float4.h"
 #include "util/math_intersect.h"
+#include "util/hash.h"
 
 #include <cfloat>
 #include <cmath>
@@ -362,6 +363,96 @@ bool mpg_generate_seed(KernelGlobals kg,
   const bool bootstrap_seed = !has_direction_relaxed;
   const bool use_uniform_fallback = !axis_valid;
   const bool use_uniform_sphere_sampling = bootstrap_seed || use_uniform_fallback;
+
+  const int max_supported_bounces = clamp(options.max_bounces, 1, 2);
+  const bool allow_double_bounce = (max_supported_bounces >= 2);
+
+  float geom_single_weight = 1.0f;
+  float geom_double_weight = allow_double_bounce ? 1.0f : 0.0f;
+  float geom_sum = geom_single_weight + geom_double_weight;
+  if (!(geom_sum > 0.0f)) {
+    geom_sum = 1.0f;
+    geom_double_weight = 0.0f;
+  }
+  float geom_pdf_single = geom_single_weight / geom_sum;
+  float geom_pdf_double = allow_double_bounce ? (geom_double_weight / geom_sum) : 0.0f;
+
+  float guided_pdf_single = geom_pdf_single;
+  float guided_pdf_double = geom_pdf_double;
+
+  const bool guided_distribution_available = allow_double_bounce && axis_valid &&
+                                             !use_uniform_sphere_sampling;
+
+  if (guided_distribution_available) {
+    float guided_single_weight = prefer_transmission ? 0.0f : 1.0f;
+    float guided_double_weight = prefer_transmission ? 1.0f : 0.0f;
+    const float guided_sum = guided_single_weight + guided_double_weight;
+    if (guided_sum > 0.0f) {
+      guided_pdf_single = guided_single_weight / guided_sum;
+      guided_pdf_double = guided_double_weight / guided_sum;
+    }
+    else {
+      guided_pdf_single = geom_pdf_single;
+      guided_pdf_double = geom_pdf_double;
+    }
+  }
+
+  float pdf_single = geom_pdf_single;
+  float pdf_double = geom_pdf_double;
+  if (allow_double_bounce) {
+    const float bounce_alpha = guided_distribution_available ? 0.5f : 1.0f;
+    pdf_single = bounce_alpha * geom_pdf_single + (1.0f - bounce_alpha) * guided_pdf_single;
+    pdf_double = bounce_alpha * geom_pdf_double + (1.0f - bounce_alpha) * guided_pdf_double;
+  }
+  else {
+    pdf_single = 1.0f;
+    pdf_double = 0.0f;
+  }
+
+  float pdf_sum = pdf_single + pdf_double;
+  if (!(isfinite_safe(pdf_sum) && pdf_sum > 0.0f)) {
+    pdf_single = 1.0f;
+    pdf_double = 0.0f;
+    pdf_sum = 1.0f;
+  }
+  pdf_single /= pdf_sum;
+  pdf_double = allow_double_bounce ? (pdf_double / pdf_sum) : 0.0f;
+
+  const uint32_t branch_offset_u = (rng_branch_offset >= 0) ? uint(rng_branch_offset) :
+                                                                  uint(-rng_branch_offset);
+  const uint32_t bounce_seed = hash_uint3(
+      rng_state.rng_pixel, uint(rng_state.sample), rng_state.rng_offset + branch_offset_u);
+  const float bounce_rand = uint_to_float_excl(bounce_seed);
+
+  int selected_bounce_count = 1;
+  float selected_bounce_pdf = pdf_single;
+
+  const bool allow_single = pdf_single > 0.0f;
+  const bool allow_double_pdf = allow_double_bounce && pdf_double > 0.0f;
+
+  if (!allow_single && allow_double_pdf) {
+    selected_bounce_count = 2;
+    selected_bounce_pdf = pdf_double;
+  }
+  else if (allow_single && allow_double_pdf) {
+    if (bounce_rand >= pdf_single) {
+      selected_bounce_count = 2;
+      selected_bounce_pdf = pdf_double;
+    }
+  }
+  else if (!allow_single && !allow_double_pdf) {
+    selected_bounce_count = allow_double_bounce ? 2 : 1;
+    selected_bounce_pdf = allow_double_bounce ? pdf_double : pdf_single;
+  }
+
+  if (!(isfinite_safe(selected_bounce_pdf) && selected_bounce_pdf > 0.0f)) {
+    failure_code = MPG_FAILURE_INVALID_PDF;
+    return false;
+  }
+
+  seed.bounce_count = selected_bounce_count;
+  seed.bounce_pdf_raw = selected_bounce_pdf;
+  seed.bounce_pdf = fmaxf(selected_bounce_pdf, 1.0e-16f);
 
   const float min_cone_angle = 0.00872664626f; /* ~0.5 degrees. */
   float jitter = fmaxf(options.angular_jitter, min_cone_angle);

@@ -1110,13 +1110,16 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                    0.0f;
     const bool seed_pdf_valid = (isfinite_safe(mpg_result.seed_pdf) && mpg_result.seed_pdf > 0.0f);
     const bool light_pdf_valid = (isfinite_safe(mpg_result.light_pdf) && mpg_result.light_pdf > 0.0f);
+    const bool bounce_pdf_valid =
+        (isfinite_safe(mpg_result.bounce_pdf) && mpg_result.bounce_pdf > 0.0f);
 
     manifold_pdf_factors_valid = (gate_pass_any_result && !mpg_failure && mpg_result.success &&
-                                  seed_pdf_valid && light_pdf_valid && jacobian_abs > 0.0f &&
+                                  seed_pdf_valid && light_pdf_valid && bounce_pdf_valid &&
+                                  jacobian_abs > 0.0f &&
                                   pdf_mpg_sa > 0.0f);
 
     if (manifold_pdf_factors_valid) {
-      manifold_seed_pdf = mpg_result.seed_pdf;
+      manifold_seed_pdf = mpg_result.seed_pdf * mpg_result.bounce_pdf;
       manifold_light_pdf = mpg_result.light_pdf;
       manifold_abs_jacobian = jacobian_abs;
       manifold_pdf = pdf_mpg_sa;
@@ -1125,6 +1128,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     if (manifold_guiding_ready && gate_pass_any_result && !mpg_failure) {
       kernel_assert(seed_pdf_valid);
       kernel_assert(light_pdf_valid);
+      kernel_assert(bounce_pdf_valid);
       kernel_assert(jacobian_abs > 0.0f);
       kernel_assert(pdf_mpg_sa > 0.0f);
       kernel_assert(pdf_nee_sa > 0.0f);
