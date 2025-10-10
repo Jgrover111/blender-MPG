@@ -495,13 +495,25 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.jacobian_total = J_total;
   result.light_pdf *= result.jacobian_total;
 
-  const float pdf_product = p_bounce * p_seed * result.light_pdf;
+  const float pdf_product = p_seed * result.light_pdf;
   result.pdf = pdf_product;
   if (!isfinite_safe(pdf_product) || pdf_product <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_PDF;
     return result;
   }
+
+#ifdef WITH_CYCLES_DEBUG
+  {
+    float eval_pdf = 0.0f;
+    const bool eval_success = mpg_evaluate_pdf(kg, sd, bsdf, guide, seed, solution, eval_pdf);
+    DCHECK(eval_success);
+    if (eval_success) {
+      const float tolerance = fmaxf(fabsf(result.pdf), 1.0e-16f) * 1.0e-4f;
+      DCHECK(fabsf(eval_pdf - result.pdf) <= tolerance);
+    }
+  }
+#endif
 
   result.success = true;
   result.failure_code = MPG_FAILURE_NONE;
