@@ -793,6 +793,16 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
             soft_max=256.0,
             default=40.0,
         )
+        manifold_seed_trials: IntProperty(
+            name="Seed Trials",
+            description=(
+                "Number of extra Bernoulli trials to estimate the probability of re-sampling "
+                "an equivalent manifold seed"
+            ),
+            min=0,
+            max=1024,
+            default=8,
+        )
 
 
     max_bounces: IntProperty(

@@ -457,17 +457,24 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.seed_pdf = p_seed;
 #ifdef WITH_CYCLES_DEBUG
   const int total_trials = seed.trial_count;
+  const float expected_trials =
+      (isfinite_safe(seed.seed_resample_factor) && seed.seed_resample_factor > 0.0f) ?
+          seed.seed_resample_factor :
+          0.0f;
+  const float acceptance_probability = (expected_trials > 0.0f) ?
+                                           (1.0f / expected_trials) :
+                                           0.0f;
   const float mitsuba_seed_pdf =
-      (isfinite_safe(seed.seed_pdf_raw) && seed.seed_pdf_raw > 0.0f &&
-       isfinite_safe(seed.seed_resample_factor) && seed.seed_resample_factor > 0.0f) ?
-          (seed.seed_pdf_raw * seed.seed_resample_factor) :
+      (isfinite_safe(seed.seed_pdf_raw) && seed.seed_pdf_raw > 0.0f && acceptance_probability > 0.0f) ?
+          (seed.seed_pdf_raw * acceptance_probability) :
           0.0f;
   if (total_trials > 0 && mitsuba_seed_pdf > 0.0f) {
     if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
       LOG_DEBUG << "MPG seed pdf parity (trials=" << total_trials
                 << "): cycles=" << p_seed << ", Mitsuba=" << mitsuba_seed_pdf
                 << ", raw=" << seed.seed_pdf_raw
-                << ", resample_factor=" << seed.seed_resample_factor
+                << ", expected_trials=" << expected_trials
+                << ", accept_p=" << acceptance_probability
                 << ", branch=" << seed.seed_branch_pdf
                 << ", dir=" << seed.seed_direction_pdf
                 << ", bounce=" << seed.bounce_pdf;

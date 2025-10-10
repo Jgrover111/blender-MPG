@@ -417,6 +417,7 @@ class CYCLES_RENDER_PT_sampling_path_guiding(CyclesButtonsPanel, Panel):
             sub.prop(cscene, "manifold_iters")
             sub.prop(cscene, "manifold_gate_weight")
             sub.prop(cscene, "manifold_gate_kappa")
+            sub.prop(cscene, "manifold_seed_trials")
 
 class CYCLES_RENDER_PT_sampling_path_guiding_debug(CyclesDebugButtonsPanel, Panel):
     bl_label = "Debug"

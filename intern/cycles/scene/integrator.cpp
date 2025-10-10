@@ -96,6 +96,7 @@ NODE_DEFINE(Integrator)
   SOCKET_INT(manifold_iters, "Manifold Solver Iterations", 6);
   SOCKET_FLOAT(manifold_gate_weight, "Manifold Gate Weight", 0.35f);
   SOCKET_FLOAT(manifold_gate_kappa, "Manifold Gate Sharpness", 40.0f);
+  SOCKET_INT(manifold_seed_trials, "Manifold Seed Trials", 8);
 #endif
 
   SOCKET_BOOLEAN(caustics_reflective, "Reflective Caustics", true);
@@ -285,12 +286,14 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   const int clamped_manifold_iterations = max(manifold_iters, 1);
   const float clamped_gate_weight = clamp(manifold_gate_weight, 0.0f, 1.0f);
   const float clamped_gate_kappa = max(manifold_gate_kappa, 0.0f);
+  const int clamped_seed_trials = clamp(manifold_seed_trials, 0, 1024);
   const bool manifold_active = manifold_guiding_enable && kintegrator->use_guiding;
   kintegrator->manifold_guiding_enable = manifold_active;
   kintegrator->manifold_max_bounces = clamped_manifold_bounces;
   kintegrator->manifold_max_iterations = clamped_manifold_iterations;
   kintegrator->manifold_gate_weight = clamped_gate_weight;
   kintegrator->manifold_gate_kappa = clamped_gate_kappa;
+  kintegrator->manifold_seed_trials = clamped_seed_trials;
 #endif
 
   kintegrator->sample_clamp_direct = (sample_clamp_direct == 0.0f) ? FLT_MAX :

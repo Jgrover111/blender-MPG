@@ -908,6 +908,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   manifold_options.max_iters = kernel_data.integrator.manifold_max_iterations;
   manifold_options.gate_w = kernel_data.integrator.manifold_gate_weight;
   manifold_options.gate_kappa = kernel_data.integrator.manifold_gate_kappa;
+  manifold_options.max_seed_repeat_trials = kernel_data.integrator.manifold_seed_trials;
   ccl_attr_maybe_unused const bool manifold_guiding_enabled =
       (kernel_data.integrator.manifold_guiding_enable != 0);
 #    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4

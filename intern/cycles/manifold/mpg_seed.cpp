@@ -33,12 +33,17 @@ float mpg_rebuild_seed_pdf(const MpgSeedRay &seed)
     return 0.0f;
   }
 
-  const float resample_factor = seed.seed_resample_factor;
-  if (!(isfinite_safe(resample_factor) && resample_factor > 0.0f)) {
+  const float expected_trials = seed.seed_resample_factor;
+  if (!(isfinite_safe(expected_trials) && expected_trials > 0.0f)) {
     return 0.0f;
   }
 
-  const float normalized_pdf = raw_pdf * resample_factor;
+  const float inv_expected_trials = 1.0f / fmaxf(expected_trials, 1.0e-16f);
+  if (!(isfinite_safe(inv_expected_trials) && inv_expected_trials > 0.0f)) {
+    return 0.0f;
+  }
+
+  const float normalized_pdf = raw_pdf * inv_expected_trials;
   if (!(isfinite_safe(normalized_pdf) && normalized_pdf > 0.0f)) {
     return 0.0f;
   }
@@ -501,19 +506,103 @@ bool mpg_generate_seed(KernelGlobals kg,
   if (total_attempt_budget <= 0) {
     total_attempt_budget = 1;
   }
-  const int seed_branch_count = total_attempt_budget;
+  const int repeat_trial_budget = std::max(options.max_seed_repeat_trials, 0);
+  int seed_branch_count = total_attempt_budget + repeat_trial_budget;
+  if (seed_branch_count <= 0) {
+    seed_branch_count = 1;
+  }
   const float guided_branch_probability =
       mpg_seed_branch_probability(guided_attempt_budget, fallback_attempt_budget, MPG_SEED_BRANCH_GUIDED);
   const float fallback_branch_probability =
       mpg_seed_branch_probability(guided_attempt_budget, fallback_attempt_budget, MPG_SEED_BRANCH_FALLBACK);
   const float fallback_one_minus_cos = one_minus_cos(0.6f * M_PI_F);
 
+  auto intersections_equivalent = [](const Intersection &a, const Intersection &b) -> bool {
+    if (a.prim != b.prim || a.object != b.object || a.type != b.type) {
+      return false;
+    }
+
+    const float bary_tolerance = 1.0e-5f;
+    if (fabsf(a.u - b.u) > bary_tolerance || fabsf(a.v - b.v) > bary_tolerance) {
+      return false;
+    }
+
+    const float ref_t = fabsf(b.t);
+    const float relative_tolerance = 1.0e-4f * fmaxf(ref_t, 1.0f);
+    if (fabsf(a.t - b.t) > relative_tolerance) {
+      return false;
+    }
+
+    return true;
+  };
+
+  auto sample_trial = [&](const float3 &rand_sample,
+                          SeedTrialBranch &branch,
+                          float &branch_pdf,
+                          float3 &candidate_direction,
+                          float &direction_pdf) {
+    branch = SeedTrialBranch::Fallback;
+    branch_pdf = 1.0f;
+    direction_pdf = 0.0f;
+    candidate_direction = zero_float3();
+
+    const bool has_guided_branch = guided_branch_probability > 0.0f;
+    const bool has_fallback_branch = fallback_branch_probability > 0.0f;
+
+    if (has_guided_branch && has_fallback_branch) {
+      const float branch_sample = rand_sample.x;
+      const bool choose_guided = branch_sample < guided_branch_probability;
+      branch = choose_guided ? SeedTrialBranch::Guided : SeedTrialBranch::Fallback;
+      branch_pdf = choose_guided ? guided_branch_probability : fallback_branch_probability;
+    }
+    else if (has_guided_branch) {
+      branch = SeedTrialBranch::Guided;
+      branch_pdf = 1.0f;
+    }
+    else if (has_fallback_branch) {
+      branch = SeedTrialBranch::Fallback;
+      branch_pdf = 1.0f;
+    }
+
+    const float2 rand_dir = make_float2(rand_sample.y, rand_sample.z);
+
+    if (branch == SeedTrialBranch::Guided) {
+      float unused_cos = 0.0f;
+      candidate_direction =
+          sample_uniform_cone(axis, one_minus_cos(jitter), rand_dir, &unused_cos, &direction_pdf);
+    }
+    else {
+      const bool fallback_uses_uniform_sphere = bootstrap_seed || !axis_valid;
+      if (!fallback_uses_uniform_sphere) {
+        float unused_cos = 0.0f;
+        candidate_direction = sample_uniform_cone(
+            axis, fallback_one_minus_cos, rand_dir, &unused_cos, &direction_pdf);
+      }
+      else if (fallback_uniform_hemisphere_axis_valid) {
+        float unused_cos = 0.0f;
+        candidate_direction = sample_uniform_cone(fallback_uniform_hemisphere_axis,
+                                                  1.0f,
+                                                  rand_dir,
+                                                  &unused_cos,
+                                                  &direction_pdf);
+      }
+      else {
+        candidate_direction = sample_uniform_sphere(rand_dir);
+        direction_pdf = M_1_4PI_F;
+        if (fallback_uniform_sphere_enforces_hemisphere) {
+          direction_pdf *= 2.0f;
+        }
+      }
+    }
+  };
+
   auto try_seed_sample = [&](const float3 &candidate_direction,
                              const float candidate_pdf,
                              const float candidate_branch_pdf,
                              const float candidate_direction_pdf,
                              Intersection &out_isect,
-                             const SeedTrialBranch branch) -> bool {
+                             const SeedTrialBranch branch,
+                             const bool record_accept) -> bool {
     int &branch_trials = (branch == SeedTrialBranch::Guided) ? guided_trials : fallback_trials;
     ++branch_trials;
     if (is_zero(candidate_direction) || candidate_pdf <= 0.0f) {
@@ -560,78 +649,36 @@ bool mpg_generate_seed(KernelGlobals kg,
     }
 
     out_isect = candidate_isect;
-    seed_direction = normalized_direction;
-    accepted_seed_pdf = candidate_pdf;
-    accepted_branch_pdf = candidate_branch_pdf;
-    accepted_direction_pdf = candidate_direction_pdf;
-    seed.use_smooth_normals = has_smooth_normals && !using_transmission_hemisphere;
-    successful_branch = branch;
+    if (record_accept) {
+      seed_direction = normalized_direction;
+      accepted_seed_pdf = candidate_pdf;
+      accepted_branch_pdf = candidate_branch_pdf;
+      accepted_direction_pdf = candidate_direction_pdf;
+      seed.use_smooth_normals = has_smooth_normals && !using_transmission_hemisphere;
+      successful_branch = branch;
+    }
     return true;
   };
 
   for (int attempt = 0; attempt < total_attempt_budget && !seed_valid; ++attempt) {
-    const float3 rand = path_branched_rng_3D(kg,
-                                            &rng_state,
-                                            attempt + rng_branch_offset,
-                                            seed_branch_count,
-                                            PRNG_SURFACE_BSDF);
+    const float3 rand = path_branched_rng_3D(
+        kg, &rng_state, attempt + rng_branch_offset, seed_branch_count, PRNG_SURFACE_BSDF);
 
     SeedTrialBranch branch = SeedTrialBranch::Fallback;
     float branch_pdf = 1.0f;
-    const bool has_guided_branch = guided_branch_probability > 0.0f;
-    const bool has_fallback_branch = fallback_branch_probability > 0.0f;
-
-    if (has_guided_branch && has_fallback_branch) {
-      const float branch_sample = rand.x;
-      const bool choose_guided = branch_sample < guided_branch_probability;
-      branch = choose_guided ? SeedTrialBranch::Guided : SeedTrialBranch::Fallback;
-      branch_pdf = choose_guided ? guided_branch_probability : fallback_branch_probability;
-    }
-    else if (has_guided_branch) {
-      branch = SeedTrialBranch::Guided;
-      branch_pdf = 1.0f;
-    }
-    else if (has_fallback_branch) {
-      branch = SeedTrialBranch::Fallback;
-      branch_pdf = 1.0f;
-    }
-
     float direction_pdf = 0.0f;
     float3 candidate_direction = zero_float3();
-    const float2 rand_dir = make_float2(rand.y, rand.z);
 
-    if (branch == SeedTrialBranch::Guided) {
-      float unused_cos = 0.0f;
-      candidate_direction =
-          sample_uniform_cone(axis, one_minus_cos(jitter), rand_dir, &unused_cos, &direction_pdf);
-    }
-    else {
-      const bool fallback_uses_uniform_sphere = bootstrap_seed || !axis_valid;
-      if (!fallback_uses_uniform_sphere) {
-        float unused_cos = 0.0f;
-        candidate_direction = sample_uniform_cone(
-            axis, fallback_one_minus_cos, rand_dir, &unused_cos, &direction_pdf);
-      }
-      else if (fallback_uniform_hemisphere_axis_valid) {
-        float unused_cos = 0.0f;
-        candidate_direction = sample_uniform_cone(fallback_uniform_hemisphere_axis,
-                                                  1.0f,
-                                                  rand_dir,
-                                                  &unused_cos,
-                                                  &direction_pdf);
-      }
-      else {
-        candidate_direction = sample_uniform_sphere(rand_dir);
-        direction_pdf = M_1_4PI_F;
-        if (fallback_uniform_sphere_enforces_hemisphere) {
-          direction_pdf *= 2.0f;
-        }
-      }
-    }
+    sample_trial(rand, branch, branch_pdf, candidate_direction, direction_pdf);
 
     const float candidate_pdf = direction_pdf * branch_pdf;
-    seed_valid = try_seed_sample(
-        candidate_direction, candidate_pdf, branch_pdf, direction_pdf, isect, branch);
+    seed_valid = try_seed_sample(candidate_direction,
+                                 candidate_pdf,
+                                 branch_pdf,
+                                 direction_pdf,
+                                 isect,
+                                 branch,
+                                 true);
   }
 
   if (!seed_valid) {
@@ -639,20 +686,83 @@ bool mpg_generate_seed(KernelGlobals kg,
     return false;
   }
 
+  const int guided_trials_initial = guided_trials;
+  const int fallback_trials_initial = fallback_trials;
+  const Intersection accepted_isect = isect;
+
+  int equivalent_successes = 0;
+
+  for (int extra = 0; extra < repeat_trial_budget; ++extra) {
+    const int attempt_index = total_attempt_budget + extra;
+    const float3 rand = path_branched_rng_3D(
+        kg, &rng_state, attempt_index + rng_branch_offset, seed_branch_count, PRNG_SURFACE_BSDF);
+
+    SeedTrialBranch branch = SeedTrialBranch::Fallback;
+    float branch_pdf = 1.0f;
+    float direction_pdf = 0.0f;
+    float3 candidate_direction = zero_float3();
+
+    sample_trial(rand, branch, branch_pdf, candidate_direction, direction_pdf);
+
+    const float candidate_pdf = direction_pdf * branch_pdf;
+    Intersection repeat_isect = {};
+    const bool repeat_success = try_seed_sample(candidate_direction,
+                                               candidate_pdf,
+                                               branch_pdf,
+                                               direction_pdf,
+                                               repeat_isect,
+                                               branch,
+                                               false);
+
+    if (!repeat_success) {
+      continue;
+    }
+
+    if (branch != successful_branch) {
+      continue;
+    }
+
+    if (!intersections_equivalent(repeat_isect, accepted_isect)) {
+      continue;
+    }
+
+    ++equivalent_successes;
+  }
+
   const int total_trials = guided_trials + fallback_trials;
   if (total_trials <= 0) {
     failure_code = MPG_FAILURE_INVALID_SEED_PDF;
     return false;
   }
-  const int accepted_trials = (successful_branch == SeedTrialBranch::Guided) ? guided_trials :
-                                                                        fallback_trials;
-  if (accepted_trials <= 0) {
+  const int accepted_trials_initial = (successful_branch == SeedTrialBranch::Guided) ?
+                                          guided_trials_initial :
+                                          fallback_trials_initial;
+  if (accepted_trials_initial <= 0) {
     failure_code = MPG_FAILURE_INVALID_SEED_PDF;
     return false;
   }
 
-  const float resample_factor = 1.0f / fmaxf(float(total_trials), 1.0f);
-  const float normalized_pdf = accepted_seed_pdf * resample_factor;
+  const int success_count = equivalent_successes + 1;
+  const float total_trials_f = float(total_trials);
+  const float success_count_f = float(success_count);
+  if (!(isfinite_safe(total_trials_f) && total_trials_f > 0.0f && success_count_f > 0.0f)) {
+    failure_code = MPG_FAILURE_INVALID_SEED_PDF;
+    return false;
+  }
+
+  const float expected_trials = total_trials_f / success_count_f;
+  if (!(isfinite_safe(expected_trials) && expected_trials > 0.0f)) {
+    failure_code = MPG_FAILURE_INVALID_SEED_PDF;
+    return false;
+  }
+
+  const float acceptance_probability = 1.0f / fmaxf(expected_trials, 1.0e-16f);
+  if (!(isfinite_safe(acceptance_probability) && acceptance_probability > 0.0f)) {
+    failure_code = MPG_FAILURE_INVALID_SEED_PDF;
+    return false;
+  }
+
+  const float normalized_pdf = accepted_seed_pdf * acceptance_probability;
   if (!(isfinite_safe(normalized_pdf) && normalized_pdf > 0.0f)) {
     failure_code = MPG_FAILURE_INVALID_SEED_PDF;
     return false;
@@ -685,10 +795,10 @@ bool mpg_generate_seed(KernelGlobals kg,
   seed.seed_branch_pdf = accepted_branch_pdf;
   seed.seed_direction_pdf = accepted_direction_pdf;
   seed.trial_count = total_trials;
-  seed.accepted_trial_count = accepted_trials;
+  seed.accepted_trial_count = accepted_trials_initial;
   seed.guided_trial_count = guided_trials;
   seed.fallback_trial_count = fallback_trials;
-  seed.seed_resample_factor = fmaxf(resample_factor, 1.0e-16f);
+  seed.seed_resample_factor = fmaxf(expected_trials, 1.0e-16f);
   seed.branch = (successful_branch == SeedTrialBranch::Guided) ? MPG_SEED_BRANCH_GUIDED :
                                                                     MPG_SEED_BRANCH_FALLBACK;
   seed.seed_pdf = fmaxf(normalized_pdf, 1.0e-16f);

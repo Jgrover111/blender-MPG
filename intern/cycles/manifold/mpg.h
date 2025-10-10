@@ -26,6 +26,7 @@ struct MpgOptions {
   float gate_kappa = 40.0f;
   float angular_jitter = 0.02f;
   bool relax_gate = false;
+  int max_seed_repeat_trials = 8;
 };
 
 struct MpgResult {
@@ -37,7 +38,7 @@ struct MpgResult {
   float jacobian_total = 0.0f;
   float seed_pdf = 0.0f;
   float seed_pdf_raw = 0.0f;
-  float seed_resample_factor = 0.0f;
+  float seed_resample_factor = 0.0f; /* Expected trials before re-discovering seed. */
   float seed_branch_pdf = 0.0f;
   float seed_direction_pdf = 0.0f;
   float bounce_pdf = 1.0f;

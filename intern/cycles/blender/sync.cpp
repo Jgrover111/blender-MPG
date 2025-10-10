@@ -520,6 +520,7 @@ void BlenderSync::sync_integrator(BL::ViewLayer &b_view_layer,
   integrator->set_manifold_iters(get_int(cscene, "manifold_iters"));
   integrator->set_manifold_gate_weight(get_float(cscene, "manifold_gate_weight"));
   integrator->set_manifold_gate_kappa(get_float(cscene, "manifold_gate_kappa"));
+  integrator->set_manifold_seed_trials(get_int(cscene, "manifold_seed_trials"));
 #endif
 
   DenoiseParams denoise_params = get_denoise_params(

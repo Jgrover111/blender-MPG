@@ -242,6 +242,7 @@ KERNEL_STRUCT_MEMBER(integrator, int, manifold_max_bounces)
 KERNEL_STRUCT_MEMBER(integrator, int, manifold_max_iterations)
 KERNEL_STRUCT_MEMBER(integrator, float, manifold_gate_weight)
 KERNEL_STRUCT_MEMBER(integrator, float, manifold_gate_kappa)
+KERNEL_STRUCT_MEMBER(integrator, int, manifold_seed_trials)
 #endif
 
 /* Padding. */

@@ -62,6 +62,7 @@ class Integrator : public Node {
   NODE_SOCKET_API(int, manifold_iters);
   NODE_SOCKET_API(float, manifold_gate_weight);
   NODE_SOCKET_API(float, manifold_gate_kappa);
+  NODE_SOCKET_API(int, manifold_seed_trials);
 #endif
 
   NODE_SOCKET_API(bool, caustics_reflective)

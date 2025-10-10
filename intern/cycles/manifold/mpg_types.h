@@ -78,7 +78,7 @@ struct MpgSeedRay {
   int accepted_trial_count = 0;
   int guided_trial_count = 0;
   int fallback_trial_count = 0;
-  float seed_resample_factor = 0.0f;
+  float seed_resample_factor = 0.0f; /* Expected trials before re-discovering seed. */
   MpgSeedBranch branch = MPG_SEED_BRANCH_NONE;
   int bounce_count = 1;
   bool use_smooth_normals = false;
@@ -115,7 +115,7 @@ struct MpgSolverOutput {
   float visibility = 1.0f;
   float jacobian_total = 0.0f;
   Spectrum specular_throughput = zero_spectrum();
-  float seed_resample_factor = 0.0f;
+  float seed_resample_factor = 0.0f; /* Expected trials before re-discovering seed. */
   MpgSeedBranch seed_branch = MPG_SEED_BRANCH_NONE;
   float seed_branch_pdf = 0.0f;
   float seed_direction_pdf = 0.0f;
