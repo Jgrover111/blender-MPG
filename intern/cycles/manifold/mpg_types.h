@@ -46,6 +46,12 @@ enum MpgGateMask : uint32_t {
   MPG_GATE_MASK_BOOTSTRAP_PASS = 1u << 5
 };
 
+enum MpgSeedBranch : int {
+  MPG_SEED_BRANCH_NONE = 0,
+  MPG_SEED_BRANCH_GUIDED = 1,
+  MPG_SEED_BRANCH_FALLBACK = 2,
+};
+
 struct ShadingPoint {
   float3 position = zero_float3();
   float3 geometric_normal = zero_float3();
@@ -66,6 +72,10 @@ struct MpgSeedRay {
   float bary_v = 0.0f;
   int trial_count = 0;
   int accepted_trial_count = 0;
+  int guided_trial_count = 0;
+  int fallback_trial_count = 0;
+  float seed_resample_factor = 0.0f;
+  MpgSeedBranch branch = MPG_SEED_BRANCH_NONE;
   bool use_smooth_normals = false;
 };
 
@@ -100,6 +110,10 @@ struct MpgSolverOutput {
   float visibility = 1.0f;
   float jacobian_total = 0.0f;
   Spectrum specular_throughput = zero_spectrum();
+  float seed_resample_factor = 0.0f;
+  MpgSeedBranch seed_branch = MPG_SEED_BRANCH_NONE;
+  int seed_guided_trial_count = 0;
+  int seed_fallback_trial_count = 0;
   MpgSpecularVertex specular_vertices[2];
 
   /* Legacy single-bounce fields kept for callers that have not yet
