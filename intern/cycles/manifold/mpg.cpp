@@ -191,18 +191,18 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.gate_mask = gate_mask;
 
   const bool strict_gate_pass = (gate_mask & MPG_GATE_MASK_STRICT_PASS) != 0;
+  const bool relaxed_gate_pass = (gate_mask & MPG_GATE_MASK_RELAX_PASS) != 0;
+  const bool bootstrap_gate_pass = (gate_mask & MPG_GATE_MASK_BOOTSTRAP_PASS) != 0;
+  const bool gate_permits_solver = strict_gate_pass || (opt.relax_gate &&
+                                                        (relaxed_gate_pass || bootstrap_gate_pass));
 
-  if (gate_active) {
-    if (!strict_gate && !relaxed_gate && !bootstrap_gate) {
-      result.failure_code = MPG_FAILURE_GATE;
-      result.attempt_count = 0;
-      return result;
-    }
+  if (!gate_permits_solver) {
+    result.failure_code = MPG_FAILURE_GATE;
+    result.attempt_count = 0;
+    return result;
   }
   /* When the gate is disabled we still attempt a bootstrap seed even if the guide has no
    * dominant direction. This mirrors the Mitsuba reference fallback behaviour. */
-
-  const bool bootstrap_gate_pass = (gate_mask & MPG_GATE_MASK_BOOTSTRAP_PASS) != 0;
 
   MpgSeedRay seed;
   MpgFailureCode seed_failure = MPG_FAILURE_NONE;
@@ -274,7 +274,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     result.wi = normalize(seed.direction);
   }
 
-  if (gate_active && !strict_gate_pass) {
+  if (!gate_permits_solver) {
     result.failure_code = MPG_FAILURE_GATE;
     result.attempt_count = 0;
     return result;
