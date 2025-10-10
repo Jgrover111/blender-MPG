@@ -467,7 +467,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
       LOG_DEBUG << "MPG seed pdf parity (trials=" << total_trials
                 << "): cycles=" << p_seed << ", Mitsuba=" << mitsuba_seed_pdf
                 << ", raw=" << seed.seed_pdf_raw
-                << ", remaining=" << seed.seed_resample_factor
+                << ", resample_factor=" << seed.seed_resample_factor
                 << ", branch=" << seed.seed_branch_pdf
                 << ", dir=" << seed.seed_direction_pdf
                 << ", bounce=" << seed.bounce_pdf;

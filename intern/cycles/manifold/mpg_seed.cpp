@@ -651,12 +651,7 @@ bool mpg_generate_seed(KernelGlobals kg,
     return false;
   }
 
-  const int seed_attempt_budget = std::max(total_attempt_budget, 1);
-  const int failed_trials = std::max(total_trials - 1, 0);
-  const double consumed_probability = double(failed_trials) / double(seed_attempt_budget);
-  double remaining_probability = 1.0 - consumed_probability;
-  remaining_probability = std::max(remaining_probability, 0.0);
-  const float resample_factor = float(remaining_probability);
+  const float resample_factor = 1.0f / fmaxf(float(total_trials), 1.0f);
   const float normalized_pdf = accepted_seed_pdf * resample_factor;
   if (!(isfinite_safe(normalized_pdf) && normalized_pdf > 0.0f)) {
     failure_code = MPG_FAILURE_INVALID_SEED_PDF;
