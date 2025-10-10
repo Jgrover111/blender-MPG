@@ -262,14 +262,23 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     result.attempt_count = 0;
     result.seed_trial_count = seed.trial_count;
     result.seed_accepted_trial_count = seed.accepted_trial_count;
+    result.seed_guided_trial_count = seed.guided_trial_count;
+    result.seed_fallback_trial_count = seed.fallback_trial_count;
     result.seed_pdf_raw = seed.seed_pdf_raw;
     result.seed_pdf = seed.seed_pdf;
+    result.seed_resample_factor = seed.seed_resample_factor;
+    result.seed_branch = seed.branch;
     return result;
   }
   result.seed_pdf_raw = seed.seed_pdf_raw;
   result.seed_trial_count = seed.trial_count;
+  result.seed_accepted_trial_count = seed.accepted_trial_count;
+  result.seed_guided_trial_count = seed.guided_trial_count;
+  result.seed_fallback_trial_count = seed.fallback_trial_count;
   result.light = seed.light_sample;
   result.seed_pdf = seed.seed_pdf;
+  result.seed_resample_factor = seed.seed_resample_factor;
+  result.seed_branch = seed.branch;
   if (!is_zero(seed.direction)) {
     result.wi = normalize(seed.direction);
   }
@@ -284,6 +293,11 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   bool solved = false;
   int attempt_count = 0;
   MpgFailureCode solver_failure = MPG_FAILURE_NONE;
+
+  solution.seed_resample_factor = seed.seed_resample_factor;
+  solution.seed_branch = seed.branch;
+  solution.seed_guided_trial_count = seed.guided_trial_count;
+  solution.seed_fallback_trial_count = seed.fallback_trial_count;
 
   if (opt.max_bounces >= 2) {
     ++attempt_count;
@@ -420,17 +434,17 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   result.visibility = compute_visibility_after_update(kg, sd, light_sample, result);
 
-  const float p_seed = seed.seed_pdf;
+  const float p_seed = fmaxf(seed.seed_pdf, 1.0e-16f);
   result.seed_pdf = p_seed;
 #ifdef WITH_CYCLES_DEBUG
-  const int acceptance_trials = seed.accepted_trial_count;
+  const int total_trials = seed.trial_count;
   const float mitsuba_seed_pdf =
-      (isfinite_safe(seed.seed_pdf_raw) && seed.seed_pdf_raw > 0.0f && acceptance_trials > 0) ?
-          (seed.seed_pdf_raw * float(acceptance_trials)) :
+      (isfinite_safe(seed.seed_pdf_raw) && seed.seed_pdf_raw > 0.0f && total_trials > 0) ?
+          (seed.seed_pdf_raw * float(total_trials)) :
           0.0f;
-  if (acceptance_trials > 0 && mitsuba_seed_pdf > 0.0f) {
+  if (total_trials > 0 && mitsuba_seed_pdf > 0.0f) {
     if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
-      LOG_DEBUG << "MPG seed pdf parity (trials=" << acceptance_trials
+      LOG_DEBUG << "MPG seed pdf parity (trials=" << total_trials
                 << "): cycles=" << p_seed << ", Mitsuba=" << mitsuba_seed_pdf
                 << ", raw=" << seed.seed_pdf_raw;
     }

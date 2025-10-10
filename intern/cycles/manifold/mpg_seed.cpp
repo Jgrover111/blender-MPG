@@ -31,12 +31,16 @@ float mpg_rebuild_seed_pdf(const MpgSeedRay &seed)
     return 0.0f;
   }
 
-  const int acceptance_trials = seed.accepted_trial_count;
-  if (acceptance_trials <= 0) {
-    return 0.0f;
+  float resample_factor = seed.seed_resample_factor;
+  if (!(isfinite_safe(resample_factor) && resample_factor > 0.0f)) {
+    const int total_trials = seed.trial_count;
+    if (total_trials <= 0) {
+      return 0.0f;
+    }
+    resample_factor = float(total_trials);
   }
 
-  const float normalized_pdf = raw_pdf * float(acceptance_trials);
+  const float normalized_pdf = raw_pdf * resample_factor;
   if (!(isfinite_safe(normalized_pdf) && normalized_pdf > 0.0f)) {
     return 0.0f;
   }
@@ -455,17 +459,19 @@ bool mpg_generate_seed(KernelGlobals kg,
   }
 
   const int total_trials = guided_trials + fallback_trials;
+  if (total_trials <= 0) {
+    failure_code = MPG_FAILURE_INVALID_SEED_PDF;
+    return false;
+  }
   const int accepted_trials = (successful_branch == SeedTrialBranch::Guided) ? guided_trials :
                                                                         fallback_trials;
   if (accepted_trials <= 0) {
     failure_code = MPG_FAILURE_INVALID_SEED_PDF;
     return false;
   }
-  /* The candidate density must be renormalized by the acceptance probability of the branch that
-   * produced a valid specular hit. Guided and fallback cones are independent proposals, so only
-   * the attempts made with the successful branch affect the normalization. */
-  const int branch_trials = accepted_trials;
-  const float normalized_pdf = accepted_seed_pdf * float(branch_trials);
+
+  const float resample_factor = float(total_trials);
+  const float normalized_pdf = accepted_seed_pdf * resample_factor;
   if (!(isfinite_safe(normalized_pdf) && normalized_pdf > 0.0f)) {
     failure_code = MPG_FAILURE_INVALID_SEED_PDF;
     return false;
@@ -496,8 +502,13 @@ bool mpg_generate_seed(KernelGlobals kg,
   seed.direction = seed_direction;
   seed.seed_pdf_raw = accepted_seed_pdf;
   seed.trial_count = total_trials;
-  seed.accepted_trial_count = branch_trials;
-  seed.seed_pdf = normalized_pdf;
+  seed.accepted_trial_count = accepted_trials;
+  seed.guided_trial_count = guided_trials;
+  seed.fallback_trial_count = fallback_trials;
+  seed.seed_resample_factor = resample_factor;
+  seed.branch = (successful_branch == SeedTrialBranch::Guided) ? MPG_SEED_BRANCH_GUIDED :
+                                                                    MPG_SEED_BRANCH_FALLBACK;
+  seed.seed_pdf = fmaxf(normalized_pdf, 1.0e-16f);
   seed.light_sample = light_sample;
   seed.path_flag = path_flag;
   /* Keep the light endpoint provided by the Cycles light sampler. For distant/background
