@@ -179,8 +179,8 @@ bool mpg_generate_seed(KernelGlobals kg,
     geometric_normal_valid = true;
   }
 
-  float3 reflection_normal = shading_normal;
-  float3 transmission_normal = geometric_normal;
+  float3 reflection_normal = geometric_normal_valid ? geometric_normal : shading_normal;
+  float3 transmission_normal = geometric_normal_valid ? geometric_normal : shading_normal;
 
   float3 guided_axis = guide.mean_dir;
   bool guided_axis_valid = !is_zero(guided_axis);
@@ -350,13 +350,10 @@ bool mpg_generate_seed(KernelGlobals kg,
       return false;
     }
 
-    /* Bootstrap seeds and uniform fallbacks explore the full sphere and let the solver
-     * decide the valid manifold branch. Directional seeds must still respect the
-     * reflection/transmission hemisphere filtering. */
-    const bool skip_hemisphere_test = bootstrap_seed ||
-                                      (use_uniform_fallback &&
-                                       branch == SeedTrialBranch::Fallback);
-    if (!skip_hemisphere_test && !matches_hemisphere(candidate_direction)) {
+    /* Bootstrap seeds and uniform fallbacks still probe broadly but must respect the
+     * hemisphere test so rays never shoot across Ng. Directional seeds continue to obey
+     * the same filtering. */
+    if (!matches_hemisphere(candidate_direction)) {
       last_failure = MPG_FAILURE_SEED;
       return false;
     }
@@ -366,7 +363,7 @@ bool mpg_generate_seed(KernelGlobals kg,
     Ray ray;
     ray.P = mpg_surface_ray_offset(kg, sd, sd.P, normalized_direction);
     ray.D = normalized_direction;
-    ray.tmin = 0.0f;
+    ray.tmin = 1.0e-4f;
     ray.tmax = FLT_MAX;
     ray.time = sd.time;
     ray.self.prim = sd.prim;

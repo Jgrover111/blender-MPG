@@ -548,7 +548,7 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   float3 n_off = (dot(sd.Ng, ray_dir) >= 0.0f) ? sd.Ng : -sd.Ng;
   ray.P = ray_offset(sd.P, n_off);
   ray.D = ray_dir;
-  ray.tmin = 0.0f;
+  ray.tmin = 1.0e-4f;
   ray.tmax = distance;
   ray.time = sd.time;
   ray.self.prim = seed.prim;
@@ -877,7 +877,7 @@ float compute_visibility(KernelGlobals kg,
   }
   shadow_ray.P = ray_offset(eval.point, offset_normal);
   shadow_ray.D = eval.dir_sl;
-  shadow_ray.tmin = 0.0f;
+  shadow_ray.tmin = 1.0e-4f;
   float ray_length = eval.distance_sl;
   if (seed.light_sample.t == FLT_MAX) {
     ray_length = MPG_DISTANT_LIGHT_VISIBILITY_DISTANCE;
@@ -1450,7 +1450,7 @@ float compute_segment_visibility(KernelGlobals kg,
   Ray ray;
   ray.P = ray_offset(start_point, offset_normal);
   ray.D = dir;
-  ray.tmin = 0.0f;
+  ray.tmin = 1.0e-4f;
   ray.tmax = fmaxf(distance - 1.0e-4f, 0.0f);
   ray.time = time;
   ray.self.prim = skip_prim;

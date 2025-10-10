@@ -190,6 +190,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   }
   result.gate_mask = gate_mask;
 
+  const bool strict_gate_pass = (gate_mask & MPG_GATE_MASK_STRICT_PASS) != 0;
+
   if (gate_active) {
     if (!strict_gate && !relaxed_gate && !bootstrap_gate) {
       result.failure_code = MPG_FAILURE_GATE;
@@ -270,6 +272,12 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.seed_pdf = seed.seed_pdf;
   if (!is_zero(seed.direction)) {
     result.wi = normalize(seed.direction);
+  }
+
+  if (gate_active && !strict_gate_pass) {
+    result.failure_code = MPG_FAILURE_GATE;
+    result.attempt_count = 0;
+    return result;
   }
 
   MpgSolverOutput solution;
