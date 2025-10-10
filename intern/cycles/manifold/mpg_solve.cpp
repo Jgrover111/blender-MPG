@@ -83,6 +83,43 @@ float3 compute_distant_visibility_endpoint(const LightSample &light_sample, cons
   return origin + dir * MPG_DISTANT_LIGHT_VISIBILITY_DISTANCE;
 }
 
+bool build_primary_shading_data(const ShaderData &receiver_sd,
+                                const SpecularSurfaceGeometry &geometry,
+                                const MpgSeedRay &seed,
+                                const float u,
+                                const float v,
+                                ShaderData &out_sd)
+{
+  out_sd = ShaderData();
+  out_sd.P = surface_point_from_barycentric(geometry, u, v);
+  out_sd.time = receiver_sd.time;
+  out_sd.prim = seed.prim;
+  out_sd.object = seed.object;
+
+  float3 geom_normal = cross(geometry.dPdu, geometry.dPdv);
+  if (!is_zero(geom_normal)) {
+    geom_normal = safe_normalize(geom_normal);
+  }
+  else {
+    geom_normal = surface_normal_from_barycentric(geometry, u, v);
+    if (!is_zero(geom_normal)) {
+      geom_normal = safe_normalize(geom_normal);
+    }
+  }
+  if (is_zero(geom_normal)) {
+    return false;
+  }
+
+  const float3 receiver_to_primary = out_sd.P - receiver_sd.P;
+  if (!is_zero(receiver_to_primary) && dot(geom_normal, receiver_to_primary) < 0.0f) {
+    geom_normal = -geom_normal;
+  }
+
+  out_sd.Ng = geom_normal;
+  out_sd.N = geom_normal;
+  return true;
+}
+
 void copy_microfacet_to_parameters(const MicrofacetBsdf *microfacet, SpecularParameters &params)
 {
   params.has_microfacet = (microfacet != nullptr);
@@ -1157,11 +1194,13 @@ bool evaluate_double_bounce(const ShadingPoint &receiver,
   return true;
 }
 
-bool compute_double_bounce_jacobian(const ShadingPoint &receiver,
+bool compute_double_bounce_jacobian(KernelGlobals kg,
+                                    const ShaderData &sd,
+                                    const MpgSeedRay &primary_seed,
+                                    const MpgSeedRay &secondary_seed,
+                                    const ShadingPoint &receiver,
                                     const SpecularSurfaceGeometry &primary_geometry,
-                                    const SpecularParameters &primary_params,
                                     const SpecularSurfaceGeometry &secondary_geometry,
-                                    const SpecularParameters &secondary_params,
                                     const LightSample &light_sample,
                                     const float u1,
                                     const float v1,
@@ -1200,11 +1239,35 @@ bool compute_double_bounce_jacobian(const ShadingPoint &receiver,
     project_barycentrics(offset_u2, offset_v2);
 
     DoubleBounceEval offset_eval;
+    SpecularParameters offset_primary_params;
+    if (!specular_parameters_from_surface(
+            kg, sd, primary_geometry, primary_seed, offset_u1, offset_v1, offset_primary_params))
+    {
+      return false;
+    }
+
+    ShaderData offset_primary_sd;
+    if (!build_primary_shading_data(sd, primary_geometry, primary_seed, offset_u1, offset_v1, offset_primary_sd)) {
+      return false;
+    }
+
+    SpecularParameters offset_secondary_params;
+    if (!specular_parameters_from_surface(kg,
+                                          offset_primary_sd,
+                                          secondary_geometry,
+                                          secondary_seed,
+                                          offset_u2,
+                                          offset_v2,
+                                          offset_secondary_params))
+    {
+      return false;
+    }
+
     if (!evaluate_double_bounce(receiver,
                                 primary_geometry,
-                                primary_params,
+                                offset_primary_params,
                                 secondary_geometry,
-                                secondary_params,
+                                offset_secondary_params,
                                 light_sample,
                                 offset_u1,
                                 offset_v1,
@@ -1631,36 +1694,11 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   float secondary_v = clamp(secondary_seed.bary_v, 1.0e-4f, 1.0f - 1.0e-4f);
   project_barycentrics(secondary_u, secondary_v);
 
-  ShaderData primary_sd = {};
-  primary_sd.P = surface_point_from_barycentric(primary_geometry, primary_u, primary_v);
-  primary_sd.time = sd.time;
-  primary_sd.prim = seed.prim;
-  primary_sd.object = seed.object;
-
-  float3 primary_geom_normal = cross(primary_geometry.dPdu, primary_geometry.dPdv);
-  if (!is_zero(primary_geom_normal)) {
-    primary_geom_normal = safe_normalize(primary_geom_normal);
-  }
-  else {
-    primary_geom_normal = surface_normal_from_barycentric(primary_geometry, primary_u, primary_v);
-    if (!is_zero(primary_geom_normal)) {
-      primary_geom_normal = safe_normalize(primary_geom_normal);
-    }
-  }
-  if (is_zero(primary_geom_normal)) {
+  ShaderData primary_sd;
+  if (!build_primary_shading_data(sd, primary_geometry, seed, primary_u, primary_v, primary_sd)) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
-
-  const float3 receiver_to_primary = primary_sd.P - sd.P;
-  if (!is_zero(receiver_to_primary) && dot(primary_geom_normal, receiver_to_primary) < 0.0f) {
-    primary_geom_normal = -primary_geom_normal;
-  }
-
-  /* The oriented geometric normal is needed so specular_parameters_from_surface can offset the
-   * probe ray exactly like Mitsuba's implementation. */
-  primary_sd.Ng = primary_geom_normal;
-  primary_sd.N = primary_geom_normal;
 
   SpecularParameters secondary_params;
   if (!specular_parameters_from_surface(
@@ -1712,11 +1750,13 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     }
 
     float J[4][4];
-    if (!compute_double_bounce_jacobian(receiver,
+    if (!compute_double_bounce_jacobian(kg,
+                                        sd,
+                                        seed,
+                                        secondary_seed,
+                                        receiver,
                                         primary_geometry,
-                                        primary_params,
                                         secondary_geometry,
-                                        secondary_params,
                                         seed.light_sample,
                                         primary_u,
                                         primary_v,
@@ -1727,8 +1767,12 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                         eval.residual,
                                         J))
     {
-      failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
-      return false;
+      trust_radius *= 0.5f;
+      if (trust_radius < 1.0e-6f) {
+        failure_code = MPG_FAILURE_JACOBIAN_ZERO;
+        return false;
+      }
+      continue;
     }
 
     float delta[4];
@@ -1759,12 +1803,51 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     project_barycentrics(new_primary_u, new_primary_v);
     project_barycentrics(new_secondary_u, new_secondary_v);
 
+    SpecularParameters new_primary_params;
+    if (!specular_parameters_from_surface(
+            kg, sd, primary_geometry, seed, new_primary_u, new_primary_v, new_primary_params))
+    {
+      trust_radius *= 0.5f;
+      if (trust_radius < 1.0e-6f) {
+        failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+        return false;
+      }
+      continue;
+    }
+
+    ShaderData new_primary_sd;
+    if (!build_primary_shading_data(sd, primary_geometry, seed, new_primary_u, new_primary_v, new_primary_sd)) {
+      trust_radius *= 0.5f;
+      if (trust_radius < 1.0e-6f) {
+        failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+        return false;
+      }
+      continue;
+    }
+
+    SpecularParameters new_secondary_params;
+    if (!specular_parameters_from_surface(kg,
+                                          new_primary_sd,
+                                          secondary_geometry,
+                                          secondary_seed,
+                                          new_secondary_u,
+                                          new_secondary_v,
+                                          new_secondary_params))
+    {
+      trust_radius *= 0.5f;
+      if (trust_radius < 1.0e-6f) {
+        failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+        return false;
+      }
+      continue;
+    }
+
     DoubleBounceEval new_eval;
     if (!evaluate_double_bounce(receiver,
                                 primary_geometry,
-                                primary_params,
+                                new_primary_params,
                                 secondary_geometry,
-                                secondary_params,
+                                new_secondary_params,
                                 seed.light_sample,
                                 new_primary_u,
                                 new_primary_v,
@@ -1800,6 +1883,9 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
       secondary_u = new_secondary_u;
       secondary_v = new_secondary_v;
       eval = new_eval;
+      primary_params = new_primary_params;
+      secondary_params = new_secondary_params;
+      primary_sd = new_primary_sd;
       residual_norm = new_norm;
       trust_radius = fminf(trust_radius * 1.5f, 1.0f);
       if (prev_residual - residual_norm < 1.0e-6f) {
@@ -1834,9 +1920,18 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     return false;
   }
 
-  primary_sd.P = surface_point_from_barycentric(primary_geometry, primary_u, primary_v);
-  if (!specular_parameters_from_surface(
-          kg, primary_sd, secondary_geometry, secondary_seed, secondary_u, secondary_v, secondary_params))
+  if (!build_primary_shading_data(sd, primary_geometry, seed, primary_u, primary_v, primary_sd)) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+    return false;
+  }
+
+  if (!specular_parameters_from_surface(kg,
+                                        primary_sd,
+                                        secondary_geometry,
+                                        secondary_seed,
+                                        secondary_u,
+                                        secondary_v,
+                                        secondary_params))
   {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
