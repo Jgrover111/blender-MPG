@@ -86,8 +86,8 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
 
   pdf = 0.0f;
 
-  const float p_seed = mpg_rebuild_seed_pdf(seed);
-  if (!(p_seed > 0.0f)) {
+  const float p_seed = seed.seed_pdf;
+  if (!(isfinite_safe(p_seed) && p_seed > 0.0f)) {
     return false;
   }
 

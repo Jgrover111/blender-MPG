@@ -261,11 +261,13 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     result.seed_trial_count = seed.trial_count;
     result.seed_accepted_trial_count = seed.accepted_trial_count;
     result.seed_pdf_raw = seed.seed_pdf_raw;
+    result.seed_pdf = seed.seed_pdf;
     return result;
   }
   result.seed_pdf_raw = seed.seed_pdf_raw;
   result.seed_trial_count = seed.trial_count;
   result.light = seed.light_sample;
+  result.seed_pdf = seed.seed_pdf;
   if (!is_zero(seed.direction)) {
     result.wi = normalize(seed.direction);
   }
@@ -379,15 +381,13 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   light_sample.pdf_selection = pdf_selection;
 
   LightSample tmp = seed.light_sample;
-  /* Recompute the pre-MPG NEE pdf at the receiver. The light update routine expects
-   * `ls->pdf` without the light-selection probability and multiplies it back in, so
-   * temporarily strip it to avoid squaring the factor. */
+  /* Recompute the pre-MPG NEE pdf at the receiver. Strip the selection probability while the
+   * light sample is updated so it is re-applied exactly once. */
   tmp.pdf /= pdf_selection;
   tmp.pdf_selection = 1.0f;
   light_sample_update(kg, &tmp, sd.P, sd.N, path_flag);
-  tmp.pdf *= pdf_selection;
-  tmp.pdf_selection = pdf_selection;
   float nee_pdf_sa = mpg_light_sample_pdf_solid(kg, sd, tmp);
+  nee_pdf_sa *= pdf_selection;
   result.nee_pdf = nee_pdf_sa;
   if (!isfinite_safe(nee_pdf_sa)) {
     result.attempt_count = attempt_count;
@@ -412,7 +412,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   result.visibility = compute_visibility_after_update(kg, sd, light_sample, result);
 
-  const float p_seed = mpg_rebuild_seed_pdf(seed);
+  const float p_seed = seed.seed_pdf;
+  result.seed_pdf = p_seed;
 #ifdef WITH_CYCLES_DEBUG
   const int acceptance_trials = seed.accepted_trial_count;
   const float mitsuba_seed_pdf =
@@ -434,14 +435,15 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   if (!isfinite_safe(p_seed) || p_seed <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_INVALID_SEED_PDF;
-    result.seed_pdf = p_seed;
     return result;
   }
 
-  const float J_total = fabsf(solution.jacobian_total);
+  const float raw_jacobian = solution.jacobian_total;
+  const float J_total = fabsf(raw_jacobian);
   if (!isfinite_safe(J_total) || J_total <= 0.0f) {
     result.attempt_count = attempt_count;
     result.failure_code = MPG_FAILURE_JACOBIAN_ZERO;
+    result.jacobian_total = raw_jacobian;
     return result;
   }
   result.jacobian_total = J_total;

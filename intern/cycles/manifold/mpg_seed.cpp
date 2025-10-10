@@ -410,6 +410,11 @@ bool mpg_generate_seed(KernelGlobals kg,
    * produced a valid specular hit. Guided and fallback cones are independent proposals, so only
    * the attempts made with the successful branch affect the normalization. */
   const int branch_trials = accepted_trials;
+  const float normalized_pdf = accepted_seed_pdf * float(branch_trials);
+  if (!(isfinite_safe(normalized_pdf) && normalized_pdf > 0.0f)) {
+    failure_code = MPG_FAILURE_INVALID_SEED_PDF;
+    return false;
+  }
   /* Sample an emitter using the Cycles light sampling routine. */
   const float3 rand_light = path_state_rng_3D(kg, &rng_state, PRNG_LIGHT);
   LightSample light_sample;
@@ -437,11 +442,7 @@ bool mpg_generate_seed(KernelGlobals kg,
   seed.seed_pdf_raw = accepted_seed_pdf;
   seed.trial_count = total_trials;
   seed.accepted_trial_count = branch_trials;
-  seed.seed_pdf = mpg_rebuild_seed_pdf(seed);
-  if (seed.seed_pdf <= 0.0f) {
-    failure_code = MPG_FAILURE_INVALID_SEED_PDF;
-    return false;
-  }
+  seed.seed_pdf = normalized_pdf;
   seed.light_sample = light_sample;
   seed.path_flag = path_flag;
   /* Keep the light endpoint provided by the Cycles light sampler. For distant/background
