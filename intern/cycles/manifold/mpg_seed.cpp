@@ -20,6 +20,7 @@
 #include "util/math_intersect.h"
 #include "util/hash.h"
 
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 
@@ -32,13 +33,9 @@ float mpg_rebuild_seed_pdf(const MpgSeedRay &seed)
     return 0.0f;
   }
 
-  float resample_factor = seed.seed_resample_factor;
+  const float resample_factor = seed.seed_resample_factor;
   if (!(isfinite_safe(resample_factor) && resample_factor > 0.0f)) {
-    const int total_trials = seed.trial_count;
-    if (total_trials <= 0) {
-      return 0.0f;
-    }
-    resample_factor = float(total_trials);
+    return 0.0f;
   }
 
   const float normalized_pdf = raw_pdf * resample_factor;
@@ -618,7 +615,12 @@ bool mpg_generate_seed(KernelGlobals kg,
     return false;
   }
 
-  const float resample_factor = float(total_trials);
+  const int seed_attempt_budget = std::max(total_attempt_budget, 1);
+  const int failed_trials = std::max(total_trials - 1, 0);
+  const double consumed_probability = double(failed_trials) / double(seed_attempt_budget);
+  double remaining_probability = 1.0 - consumed_probability;
+  remaining_probability = std::max(remaining_probability, 0.0);
+  const float resample_factor = float(remaining_probability);
   const float normalized_pdf = accepted_seed_pdf * resample_factor;
   if (!(isfinite_safe(normalized_pdf) && normalized_pdf > 0.0f)) {
     failure_code = MPG_FAILURE_INVALID_SEED_PDF;
@@ -655,7 +657,7 @@ bool mpg_generate_seed(KernelGlobals kg,
   seed.accepted_trial_count = accepted_trials;
   seed.guided_trial_count = guided_trials;
   seed.fallback_trial_count = fallback_trials;
-  seed.seed_resample_factor = resample_factor;
+  seed.seed_resample_factor = fmaxf(resample_factor, 1.0e-16f);
   seed.branch = (successful_branch == SeedTrialBranch::Guided) ? MPG_SEED_BRANCH_GUIDED :
                                                                     MPG_SEED_BRANCH_FALLBACK;
   seed.seed_pdf = fmaxf(normalized_pdf, 1.0e-16f);
