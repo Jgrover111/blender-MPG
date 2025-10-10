@@ -68,6 +68,9 @@ struct SpecularEval {
   bool refractive = false;
 };
 
+float3 surface_point_from_barycentric(const SpecularSurfaceGeometry &geometry, const float u, const float v);
+float3 surface_normal_from_barycentric(const SpecularSurfaceGeometry &geometry, const float u, const float v);
+
 float3 compute_distant_visibility_endpoint(const LightSample &light_sample, const float3 &origin)
 {
   if (light_sample.t != FLT_MAX) {
