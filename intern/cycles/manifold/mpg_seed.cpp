@@ -182,50 +182,69 @@ bool mpg_generate_seed(KernelGlobals kg,
   float3 reflection_normal = shading_normal;
   float3 transmission_normal = geometric_normal;
 
-  bool prefer_transmission = (seed_lobe == SeedLobe::Transmission);
-  if (seed_lobe == SeedLobe::Dual) {
-    if (!prefer_transmission) {
-      /* Use the guided axis (when available) to decide whether we should bias the seed toward
-       * the refractive or reflective hemisphere. Falling back to the view direction provides a
-       * deterministic choice when the guide has no dominant direction yet. */
-      const float3 reference_dir = (!is_zero(guide.mean_dir)) ? guide.mean_dir : sd.wi;
-      const bool reference_valid = !is_zero(reference_dir);
-      if (reference_valid) {
-        const float ref_dot_trans = dot(reference_dir, transmission_normal);
-        const float ref_dot_refl = dot(reference_dir, reflection_normal);
-        prefer_transmission = fabsf(ref_dot_trans) > fabsf(ref_dot_refl);
+  float3 guided_axis = guide.mean_dir;
+  bool guided_axis_valid = !is_zero(guided_axis);
+  if (guided_axis_valid) {
+    guided_axis = safe_normalize(guided_axis);
+    guided_axis_valid = !is_zero(guided_axis);
+  }
+
+  const float transmission_dot_wi = geometric_normal_valid ? dot(transmission_normal, sd.wi) : 0.0f;
+  const float transmission_hemisphere_sign = geometric_normal_valid ?
+                                                 ((transmission_dot_wi >= 0.0f) ? -1.0f : 1.0f) :
+                                                 1.0f;
+  const float hemisphere_epsilon = 1.0e-5f;
+
+  bool prefer_transmission = false;
+  bool prefer_transmission_from_guide = false;
+
+  if (guided_axis_valid && geometric_normal_valid) {
+    const float dot_axis_transmission = dot(guided_axis, transmission_normal);
+    if (fabsf(dot_axis_transmission) > hemisphere_epsilon) {
+      if (fabsf(transmission_dot_wi) > hemisphere_epsilon) {
+        prefer_transmission = (dot_axis_transmission * transmission_dot_wi < 0.0f);
+      }
+      else {
+        prefer_transmission = (dot_axis_transmission < 0.0f);
+      }
+      prefer_transmission_from_guide = true;
+    }
+  }
+
+  if (!prefer_transmission_from_guide) {
+    if (seed_lobe == SeedLobe::Transmission) {
+      prefer_transmission = true;
+    }
+    else if (seed_lobe == SeedLobe::Dual) {
+      bool decided = false;
+      if (guided_axis_valid && geometric_normal_valid) {
+        const float ref_dot_trans = dot(guided_axis, transmission_normal);
+        const float ref_dot_refl = dot(guided_axis, reflection_normal);
+        if (fabsf(ref_dot_trans) > hemisphere_epsilon || fabsf(ref_dot_refl) > hemisphere_epsilon) {
+          prefer_transmission = fabsf(ref_dot_trans) > fabsf(ref_dot_refl);
+          decided = true;
+        }
+      }
+      if (!decided) {
+        /* Fall back to the view direction when the guide does not provide a stable mean yet. */
+        const float3 reference_dir = (!is_zero(guide.mean_dir)) ? guide.mean_dir : sd.wi;
+        const bool reference_valid = !is_zero(reference_dir);
+        if (reference_valid) {
+          const float3 reference = safe_normalize(reference_dir);
+          if (!is_zero(reference)) {
+            const float ref_dot_trans = dot(reference, transmission_normal);
+            const float ref_dot_refl = dot(reference, reflection_normal);
+            prefer_transmission = fabsf(ref_dot_trans) > fabsf(ref_dot_refl);
+          }
+        }
       }
     }
   }
 
   bool using_transmission_hemisphere = prefer_transmission && geometric_normal_valid;
-  float3 hemisphere_normal = using_transmission_hemisphere ? transmission_normal : reflection_normal;
-  bool hemisphere_valid = !is_zero(hemisphere_normal);
-  if (!hemisphere_valid) {
-    hemisphere_normal = reflection_normal;
-    hemisphere_valid = !is_zero(hemisphere_normal);
-    using_transmission_hemisphere = false;
-  }
-
-  float hemisphere_sign = 1.0f;
-  if (using_transmission_hemisphere) {
-    const float dot_ng_wi = dot(transmission_normal, sd.wi);
-    hemisphere_sign = (dot_ng_wi >= 0.0f) ? -1.0f : 1.0f;
-  }
-
-  const auto matches_hemisphere = [&](const float3 &direction) {
-    if (!hemisphere_valid) {
-      return true;
-    }
-    if (using_transmission_hemisphere) {
-      const float dot_ng_dir = dot(direction, transmission_normal);
-      return dot_ng_dir * hemisphere_sign >= 0.0f;
-    }
-    return dot(direction, hemisphere_normal) >= 0.0f;
-  };
 
   /* Determine the dominant seed direction from the guided mean with optional jitter. */
-  float3 axis = guide.mean_dir;
+  float3 axis = guided_axis_valid ? guided_axis : guide.mean_dir;
   if (is_zero(axis)) {
     /* Bootstrap seeds rely on a stable geometric frame. Ignore shading normal
      * perturbations when no guided mean is available to mirror the reference
@@ -242,6 +261,45 @@ bool mpg_generate_seed(KernelGlobals kg,
     axis = safe_normalize(axis);
     axis_valid = !is_zero(axis);
   }
+
+  if (axis_valid && geometric_normal_valid) {
+    const float dot_axis_transmission = dot(axis, transmission_normal);
+    if (fabsf(dot_axis_transmission) > hemisphere_epsilon &&
+        (dot_axis_transmission * transmission_hemisphere_sign) >= 0.0f)
+    {
+      using_transmission_hemisphere = true;
+      prefer_transmission = true;
+    }
+  }
+
+  float3 hemisphere_normal = using_transmission_hemisphere ? transmission_normal : reflection_normal;
+  bool hemisphere_valid = !is_zero(hemisphere_normal);
+  if (!hemisphere_valid && using_transmission_hemisphere) {
+    hemisphere_normal = reflection_normal;
+    hemisphere_valid = !is_zero(hemisphere_normal);
+    using_transmission_hemisphere = false;
+  }
+  if (!hemisphere_valid) {
+    hemisphere_normal = reflection_normal;
+    hemisphere_valid = !is_zero(hemisphere_normal);
+    using_transmission_hemisphere = false;
+  }
+
+  float hemisphere_sign = 1.0f;
+  if (using_transmission_hemisphere) {
+    hemisphere_sign = transmission_hemisphere_sign;
+  }
+
+  const auto matches_hemisphere = [&](const float3 &direction) {
+    if (!hemisphere_valid) {
+      return true;
+    }
+    if (using_transmission_hemisphere) {
+      const float dot_ng_dir = dot(direction, transmission_normal);
+      return dot_ng_dir * hemisphere_sign >= 0.0f;
+    }
+    return dot(direction, hemisphere_normal) >= 0.0f;
+  };
 
   if (axis_valid && !matches_hemisphere(axis)) {
     if (!using_transmission_hemisphere) {
