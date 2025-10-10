@@ -64,6 +64,8 @@ struct MpgSeedRay {
   float3 direction = zero_float3();
   float seed_pdf = 0.0f;
   float seed_pdf_raw = 0.0f;
+  float seed_branch_pdf = 0.0f;
+  float seed_direction_pdf = 0.0f;
   LightSample light_sample = {};
   uint32_t path_flag = 0;
   int object = -1;
@@ -112,6 +114,8 @@ struct MpgSolverOutput {
   Spectrum specular_throughput = zero_spectrum();
   float seed_resample_factor = 0.0f;
   MpgSeedBranch seed_branch = MPG_SEED_BRANCH_NONE;
+  float seed_branch_pdf = 0.0f;
+  float seed_direction_pdf = 0.0f;
   int seed_guided_trial_count = 0;
   int seed_fallback_trial_count = 0;
   MpgSpecularVertex specular_vertices[2];

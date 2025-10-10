@@ -30,4 +30,8 @@ bool mpg_generate_seed(KernelGlobals kg,
 
 float mpg_rebuild_seed_pdf(const MpgSeedRay &seed);
 
+float mpg_seed_branch_probability(const int guided_attempt_budget,
+                                  const int fallback_attempt_budget,
+                                  MpgSeedBranch branch);
+
 CCL_NAMESPACE_END

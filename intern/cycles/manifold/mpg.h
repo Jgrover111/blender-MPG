@@ -38,6 +38,8 @@ struct MpgResult {
   float seed_pdf = 0.0f;
   float seed_pdf_raw = 0.0f;
   float seed_resample_factor = 0.0f;
+  float seed_branch_pdf = 0.0f;
+  float seed_direction_pdf = 0.0f;
   float light_pdf = 0.0f;
   Spectrum spec_weight = zero_spectrum();
   LightSample light = {};

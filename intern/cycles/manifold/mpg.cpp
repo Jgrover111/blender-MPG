@@ -267,6 +267,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     result.seed_pdf_raw = seed.seed_pdf_raw;
     result.seed_pdf = seed.seed_pdf;
     result.seed_resample_factor = seed.seed_resample_factor;
+    result.seed_branch_pdf = seed.seed_branch_pdf;
+    result.seed_direction_pdf = seed.seed_direction_pdf;
     result.seed_branch = seed.branch;
     return result;
   }
@@ -278,6 +280,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.light = seed.light_sample;
   result.seed_pdf = seed.seed_pdf;
   result.seed_resample_factor = seed.seed_resample_factor;
+  result.seed_branch_pdf = seed.seed_branch_pdf;
+  result.seed_direction_pdf = seed.seed_direction_pdf;
   result.seed_branch = seed.branch;
   if (!is_zero(seed.direction)) {
     result.wi = normalize(seed.direction);
@@ -296,6 +300,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   solution.seed_resample_factor = seed.seed_resample_factor;
   solution.seed_branch = seed.branch;
+  solution.seed_branch_pdf = seed.seed_branch_pdf;
+  solution.seed_direction_pdf = seed.seed_direction_pdf;
   solution.seed_guided_trial_count = seed.guided_trial_count;
   solution.seed_fallback_trial_count = seed.fallback_trial_count;
 
@@ -446,7 +452,9 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
       LOG_DEBUG << "MPG seed pdf parity (trials=" << total_trials
                 << "): cycles=" << p_seed << ", Mitsuba=" << mitsuba_seed_pdf
-                << ", raw=" << seed.seed_pdf_raw;
+                << ", raw=" << seed.seed_pdf_raw
+                << ", branch=" << seed.seed_branch_pdf
+                << ", dir=" << seed.seed_direction_pdf;
     }
     if (isfinite_safe(p_seed) && isfinite_safe(mitsuba_seed_pdf)) {
       const float tolerance = fmaxf(fabsf(mitsuba_seed_pdf), 1.0e-16f) * 1.0e-4f;
