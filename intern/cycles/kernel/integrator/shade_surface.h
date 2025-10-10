@@ -210,6 +210,7 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
                                                             const bool success,
                                                             const float visibility,
                                                             const float seed_pdf,
+                                                            const float bounce_pdf,
                                                             const float light_pdf,
                                                             const float jacobian,
                                                             const float pdf_mpg,
@@ -347,10 +348,16 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
 
   if (kernel_data.film.pass_manifold_mis != PASS_UNUSED) {
     if (manifold_pdf_factors_valid || sample == 0) {
-      float3 mis_values = make_float3(pdf_mpg, mis_denominator, mis_weight);
+      const bool denominator_valid = (isfinite_safe(mis_denominator) && mis_denominator >= 0.0f);
+      const bool bounce_valid = (isfinite_safe(bounce_pdf) && bounce_pdf >= 0.0f);
+      /* Store the technique pdf, final MIS weight (including the bounce correction),
+       * and the bounce-selection pdf for parity comparisons. */
+      float3 mis_values = make_float3(
+          pdf_mpg, mis_weight, bounce_valid ? bounce_pdf : 0.0f);
       const bool mis_valid = (isfinite_safe(mis_values.x) &&
                               isfinite_safe(mis_values.y) &&
-                              isfinite_safe(mis_values.z));
+                              denominator_valid &&
+                              bounce_valid);
       if (!mis_valid) {
         mis_values = make_float3(0.0f, 0.0f, 0.0f);
       }
@@ -412,6 +419,7 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
                                                             const bool success,
                                                             const float visibility,
                                                             const float seed_pdf,
+                                                            const float bounce_pdf,
                                                             const float light_pdf,
                                                             const float jacobian,
                                                             const float pdf_mpg,
@@ -433,6 +441,7 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
   (void)success;
   (void)visibility;
   (void)seed_pdf;
+  (void)bounce_pdf;
   (void)light_pdf;
   (void)jacobian;
   (void)pdf_mpg;
@@ -929,6 +938,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   bool manifold_success = false;
   float manifold_visibility = 0.0f;
   float manifold_seed_pdf = -1.0f;
+  float manifold_bounce_pdf = -1.0f;
   float manifold_light_pdf = -1.0f;
   float manifold_abs_jacobian = -1.0f;
   float manifold_pdf = 0.0f;
@@ -1093,6 +1103,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     const bool mpg_failure = (mpg_result.failure_code != MPG_FAILURE_NONE);
 
     manifold_seed_pdf = -1.0f;
+    manifold_bounce_pdf = -1.0f;
     manifold_light_pdf = -1.0f;
     manifold_abs_jacobian = -1.0f;
     manifold_pdf = 0.0f;
@@ -1120,7 +1131,8 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                   pdf_mpg_sa > 0.0f);
 
     if (manifold_pdf_factors_valid) {
-      manifold_seed_pdf = mpg_result.seed_pdf * mpg_result.bounce_pdf;
+      manifold_seed_pdf = mpg_result.seed_pdf;
+      manifold_bounce_pdf = mpg_result.bounce_pdf;
       manifold_light_pdf = mpg_result.light_pdf;
       manifold_abs_jacobian = jacobian_abs;
       manifold_pdf = pdf_mpg_sa;
@@ -1192,12 +1204,17 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     }
 
     const float mis_denominator = pdf_bsdf_sa + pdf_guided_sa + pdf_nee + pdf_mpg;
-    const float mis_weight =
-        (mis_denominator > 0.0f && isfinite_safe(mis_denominator)) ? pdf_mpg / mis_denominator : 0.0f;
+    float mis_weight = 0.0f;
+    if (pdf_mpg > 0.0f &&
+        mis_denominator > 0.0f &&
+        isfinite_safe(mis_denominator) &&
+        bounce_pdf_valid) {
+      const float base_weight = pdf_mpg / mis_denominator;
+      const float inv_p_bounce = 1.0f / fmaxf(mpg_result.bounce_pdf, 1.0e-16f);
+      mis_weight = base_weight * inv_p_bounce;
 
-    if (pdf_mpg > 0.0f && mis_denominator > 0.0f && isfinite_safe(mis_denominator)) {
-      const float expected_weight = pdf_mpg / mis_denominator;
-      if (isfinite_safe(expected_weight)) {
+      if (isfinite_safe(base_weight) && isfinite_safe(mis_weight)) {
+        const float expected_weight = base_weight * inv_p_bounce;
         const float diff = fabsf(expected_weight - mis_weight);
         const float tolerance = fmaxf(1.0e-6f, fabsf(expected_weight) * 1.0e-5f);
         kernel_assert(diff <= tolerance);
@@ -1287,6 +1304,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                          manifold_success,
                                          manifold_visibility,
                                          manifold_seed_pdf,
+                                         manifold_bounce_pdf,
                                          manifold_light_pdf,
                                          manifold_abs_jacobian,
                                          manifold_pdf,
