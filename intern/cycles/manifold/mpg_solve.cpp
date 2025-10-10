@@ -1426,8 +1426,18 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     float new_v = v - delta.y;
     project_barycentrics(new_u, new_v);
 
+    SpecularParameters new_params;
+    if (!specular_parameters_from_surface(kg, sd, geometry, seed, new_u, new_v, new_params)) {
+      trust_radius *= 0.5f;
+      if (trust_radius < 1e-6f) {
+        failure_code = (failure_code != MPG_FAILURE_NONE) ? failure_code : MPG_FAILURE_GEOMETRY;
+        return false;
+      }
+      continue;
+    }
+
     SpecularEval new_eval;
-    evaluate_specular(shading_point, seed, geometry, params, new_u, new_v, new_eval);
+    evaluate_specular(shading_point, seed, geometry, new_params, new_u, new_v, new_eval);
     if (new_eval.tir) {
       trust_radius *= 0.5f;
       if (trust_radius < 1e-6f) {
@@ -1447,6 +1457,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
       u = new_u;
       v = new_v;
       eval = new_eval;
+      params = new_params;
       residual_norm = new_residual_norm;
       trust_radius = fminf(trust_radius * 1.5f, 1.0f);
       if (prev_residual - residual_norm < 1e-6f) {
