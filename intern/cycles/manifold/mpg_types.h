@@ -68,6 +68,7 @@ struct ShadingPoint {
 
 struct MpgSeedRay {
   float3 direction = zero_float3();
+  float3 direction_normalized = zero_float3();
   float seed_pdf = 0.0f;
   float seed_pdf_raw = 0.0f;
   float seed_branch_pdf = 0.0f;
@@ -89,6 +90,8 @@ struct MpgSeedRay {
   MpgSeedBranch branch = MPG_SEED_BRANCH_NONE;
   MpgSeedScatter scatter = MPG_SEED_SCATTER_NONE;
   int bounce_count = 1;
+  uint8_t tau_bits = 0;
+  uint8_t tau_count = 0;
   bool use_smooth_normals = false;
 };
 

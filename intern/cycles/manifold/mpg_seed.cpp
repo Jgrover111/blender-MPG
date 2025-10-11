@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdint>
 
 CCL_NAMESPACE_BEGIN
 
@@ -637,6 +638,9 @@ bool mpg_generate_seed(KernelGlobals kg,
   float accepted_branch_pdf = 0.0f;
   float accepted_direction_pdf = 0.0f;
   float accepted_scatter_pdf = 0.0f;
+  float3 accepted_direction_normalized = zero_float3();
+  uint8_t accepted_tau_bits = 0;
+  uint8_t accepted_tau_count = 0;
 
   const int uniform_attempt_budget = bootstrap_seed ? 32 : (use_uniform_fallback ? 32 : 16);
   const int guided_attempt_budget = use_uniform_sphere_sampling ? 0 : uniform_attempt_budget;
@@ -656,7 +660,21 @@ bool mpg_generate_seed(KernelGlobals kg,
       mpg_seed_branch_probability(guided_attempt_budget, fallback_attempt_budget, MPG_SEED_BRANCH_FALLBACK);
   const float fallback_one_minus_cos = one_minus_cos(0.6f * M_PI_F);
 
-  auto intersections_equivalent = [](const Intersection &a, const Intersection &b) -> bool {
+  const uint8_t base_tau_count = (selected_bounce_count > 0) ? static_cast<uint8_t>(selected_bounce_count) : 0;
+  const float uniqueness_threshold = 1.0e-4f;
+
+  auto trial_signatures_equivalent = [&](const Intersection &a,
+                                         const float3 &dir_a,
+                                         const uint8_t tau_bits_a,
+                                         const uint8_t tau_count_a,
+                                         const Intersection &b,
+                                         const float3 &dir_b,
+                                         const uint8_t tau_bits_b,
+                                         const uint8_t tau_count_b) -> bool {
+    if (tau_count_a != tau_count_b || tau_bits_a != tau_bits_b) {
+      return false;
+    }
+
     if (a.prim != b.prim || a.object != b.object || a.type != b.type) {
       return false;
     }
@@ -669,6 +687,15 @@ bool mpg_generate_seed(KernelGlobals kg,
     const float ref_t = fabsf(b.t);
     const float relative_tolerance = 1.0e-4f * fmaxf(ref_t, 1.0f);
     if (fabsf(a.t - b.t) > relative_tolerance) {
+      return false;
+    }
+
+    if (is_zero(dir_a) || is_zero(dir_b)) {
+      return false;
+    }
+
+    const float dot_dir = fmaxf(-1.0f, fminf(1.0f, dot(dir_a, dir_b)));
+    if (fabsf(dot_dir - 1.0f) >= uniqueness_threshold) {
       return false;
     }
 
@@ -786,9 +813,15 @@ bool mpg_generate_seed(KernelGlobals kg,
                              const float candidate_scatter_pdf,
                              Intersection &out_isect,
                              const SeedTrialBranch branch,
-                             const bool record_accept) -> bool {
+                             const bool record_accept,
+                             float3 &out_normalized_direction,
+                             uint8_t &out_tau_bits,
+                             uint8_t &out_tau_count) -> bool {
     int &branch_trials = (branch == SeedTrialBranch::Guided) ? guided_trials : fallback_trials;
     ++branch_trials;
+    out_normalized_direction = zero_float3();
+    out_tau_bits = 0;
+    out_tau_count = 0;
     if (is_zero(candidate_direction) || candidate_pdf <= 0.0f || candidate_scatter_pdf <= 0.0f) {
       last_failure = MPG_FAILURE_INVALID_SEED_PDF;
       return false;
@@ -802,7 +835,16 @@ bool mpg_generate_seed(KernelGlobals kg,
       return false;
     }
 
-    const float3 normalized_direction = normalize(candidate_direction);
+    const float3 normalized_direction = safe_normalize(candidate_direction);
+    if (is_zero(normalized_direction)) {
+      last_failure = MPG_FAILURE_INVALID_SEED_PDF;
+      return false;
+    }
+    out_normalized_direction = normalized_direction;
+    out_tau_count = base_tau_count;
+    if (base_tau_count > 0 && scatter_branch == MPG_SEED_SCATTER_REFRACTION) {
+      out_tau_bits = 1u;
+    }
 
     Ray ray;
     ray.P = mpg_surface_ray_offset(kg, sd, sd.P, normalized_direction);
@@ -842,6 +884,9 @@ bool mpg_generate_seed(KernelGlobals kg,
       seed.use_smooth_normals = has_smooth_normals && (scatter_branch != MPG_SEED_SCATTER_REFRACTION);
       successful_branch = branch;
       successful_scatter_branch = scatter_branch;
+      accepted_direction_normalized = normalized_direction;
+      accepted_tau_bits = out_tau_bits;
+      accepted_tau_count = out_tau_count;
     }
     return true;
   };
@@ -860,6 +905,9 @@ bool mpg_generate_seed(KernelGlobals kg,
     sample_trial(attempt, rand, branch, branch_pdf, candidate_direction, direction_pdf, scatter_branch, scatter_pdf);
 
     const float candidate_pdf = direction_pdf * branch_pdf * scatter_pdf;
+    float3 candidate_normalized_direction = zero_float3();
+    uint8_t candidate_tau_bits = 0;
+    uint8_t candidate_tau_count = 0;
     seed_valid = try_seed_sample(candidate_direction,
                                  candidate_pdf,
                                  branch_pdf,
@@ -868,7 +916,15 @@ bool mpg_generate_seed(KernelGlobals kg,
                                  scatter_pdf,
                                  isect,
                                  branch,
-                                 true);
+                                 true,
+                                 candidate_normalized_direction,
+                                 candidate_tau_bits,
+                                 candidate_tau_count);
+    if (seed_valid) {
+      accepted_direction_normalized = candidate_normalized_direction;
+      accepted_tau_bits = candidate_tau_bits;
+      accepted_tau_count = candidate_tau_count;
+    }
   }
 
   if (!seed_valid) {
@@ -898,6 +954,9 @@ bool mpg_generate_seed(KernelGlobals kg,
 
     const float candidate_pdf = direction_pdf * branch_pdf * scatter_pdf;
     Intersection repeat_isect = {};
+    float3 repeat_normalized_direction = zero_float3();
+    uint8_t repeat_tau_bits = 0;
+    uint8_t repeat_tau_count = 0;
     const bool repeat_success = try_seed_sample(candidate_direction,
                                                 candidate_pdf,
                                                 branch_pdf,
@@ -906,7 +965,10 @@ bool mpg_generate_seed(KernelGlobals kg,
                                                 scatter_pdf,
                                                 repeat_isect,
                                                 branch,
-                                                false);
+                                                false,
+                                                repeat_normalized_direction,
+                                                repeat_tau_bits,
+                                                repeat_tau_count);
 
     if (!repeat_success) {
       continue;
@@ -916,7 +978,14 @@ bool mpg_generate_seed(KernelGlobals kg,
       continue;
     }
 
-    if (!intersections_equivalent(repeat_isect, accepted_isect)) {
+    if (!trial_signatures_equivalent(repeat_isect,
+                                     repeat_normalized_direction,
+                                     repeat_tau_bits,
+                                     repeat_tau_count,
+                                     accepted_isect,
+                                     accepted_direction_normalized,
+                                     accepted_tau_bits,
+                                     accepted_tau_count)) {
       continue;
     }
 
@@ -985,6 +1054,7 @@ bool mpg_generate_seed(KernelGlobals kg,
   }
 
   seed.direction = seed_direction;
+  seed.direction_normalized = accepted_direction_normalized;
   seed.seed_pdf_raw = accepted_seed_pdf;
   seed.seed_branch_pdf = accepted_branch_pdf;
   seed.seed_direction_pdf = accepted_direction_pdf;
@@ -997,6 +1067,8 @@ bool mpg_generate_seed(KernelGlobals kg,
   seed.branch = (successful_branch == SeedTrialBranch::Guided) ? MPG_SEED_BRANCH_GUIDED :
                                                                     MPG_SEED_BRANCH_FALLBACK;
   seed.scatter = successful_scatter_branch;
+  seed.tau_bits = accepted_tau_bits;
+  seed.tau_count = accepted_tau_count;
   seed.seed_pdf = fmaxf(normalized_pdf, 1.0e-16f);
   seed.light_sample = light_sample;
   seed.path_flag = path_flag;

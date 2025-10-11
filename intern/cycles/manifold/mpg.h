@@ -16,6 +16,8 @@
 
 #include "util/math.h"
 
+#include <cstdint>
+
 CCL_NAMESPACE_BEGIN
 
 struct MpgOptions {
@@ -42,6 +44,9 @@ struct MpgResult {
   float seed_branch_pdf = 0.0f;
   float seed_direction_pdf = 0.0f;
   float seed_scatter_pdf = 0.0f;
+  float3 seed_direction_normalized = zero_float3();
+  uint8_t seed_tau_bits = 0;
+  uint8_t seed_tau_count = 0;
   float bounce_pdf = 1.0f;
   float bounce_pdf_raw = 1.0f;
   /* Light pdf converted to receiver solid angle (includes jacobian_total). */

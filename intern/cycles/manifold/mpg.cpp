@@ -270,6 +270,9 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     result.seed_branch_pdf = seed.seed_branch_pdf;
     result.seed_direction_pdf = seed.seed_direction_pdf;
     result.seed_scatter_pdf = seed.seed_scatter_pdf;
+    result.seed_direction_normalized = seed.direction_normalized;
+    result.seed_tau_bits = seed.tau_bits;
+    result.seed_tau_count = seed.tau_count;
     result.seed_branch = seed.branch;
     result.seed_scatter = seed.scatter;
     result.bounce_pdf_raw = seed.bounce_pdf_raw;
@@ -288,6 +291,9 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.seed_branch_pdf = seed.seed_branch_pdf;
   result.seed_direction_pdf = seed.seed_direction_pdf;
   result.seed_scatter_pdf = seed.seed_scatter_pdf;
+  result.seed_direction_normalized = seed.direction_normalized;
+  result.seed_tau_bits = seed.tau_bits;
+  result.seed_tau_count = seed.tau_count;
   result.seed_branch = seed.branch;
   result.seed_scatter = seed.scatter;
   result.bounce_pdf_raw = seed.bounce_pdf_raw;
