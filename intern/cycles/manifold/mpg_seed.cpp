@@ -92,6 +92,111 @@ float mpg_seed_branch_probability(const int guided_attempt_budget,
   return fminf(fmaxf(probability, 0.0f), 1.0f);
 }
 
+static float mpg_uniform_cone_pdf(const float one_minus_cos_angle)
+{
+  if (one_minus_cos_angle > 0.0f) {
+    return M_1_2PI_F / one_minus_cos_angle;
+  }
+  return 1.0f;
+}
+
+static float mpg_integrate_cone_hemisphere_partial(const float theta_start,
+                                                   const float theta_end,
+                                                   const float beta)
+{
+  if (!(theta_end > theta_start)) {
+    return 0.0f;
+  }
+
+  const float sin_beta = sinf(beta);
+  if (fabsf(sin_beta) < 1.0e-7f) {
+    return 0.0f;
+  }
+
+  const float cot_beta = cosf(beta) / sin_beta;
+  const int integration_steps = 32;
+  const float step = (theta_end - theta_start) / float(integration_steps);
+  float accumulated = 0.0f;
+
+  for (int i = 0; i < integration_steps; ++i) {
+    const float t = (float(i) + 0.5f) / float(integration_steps);
+    const float theta = theta_start + (theta_end - theta_start) * t;
+    const float sin_theta = sinf(theta);
+    const float cos_theta = cosf(theta);
+    if (fabsf(sin_theta) < 1.0e-7f) {
+      continue;
+    }
+    const float cot_theta = cos_theta / sin_theta;
+    float cos_argument = -cot_theta * cot_beta;
+    cos_argument = fminf(fmaxf(cos_argument, -1.0f), 1.0f);
+    const float delta_phi = 2.0f * acosf(cos_argument);
+    accumulated += sin_theta * delta_phi;
+  }
+
+  return accumulated * step;
+}
+
+static float mpg_uniform_cone_hemisphere_acceptance(const float3 &axis,
+                                                    const float one_minus_cos_angle,
+                                                    const float3 &hemisphere_axis)
+{
+  if (is_zero(axis) || is_zero(hemisphere_axis)) {
+    return 1.0f;
+  }
+
+  const float3 axis_normalized = safe_normalize(axis);
+  const float3 hemisphere_normalized = safe_normalize(hemisphere_axis);
+  if (is_zero(axis_normalized) || is_zero(hemisphere_normalized)) {
+    return 1.0f;
+  }
+
+  const float cos_theta_max = fminf(fmaxf(1.0f - one_minus_cos_angle, -1.0f), 1.0f);
+  const float theta_max = acosf(cos_theta_max);
+  const float cone_area = 2.0f * M_PI_F * (1.0f - cos_theta_max);
+  if (!(cone_area > 0.0f)) {
+    return (dot(axis_normalized, hemisphere_normalized) >= 0.0f) ? 1.0f : 0.0f;
+  }
+
+  const float cos_beta = fminf(fmaxf(dot(axis_normalized, hemisphere_normalized), -1.0f), 1.0f);
+  const float beta = acosf(cos_beta);
+  const float half_pi = 0.5f * M_PI_F;
+
+  if (beta + theta_max <= half_pi) {
+    return 1.0f;
+  }
+  if (beta >= half_pi + theta_max) {
+    return 0.0f;
+  }
+
+  const float sin_beta = sinf(beta);
+  if (fabsf(sin_beta) < 1.0e-7f) {
+    return (cos_beta >= 0.0f) ? 1.0f : 0.0f;
+  }
+
+  float accepted_area = 0.0f;
+
+  if (beta < half_pi) {
+    const float theta_full = fminf(theta_max, fmaxf(half_pi - beta, 0.0f));
+    if (theta_full > 0.0f) {
+      accepted_area += 2.0f * M_PI_F * (1.0f - cosf(theta_full));
+    }
+    const float theta_partial_start = theta_full;
+    if (theta_partial_start < theta_max) {
+      accepted_area += mpg_integrate_cone_hemisphere_partial(theta_partial_start, theta_max, beta);
+    }
+  }
+  else {
+    const float theta_partial_start = fmaxf(beta - half_pi, 0.0f);
+    if (theta_partial_start < theta_max) {
+      accepted_area += mpg_integrate_cone_hemisphere_partial(theta_partial_start, theta_max, beta);
+    }
+  }
+
+  float acceptance = accepted_area / cone_area;
+  acceptance = fminf(fmaxf(acceptance, 0.0f), 1.0f);
+  return acceptance;
+}
+
 static bool mpg_compute_dielectric_reflection_probability(KernelGlobals kg,
                                                           const ShaderData &sd,
                                                           const ShaderClosure &bsdf,
@@ -658,7 +763,55 @@ bool mpg_generate_seed(KernelGlobals kg,
       mpg_seed_branch_probability(guided_attempt_budget, fallback_attempt_budget, MPG_SEED_BRANCH_GUIDED);
   const float fallback_branch_probability =
       mpg_seed_branch_probability(guided_attempt_budget, fallback_attempt_budget, MPG_SEED_BRANCH_FALLBACK);
+  const float jitter_one_minus_cos = one_minus_cos(jitter);
   const float fallback_one_minus_cos = one_minus_cos(0.6f * M_PI_F);
+
+  float3 reflection_hemisphere_axis = reflection_normal;
+  bool reflection_hemisphere_axis_valid = reflection_hemisphere_valid;
+  if (reflection_hemisphere_axis_valid) {
+    reflection_hemisphere_axis = safe_normalize(reflection_hemisphere_axis);
+    reflection_hemisphere_axis_valid = !is_zero(reflection_hemisphere_axis);
+  }
+
+  float3 transmission_hemisphere_axis = transmission_normal;
+  bool transmission_hemisphere_axis_valid = transmission_hemisphere_valid;
+  if (transmission_hemisphere_axis_valid) {
+    if (transmission_hemisphere_sign < 0.0f) {
+      transmission_hemisphere_axis = -transmission_hemisphere_axis;
+    }
+    transmission_hemisphere_axis = safe_normalize(transmission_hemisphere_axis);
+    transmission_hemisphere_axis_valid = !is_zero(transmission_hemisphere_axis);
+  }
+
+  const auto cone_acceptance = [&](const float3 &axis_dir,
+                                   const bool axis_valid,
+                                   const bool hemisphere_valid,
+                                   const float3 &hemisphere_axis,
+                                   const float one_minus_cos_angle) {
+    if (!axis_valid || !hemisphere_valid) {
+      return 1.0f;
+    }
+    return mpg_uniform_cone_hemisphere_acceptance(axis_dir, one_minus_cos_angle, hemisphere_axis);
+  };
+
+  const float reflection_guided_acceptance = cone_acceptance(
+      axis_reflection, axis_reflection_valid, reflection_hemisphere_axis_valid, reflection_hemisphere_axis, jitter_one_minus_cos);
+  const float transmission_guided_acceptance = cone_acceptance(
+      axis_transmission, axis_transmission_valid, transmission_hemisphere_axis_valid, transmission_hemisphere_axis, jitter_one_minus_cos);
+  const float reflection_fallback_acceptance = cone_acceptance(
+      axis_reflection, axis_reflection_valid, reflection_hemisphere_axis_valid, reflection_hemisphere_axis, fallback_one_minus_cos);
+  const float transmission_fallback_acceptance = cone_acceptance(
+      axis_transmission, axis_transmission_valid, transmission_hemisphere_axis_valid, transmission_hemisphere_axis, fallback_one_minus_cos);
+  const float reflection_uniform_acceptance = cone_acceptance(fallback_uniform_reflection_axis,
+                                                              fallback_uniform_reflection_axis_valid,
+                                                              reflection_hemisphere_axis_valid,
+                                                              reflection_hemisphere_axis,
+                                                              1.0f);
+  const float transmission_uniform_acceptance = cone_acceptance(fallback_uniform_transmission_axis,
+                                                                fallback_uniform_transmission_axis_valid,
+                                                                transmission_hemisphere_axis_valid,
+                                                                transmission_hemisphere_axis,
+                                                                1.0f);
 
   const uint8_t base_tau_count = (selected_bounce_count > 0) ? static_cast<uint8_t>(selected_bounce_count) : 0;
   const float uniqueness_threshold = 1.0e-4f;
@@ -700,6 +853,61 @@ bool mpg_generate_seed(KernelGlobals kg,
     }
 
     return true;
+  };
+
+  const uint32_t rejection_seed_offset = rng_state.rng_offset + branch_offset_u + 0x9e3779b9u;
+
+  auto sample_conditioned_cone = [&](const float3 &axis_dir,
+                                     const bool axis_valid,
+                                     const float one_minus_cos_angle,
+                                     const float acceptance,
+                                     const bool hemisphere_valid,
+                                     const float3 &hemisphere_axis,
+                                     const float2 &initial_rand,
+                                     const int sample_index,
+                                     float3 &out_direction,
+                                     float &out_pdf) -> bool {
+    out_direction = zero_float3();
+    out_pdf = 0.0f;
+
+    if (!axis_valid) {
+      return false;
+    }
+
+    if (!hemisphere_valid) {
+      float unused_cos = 0.0f;
+      out_direction = sample_uniform_cone(axis_dir, one_minus_cos_angle, initial_rand, &unused_cos, &out_pdf);
+      return true;
+    }
+
+    if (!(acceptance > 0.0f)) {
+      return false;
+    }
+
+    const float base_pdf = mpg_uniform_cone_pdf(one_minus_cos_angle);
+    const float conditioned_pdf = base_pdf / acceptance;
+    const int max_attempts = 16;
+    float2 rand_dir = initial_rand;
+
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+      float unused_cos = 0.0f;
+      float unused_pdf = 0.0f;
+      const float3 candidate = sample_uniform_cone(axis_dir, one_minus_cos_angle, rand_dir, &unused_cos, &unused_pdf);
+      if (dot(candidate, hemisphere_axis) >= 0.0f) {
+        out_direction = candidate;
+        out_pdf = conditioned_pdf;
+        return true;
+      }
+
+      const uint32_t attempt_seed = hash_uint4(rng_state.rng_pixel,
+                                               uint(rng_state.sample),
+                                               rejection_seed_offset,
+                                               uint(sample_index) * 0x51633u + uint(attempt) + 1u);
+      rand_dir = make_float2(uint_to_float_excl(attempt_seed),
+                             uint_to_float_excl(hash_uint(attempt_seed ^ 0xa511e9b3u)));
+    }
+
+    return false;
   };
 
   auto sample_trial = [&](const int sample_index,
@@ -771,26 +979,68 @@ bool mpg_generate_seed(KernelGlobals kg,
                                                 fallback_uniform_reflection_axis_valid;
     const bool branch_uses_uniform_sphere = bootstrap_seed || !branch_axis_valid;
 
+    const bool branch_hemisphere_valid = branch_is_transmission ? transmission_hemisphere_axis_valid :
+                                                             reflection_hemisphere_axis_valid;
+    const float3 branch_hemisphere_axis = branch_is_transmission ? transmission_hemisphere_axis :
+                                                                  reflection_hemisphere_axis;
+
     if (branch == SeedTrialBranch::Guided) {
-      if (!branch_axis_valid) {
+      const float branch_acceptance = branch_is_transmission ? transmission_guided_acceptance :
+                                                               reflection_guided_acceptance;
+      if (!sample_conditioned_cone(branch_axis,
+                                   branch_axis_valid,
+                                   jitter_one_minus_cos,
+                                   branch_acceptance,
+                                   branch_hemisphere_valid,
+                                   branch_hemisphere_axis,
+                                   rand_dir,
+                                   sample_index,
+                                   candidate_direction,
+                                   direction_pdf))
+      {
         direction_pdf = 0.0f;
         candidate_direction = zero_float3();
         return;
       }
-      float unused_cos = 0.0f;
-      candidate_direction = sample_uniform_cone(
-          branch_axis, one_minus_cos(jitter), rand_dir, &unused_cos, &direction_pdf);
     }
     else {
       if (!branch_uses_uniform_sphere) {
-        float unused_cos = 0.0f;
-        candidate_direction = sample_uniform_cone(
-            branch_axis, fallback_one_minus_cos, rand_dir, &unused_cos, &direction_pdf);
+        const float branch_acceptance = branch_is_transmission ? transmission_fallback_acceptance :
+                                                                 reflection_fallback_acceptance;
+        if (!sample_conditioned_cone(branch_axis,
+                                     branch_axis_valid,
+                                     fallback_one_minus_cos,
+                                     branch_acceptance,
+                                     branch_hemisphere_valid,
+                                     branch_hemisphere_axis,
+                                     rand_dir,
+                                     sample_index,
+                                     candidate_direction,
+                                     direction_pdf))
+        {
+          direction_pdf = 0.0f;
+          candidate_direction = zero_float3();
+          return;
+        }
       }
       else if (branch_fallback_axis_valid) {
-        float unused_cos = 0.0f;
-        candidate_direction = sample_uniform_cone(
-            branch_fallback_axis, 1.0f, rand_dir, &unused_cos, &direction_pdf);
+        const float branch_acceptance = branch_is_transmission ? transmission_uniform_acceptance :
+                                                                 reflection_uniform_acceptance;
+        if (!sample_conditioned_cone(branch_fallback_axis,
+                                     true,
+                                     1.0f,
+                                     branch_acceptance,
+                                     branch_hemisphere_valid,
+                                     branch_hemisphere_axis,
+                                     rand_dir,
+                                     sample_index,
+                                     candidate_direction,
+                                     direction_pdf))
+        {
+          direction_pdf = 0.0f;
+          candidate_direction = zero_float3();
+          return;
+        }
       }
       else {
         candidate_direction = sample_uniform_sphere(rand_dir);
