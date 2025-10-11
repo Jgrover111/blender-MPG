@@ -763,9 +763,6 @@ bool mpg_generate_seed(KernelGlobals kg,
     const bool branch_is_transmission = (scatter_branch == MPG_SEED_SCATTER_REFRACTION);
     const float3 branch_axis = branch_is_transmission ? axis_transmission : axis_reflection;
     const bool branch_axis_valid = branch_is_transmission ? axis_transmission_valid : axis_reflection_valid;
-    const bool branch_enforces_hemisphere = branch_is_transmission ?
-                                               fallback_transmission_enforces_hemisphere :
-                                               fallback_reflection_enforces_hemisphere;
     const float3 branch_fallback_axis = branch_is_transmission ?
                                             fallback_uniform_transmission_axis :
                                             fallback_uniform_reflection_axis;
@@ -798,9 +795,6 @@ bool mpg_generate_seed(KernelGlobals kg,
       else {
         candidate_direction = sample_uniform_sphere(rand_dir);
         direction_pdf = M_1_4PI_F;
-        if (branch_enforces_hemisphere) {
-          direction_pdf *= 2.0f;
-        }
       }
     }
   };
