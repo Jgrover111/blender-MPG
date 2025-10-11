@@ -15,6 +15,7 @@
 #include "kernel/svm/types.h"
 #include "kernel/types.h"
 
+#include "util/color.h"
 #include "util/math_base.h"
 #include "util/math_float4.h"
 #include "util/math_intersect.h"
@@ -88,6 +89,58 @@ float mpg_seed_branch_probability(const int guided_attempt_budget,
                                 (guided_weight / weight_sum) :
                                 (fallback_weight / weight_sum);
   return fminf(fmaxf(probability, 0.0f), 1.0f);
+}
+
+static bool mpg_compute_dielectric_reflection_probability(KernelGlobals kg,
+                                                          const ShaderData &sd,
+                                                          const ShaderClosure &bsdf,
+                                                          const float3 &fallback_normal,
+                                                          float &reflection_probability)
+{
+  if (!CLOSURE_IS_BSDF_MICROFACET(bsdf.type)) {
+    return false;
+  }
+
+  const MicrofacetBsdf *microfacet = reinterpret_cast<const MicrofacetBsdf *>(&bsdf);
+  float3 fresnel_normal = microfacet->N;
+  if (is_zero(fresnel_normal)) {
+    fresnel_normal = fallback_normal;
+  }
+  if (is_zero(fresnel_normal)) {
+    fresnel_normal = sd.Ng;
+  }
+  if (is_zero(fresnel_normal)) {
+    fresnel_normal = sd.N;
+  }
+  if (is_zero(fresnel_normal)) {
+    return false;
+  }
+
+  fresnel_normal = safe_normalize(fresnel_normal);
+  if (is_zero(fresnel_normal)) {
+    return false;
+  }
+
+  const float cos_theta_i = clamp(dot(fresnel_normal, sd.wi), -1.0f, 1.0f);
+
+  Spectrum reflectance = zero_spectrum();
+  Spectrum transmittance = zero_spectrum();
+  float cos_theta_t = 0.0f;
+
+  MicrofacetBsdf temp_bsdf = *microfacet;
+  microfacet_fresnel(kg, &temp_bsdf, cos_theta_i, &cos_theta_t, &reflectance, &transmittance);
+
+  const float reflectance_avg = fmaxf(average(reflectance), 0.0f);
+  const float transmittance_avg = fmaxf(average(transmittance), 0.0f);
+  const float probability_sum = reflectance_avg + transmittance_avg;
+
+  if (!(probability_sum > 0.0f)) {
+    reflection_probability = 1.0f;
+    return true;
+  }
+
+  reflection_probability = fminf(fmaxf(reflectance_avg / probability_sum, 0.0f), 1.0f);
+  return true;
 }
 
 static inline bool has_specular_bsdf_at_hit(KernelGlobals kg,
@@ -287,7 +340,64 @@ bool mpg_generate_seed(KernelGlobals kg,
     }
   }
 
-  bool using_transmission_hemisphere = prefer_transmission && geometric_normal_valid;
+  float reflection_probability = 1.0f;
+  float transmission_probability = 0.0f;
+
+  if (seed_lobe == SeedLobe::Transmission) {
+    reflection_probability = 0.0f;
+    transmission_probability = 1.0f;
+  }
+  else if (seed_lobe == SeedLobe::Dual) {
+    if (prefer_transmission_from_guide) {
+      reflection_probability = prefer_transmission ? 0.0f : 1.0f;
+      transmission_probability = 1.0f - reflection_probability;
+    }
+    else {
+      float fresnel_reflection = 1.0f;
+      if (mpg_compute_dielectric_reflection_probability(
+              kg, sd, bsdf, shading_normal, fresnel_reflection))
+      {
+        reflection_probability = fresnel_reflection;
+        transmission_probability = 1.0f - reflection_probability;
+      }
+      else {
+        reflection_probability = prefer_transmission ? 0.0f : 1.0f;
+        transmission_probability = 1.0f - reflection_probability;
+      }
+    }
+  }
+  else {
+    reflection_probability = 1.0f;
+    transmission_probability = 0.0f;
+  }
+
+  reflection_probability = fminf(fmaxf(reflection_probability, 0.0f), 1.0f);
+  transmission_probability = fminf(fmaxf(transmission_probability, 0.0f), 1.0f);
+  float probability_sum = reflection_probability + transmission_probability;
+  if (!(probability_sum > 0.0f)) {
+    reflection_probability = 1.0f;
+    transmission_probability = 0.0f;
+    probability_sum = 1.0f;
+  }
+  reflection_probability /= probability_sum;
+  transmission_probability /= probability_sum;
+
+  if (seed_lobe == SeedLobe::Dual && !prefer_transmission_from_guide) {
+    const float diff = transmission_probability - reflection_probability;
+    if (diff > 1.0e-5f) {
+      prefer_transmission = true;
+    }
+    else if (diff < -1.0e-5f) {
+      prefer_transmission = false;
+    }
+  }
+
+#ifdef WITH_CYCLES_DEBUG
+  DCHECK(isfinite_safe(reflection_probability));
+  DCHECK(isfinite_safe(transmission_probability));
+  const float probability_total = reflection_probability + transmission_probability;
+  DCHECK(fabsf(probability_total - 1.0f) <= 1.0e-5f);
+#endif
 
   /* Determine the dominant seed direction from the guided mean with optional jitter. */
   float3 axis = guided_axis_valid ? guided_axis : guide.mean_dir;
@@ -313,48 +423,50 @@ bool mpg_generate_seed(KernelGlobals kg,
     if (fabsf(dot_axis_transmission) > hemisphere_epsilon &&
         (dot_axis_transmission * transmission_hemisphere_sign) >= 0.0f)
     {
-      using_transmission_hemisphere = true;
       prefer_transmission = true;
     }
   }
 
-  float3 hemisphere_normal = using_transmission_hemisphere ? transmission_normal : reflection_normal;
-  bool hemisphere_valid = !is_zero(hemisphere_normal);
-  if (!hemisphere_valid && using_transmission_hemisphere) {
-    hemisphere_normal = reflection_normal;
-    hemisphere_valid = !is_zero(hemisphere_normal);
-    using_transmission_hemisphere = false;
+  const bool reflection_hemisphere_valid = !is_zero(reflection_normal);
+  const bool transmission_hemisphere_valid = !is_zero(transmission_normal);
+
+  float3 axis_reflection = axis;
+  bool axis_reflection_valid = axis_valid;
+  if (axis_reflection_valid) {
+    axis_reflection = safe_normalize(axis_reflection);
+    axis_reflection_valid = !is_zero(axis_reflection);
   }
-  if (!hemisphere_valid) {
-    hemisphere_normal = reflection_normal;
-    hemisphere_valid = !is_zero(hemisphere_normal);
-    using_transmission_hemisphere = false;
+  if (axis_reflection_valid && reflection_hemisphere_valid) {
+    float dot_axis_reflection = dot(axis_reflection, reflection_normal);
+    if (fabsf(dot_axis_reflection) > hemisphere_epsilon && dot_axis_reflection < 0.0f) {
+      axis_reflection = safe_normalize(-axis_reflection);
+      axis_reflection_valid = !is_zero(axis_reflection);
+      dot_axis_reflection = dot(axis_reflection, reflection_normal);
+    }
+    if (axis_reflection_valid && dot_axis_reflection < 0.0f) {
+      axis_reflection_valid = false;
+    }
   }
 
-  float hemisphere_sign = 1.0f;
-  if (using_transmission_hemisphere) {
-    hemisphere_sign = transmission_hemisphere_sign;
+  float3 axis_transmission = axis;
+  bool axis_transmission_valid = axis_valid;
+  if (axis_transmission_valid) {
+    axis_transmission = safe_normalize(axis_transmission);
+    axis_transmission_valid = !is_zero(axis_transmission);
   }
-
-  const auto matches_hemisphere = [&](const float3 &direction) {
-    if (!hemisphere_valid) {
-      return true;
+  if (axis_transmission_valid && transmission_hemisphere_valid) {
+    float dot_axis_transmission = dot(axis_transmission, transmission_normal);
+    if (fabsf(dot_axis_transmission) > hemisphere_epsilon &&
+        (dot_axis_transmission * transmission_hemisphere_sign) < 0.0f)
+    {
+      axis_transmission = safe_normalize(-axis_transmission);
+      axis_transmission_valid = !is_zero(axis_transmission);
+      dot_axis_transmission = dot(axis_transmission, transmission_normal);
     }
-    if (using_transmission_hemisphere) {
-      const float dot_ng_dir = dot(direction, transmission_normal);
-      return dot_ng_dir * hemisphere_sign >= 0.0f;
-    }
-    return dot(direction, hemisphere_normal) >= 0.0f;
-  };
-
-  if (axis_valid && !matches_hemisphere(axis)) {
-    if (!using_transmission_hemisphere) {
-      axis = -axis;
-      axis = safe_normalize(axis);
-      axis_valid = !is_zero(axis);
-    }
-    else {
-      axis_valid = false;
+    if (axis_transmission_valid &&
+        (dot_axis_transmission * transmission_hemisphere_sign) < 0.0f)
+    {
+      axis_transmission_valid = false;
     }
   }
 
@@ -366,30 +478,55 @@ bool mpg_generate_seed(KernelGlobals kg,
   const bool use_uniform_fallback = !axis_valid;
   const bool use_uniform_sphere_sampling = bootstrap_seed || use_uniform_fallback;
 
-  const bool fallback_uniform_sphere_enforces_hemisphere =
-      (bootstrap_seed || !axis_valid) && hemisphere_valid;
+  const bool fallback_reflection_enforces_hemisphere =
+      (bootstrap_seed || !axis_reflection_valid) && reflection_hemisphere_valid;
+  const bool fallback_transmission_enforces_hemisphere =
+      (bootstrap_seed || !axis_transmission_valid) && transmission_hemisphere_valid;
 
-  float3 fallback_uniform_hemisphere_axis = zero_float3();
-  if (fallback_uniform_sphere_enforces_hemisphere) {
-    if (using_transmission_hemisphere) {
-      const float3 transmission_axis = (hemisphere_sign >= 0.0f) ? transmission_normal :
-                                                                           -transmission_normal;
-      fallback_uniform_hemisphere_axis = transmission_axis;
+  float3 fallback_uniform_reflection_axis = zero_float3();
+  if (fallback_reflection_enforces_hemisphere) {
+    fallback_uniform_reflection_axis = reflection_normal;
+    if (!is_zero(fallback_uniform_reflection_axis)) {
+      fallback_uniform_reflection_axis = safe_normalize(fallback_uniform_reflection_axis);
     }
     else {
-      fallback_uniform_hemisphere_axis = hemisphere_normal;
-    }
-
-    if (!is_zero(fallback_uniform_hemisphere_axis)) {
-      fallback_uniform_hemisphere_axis = normalize(fallback_uniform_hemisphere_axis);
-    }
-    else {
-      fallback_uniform_hemisphere_axis = zero_float3();
+      fallback_uniform_reflection_axis = zero_float3();
     }
   }
 
-  const bool fallback_uniform_hemisphere_axis_valid =
-      !is_zero(fallback_uniform_hemisphere_axis);
+  float3 fallback_uniform_transmission_axis = zero_float3();
+  if (fallback_transmission_enforces_hemisphere) {
+    float3 transmission_axis = transmission_normal;
+    if (transmission_hemisphere_sign < 0.0f) {
+      transmission_axis = -transmission_axis;
+    }
+    if (!is_zero(transmission_axis)) {
+      fallback_uniform_transmission_axis = safe_normalize(transmission_axis);
+    }
+    else {
+      fallback_uniform_transmission_axis = zero_float3();
+    }
+  }
+
+  const bool fallback_uniform_reflection_axis_valid =
+      !is_zero(fallback_uniform_reflection_axis);
+  const bool fallback_uniform_transmission_axis_valid =
+      !is_zero(fallback_uniform_transmission_axis);
+
+  const auto matches_branch_hemisphere = [&](const float3 &direction,
+                                             const MpgSeedScatter scatter_branch) {
+    if (scatter_branch == MPG_SEED_SCATTER_REFRACTION) {
+      if (!transmission_hemisphere_valid) {
+        return true;
+      }
+      const float dot_ng_dir = dot(direction, transmission_normal);
+      return dot_ng_dir * transmission_hemisphere_sign >= 0.0f;
+    }
+    if (!reflection_hemisphere_valid) {
+      return true;
+    }
+    return dot(direction, reflection_normal) >= 0.0f;
+  };
 
   const int max_supported_bounces = clamp(options.max_bounces, 1, 2);
   const bool allow_double_bounce = (max_supported_bounces >= 2);
@@ -493,11 +630,13 @@ bool mpg_generate_seed(KernelGlobals kg,
   };
 
   SeedTrialBranch successful_branch = SeedTrialBranch::Guided;
+  MpgSeedScatter successful_scatter_branch = MPG_SEED_SCATTER_NONE;
   int guided_trials = 0;
   int fallback_trials = 0;
   float accepted_seed_pdf = 0.0f;
   float accepted_branch_pdf = 0.0f;
   float accepted_direction_pdf = 0.0f;
+  float accepted_scatter_pdf = 0.0f;
 
   const int uniform_attempt_budget = bootstrap_seed ? 32 : (use_uniform_fallback ? 32 : 16);
   const int guided_attempt_budget = use_uniform_sphere_sampling ? 0 : uniform_attempt_budget;
@@ -536,11 +675,14 @@ bool mpg_generate_seed(KernelGlobals kg,
     return true;
   };
 
-  auto sample_trial = [&](const float3 &rand_sample,
+  auto sample_trial = [&](const int sample_index,
+                          const float3 &rand_sample,
                           SeedTrialBranch &branch,
                           float &branch_pdf,
                           float3 &candidate_direction,
-                          float &direction_pdf) {
+                          float &direction_pdf,
+                          MpgSeedScatter &scatter_branch,
+                          float &scatter_pdf) {
     branch = SeedTrialBranch::Fallback;
     branch_pdf = 1.0f;
     direction_pdf = 0.0f;
@@ -566,30 +708,70 @@ bool mpg_generate_seed(KernelGlobals kg,
 
     const float2 rand_dir = make_float2(rand_sample.y, rand_sample.z);
 
-    if (branch == SeedTrialBranch::Guided) {
-      float unused_cos = 0.0f;
-      candidate_direction =
-          sample_uniform_cone(axis, one_minus_cos(jitter), rand_dir, &unused_cos, &direction_pdf);
+    scatter_branch = MPG_SEED_SCATTER_REFLECTION;
+    scatter_pdf = 1.0f;
+
+    const bool has_reflection_branch = reflection_probability > 0.0f;
+    const bool has_transmission_branch = transmission_probability > 0.0f;
+
+    if (has_reflection_branch && has_transmission_branch) {
+      const uint32_t scatter_seed = hash_uint3(rng_state.rng_pixel,
+                                               uint(rng_state.sample),
+                                               rng_state.rng_offset + branch_offset_u +
+                                                   uint(sample_index) * 0x51633u);
+      const float scatter_rand = uint_to_float_excl(scatter_seed);
+      const bool choose_reflection = scatter_rand < reflection_probability;
+      scatter_branch = choose_reflection ? MPG_SEED_SCATTER_REFLECTION : MPG_SEED_SCATTER_REFRACTION;
+      scatter_pdf = choose_reflection ? reflection_probability : transmission_probability;
+    }
+    else if (has_transmission_branch) {
+      scatter_branch = MPG_SEED_SCATTER_REFRACTION;
+      scatter_pdf = 1.0f;
     }
     else {
-      const bool fallback_uses_uniform_sphere = bootstrap_seed || !axis_valid;
-      if (!fallback_uses_uniform_sphere) {
+      scatter_branch = MPG_SEED_SCATTER_REFLECTION;
+      scatter_pdf = 1.0f;
+    }
+
+    const bool branch_is_transmission = (scatter_branch == MPG_SEED_SCATTER_REFRACTION);
+    const float3 branch_axis = branch_is_transmission ? axis_transmission : axis_reflection;
+    const bool branch_axis_valid = branch_is_transmission ? axis_transmission_valid : axis_reflection_valid;
+    const bool branch_enforces_hemisphere = branch_is_transmission ?
+                                               fallback_transmission_enforces_hemisphere :
+                                               fallback_reflection_enforces_hemisphere;
+    const float3 branch_fallback_axis = branch_is_transmission ?
+                                            fallback_uniform_transmission_axis :
+                                            fallback_uniform_reflection_axis;
+    const bool branch_fallback_axis_valid = branch_is_transmission ?
+                                                fallback_uniform_transmission_axis_valid :
+                                                fallback_uniform_reflection_axis_valid;
+    const bool branch_uses_uniform_sphere = bootstrap_seed || !branch_axis_valid;
+
+    if (branch == SeedTrialBranch::Guided) {
+      if (!branch_axis_valid) {
+        direction_pdf = 0.0f;
+        candidate_direction = zero_float3();
+        return;
+      }
+      float unused_cos = 0.0f;
+      candidate_direction = sample_uniform_cone(
+          branch_axis, one_minus_cos(jitter), rand_dir, &unused_cos, &direction_pdf);
+    }
+    else {
+      if (!branch_uses_uniform_sphere) {
         float unused_cos = 0.0f;
         candidate_direction = sample_uniform_cone(
-            axis, fallback_one_minus_cos, rand_dir, &unused_cos, &direction_pdf);
+            branch_axis, fallback_one_minus_cos, rand_dir, &unused_cos, &direction_pdf);
       }
-      else if (fallback_uniform_hemisphere_axis_valid) {
+      else if (branch_fallback_axis_valid) {
         float unused_cos = 0.0f;
-        candidate_direction = sample_uniform_cone(fallback_uniform_hemisphere_axis,
-                                                  1.0f,
-                                                  rand_dir,
-                                                  &unused_cos,
-                                                  &direction_pdf);
+        candidate_direction = sample_uniform_cone(
+            branch_fallback_axis, 1.0f, rand_dir, &unused_cos, &direction_pdf);
       }
       else {
         candidate_direction = sample_uniform_sphere(rand_dir);
         direction_pdf = M_1_4PI_F;
-        if (fallback_uniform_sphere_enforces_hemisphere) {
+        if (branch_enforces_hemisphere) {
           direction_pdf *= 2.0f;
         }
       }
@@ -600,12 +782,14 @@ bool mpg_generate_seed(KernelGlobals kg,
                              const float candidate_pdf,
                              const float candidate_branch_pdf,
                              const float candidate_direction_pdf,
+                             const MpgSeedScatter scatter_branch,
+                             const float candidate_scatter_pdf,
                              Intersection &out_isect,
                              const SeedTrialBranch branch,
                              const bool record_accept) -> bool {
     int &branch_trials = (branch == SeedTrialBranch::Guided) ? guided_trials : fallback_trials;
     ++branch_trials;
-    if (is_zero(candidate_direction) || candidate_pdf <= 0.0f) {
+    if (is_zero(candidate_direction) || candidate_pdf <= 0.0f || candidate_scatter_pdf <= 0.0f) {
       last_failure = MPG_FAILURE_INVALID_SEED_PDF;
       return false;
     }
@@ -613,7 +797,7 @@ bool mpg_generate_seed(KernelGlobals kg,
     /* Bootstrap seeds and uniform fallbacks still probe broadly but must respect the
      * hemisphere test so rays never shoot across Ng. Directional seeds continue to obey
      * the same filtering. */
-    if (!matches_hemisphere(candidate_direction)) {
+    if (!matches_branch_hemisphere(candidate_direction, scatter_branch)) {
       last_failure = MPG_FAILURE_SEED;
       return false;
     }
@@ -654,8 +838,10 @@ bool mpg_generate_seed(KernelGlobals kg,
       accepted_seed_pdf = candidate_pdf;
       accepted_branch_pdf = candidate_branch_pdf;
       accepted_direction_pdf = candidate_direction_pdf;
-      seed.use_smooth_normals = has_smooth_normals && !using_transmission_hemisphere;
+      accepted_scatter_pdf = candidate_scatter_pdf;
+      seed.use_smooth_normals = has_smooth_normals && (scatter_branch != MPG_SEED_SCATTER_REFRACTION);
       successful_branch = branch;
+      successful_scatter_branch = scatter_branch;
     }
     return true;
   };
@@ -668,14 +854,18 @@ bool mpg_generate_seed(KernelGlobals kg,
     float branch_pdf = 1.0f;
     float direction_pdf = 0.0f;
     float3 candidate_direction = zero_float3();
+    MpgSeedScatter scatter_branch = MPG_SEED_SCATTER_REFLECTION;
+    float scatter_pdf = 1.0f;
 
-    sample_trial(rand, branch, branch_pdf, candidate_direction, direction_pdf);
+    sample_trial(attempt, rand, branch, branch_pdf, candidate_direction, direction_pdf, scatter_branch, scatter_pdf);
 
-    const float candidate_pdf = direction_pdf * branch_pdf;
+    const float candidate_pdf = direction_pdf * branch_pdf * scatter_pdf;
     seed_valid = try_seed_sample(candidate_direction,
                                  candidate_pdf,
                                  branch_pdf,
                                  direction_pdf,
+                                 scatter_branch,
+                                 scatter_pdf,
                                  isect,
                                  branch,
                                  true);
@@ -701,24 +891,28 @@ bool mpg_generate_seed(KernelGlobals kg,
     float branch_pdf = 1.0f;
     float direction_pdf = 0.0f;
     float3 candidate_direction = zero_float3();
+    MpgSeedScatter scatter_branch = MPG_SEED_SCATTER_REFLECTION;
+    float scatter_pdf = 1.0f;
 
-    sample_trial(rand, branch, branch_pdf, candidate_direction, direction_pdf);
+    sample_trial(attempt_index, rand, branch, branch_pdf, candidate_direction, direction_pdf, scatter_branch, scatter_pdf);
 
-    const float candidate_pdf = direction_pdf * branch_pdf;
+    const float candidate_pdf = direction_pdf * branch_pdf * scatter_pdf;
     Intersection repeat_isect = {};
     const bool repeat_success = try_seed_sample(candidate_direction,
-                                               candidate_pdf,
-                                               branch_pdf,
-                                               direction_pdf,
-                                               repeat_isect,
-                                               branch,
-                                               false);
+                                                candidate_pdf,
+                                                branch_pdf,
+                                                direction_pdf,
+                                                scatter_branch,
+                                                scatter_pdf,
+                                                repeat_isect,
+                                                branch,
+                                                false);
 
     if (!repeat_success) {
       continue;
     }
 
-    if (branch != successful_branch) {
+    if (branch != successful_branch || scatter_branch != successful_scatter_branch) {
       continue;
     }
 
@@ -794,6 +988,7 @@ bool mpg_generate_seed(KernelGlobals kg,
   seed.seed_pdf_raw = accepted_seed_pdf;
   seed.seed_branch_pdf = accepted_branch_pdf;
   seed.seed_direction_pdf = accepted_direction_pdf;
+  seed.seed_scatter_pdf = fmaxf(accepted_scatter_pdf, 1.0e-16f);
   seed.trial_count = total_trials;
   seed.accepted_trial_count = accepted_trials_initial;
   seed.guided_trial_count = guided_trials;
@@ -801,6 +996,7 @@ bool mpg_generate_seed(KernelGlobals kg,
   seed.seed_resample_factor = fmaxf(expected_trials, 1.0e-16f);
   seed.branch = (successful_branch == SeedTrialBranch::Guided) ? MPG_SEED_BRANCH_GUIDED :
                                                                     MPG_SEED_BRANCH_FALLBACK;
+  seed.scatter = successful_scatter_branch;
   seed.seed_pdf = fmaxf(normalized_pdf, 1.0e-16f);
   seed.light_sample = light_sample;
   seed.path_flag = path_flag;

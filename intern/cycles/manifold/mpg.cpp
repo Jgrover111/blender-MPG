@@ -269,7 +269,9 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     result.seed_resample_factor = seed.seed_resample_factor;
     result.seed_branch_pdf = seed.seed_branch_pdf;
     result.seed_direction_pdf = seed.seed_direction_pdf;
+    result.seed_scatter_pdf = seed.seed_scatter_pdf;
     result.seed_branch = seed.branch;
+    result.seed_scatter = seed.scatter;
     result.bounce_pdf_raw = seed.bounce_pdf_raw;
     result.bounce_pdf = seed.bounce_pdf;
     result.bounce_count = seed.bounce_count;
@@ -285,7 +287,9 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.seed_resample_factor = seed.seed_resample_factor;
   result.seed_branch_pdf = seed.seed_branch_pdf;
   result.seed_direction_pdf = seed.seed_direction_pdf;
+  result.seed_scatter_pdf = seed.seed_scatter_pdf;
   result.seed_branch = seed.branch;
+  result.seed_scatter = seed.scatter;
   result.bounce_pdf_raw = seed.bounce_pdf_raw;
   result.bounce_pdf = seed.bounce_pdf;
   result.bounce_count = seed.bounce_count;
@@ -308,6 +312,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   solution.seed_branch = seed.branch;
   solution.seed_branch_pdf = seed.seed_branch_pdf;
   solution.seed_direction_pdf = seed.seed_direction_pdf;
+  solution.seed_scatter = seed.scatter;
+  solution.seed_scatter_pdf = seed.seed_scatter_pdf;
   solution.seed_guided_trial_count = seed.guided_trial_count;
   solution.seed_fallback_trial_count = seed.fallback_trial_count;
 
@@ -470,6 +476,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
           0.0f;
   if (total_trials > 0 && mitsuba_seed_pdf > 0.0f) {
     if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
+      DCHECK(seed.scatter != MPG_SEED_SCATTER_NONE);
+      DCHECK(seed.seed_scatter_pdf > 0.0f);
       LOG_DEBUG << "MPG seed pdf parity (trials=" << total_trials
                 << "): cycles=" << p_seed << ", Mitsuba=" << mitsuba_seed_pdf
                 << ", raw=" << seed.seed_pdf_raw
@@ -477,6 +485,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
                 << ", accept_p=" << acceptance_probability
                 << ", branch=" << seed.seed_branch_pdf
                 << ", dir=" << seed.seed_direction_pdf
+                << ", scatter=" << seed.seed_scatter_pdf
+                << ", scatter_branch=" << static_cast<int>(seed.scatter)
                 << ", bounce=" << seed.bounce_pdf;
     }
     if (isfinite_safe(p_seed) && isfinite_safe(mitsuba_seed_pdf)) {

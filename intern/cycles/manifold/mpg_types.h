@@ -52,6 +52,12 @@ enum MpgSeedBranch : int {
   MPG_SEED_BRANCH_FALLBACK = 2,
 };
 
+enum MpgSeedScatter : int {
+  MPG_SEED_SCATTER_NONE = 0,
+  MPG_SEED_SCATTER_REFLECTION = 1,
+  MPG_SEED_SCATTER_REFRACTION = 2,
+};
+
 struct ShadingPoint {
   float3 position = zero_float3();
   float3 geometric_normal = zero_float3();
@@ -66,6 +72,7 @@ struct MpgSeedRay {
   float seed_pdf_raw = 0.0f;
   float seed_branch_pdf = 0.0f;
   float seed_direction_pdf = 0.0f;
+  float seed_scatter_pdf = 0.0f;
   float bounce_pdf = 1.0f;
   float bounce_pdf_raw = 1.0f;
   LightSample light_sample = {};
@@ -80,6 +87,7 @@ struct MpgSeedRay {
   int fallback_trial_count = 0;
   float seed_resample_factor = 0.0f; /* Expected trials before re-discovering seed. */
   MpgSeedBranch branch = MPG_SEED_BRANCH_NONE;
+  MpgSeedScatter scatter = MPG_SEED_SCATTER_NONE;
   int bounce_count = 1;
   bool use_smooth_normals = false;
 };
@@ -117,8 +125,10 @@ struct MpgSolverOutput {
   Spectrum specular_throughput = zero_spectrum();
   float seed_resample_factor = 0.0f; /* Expected trials before re-discovering seed. */
   MpgSeedBranch seed_branch = MPG_SEED_BRANCH_NONE;
+  MpgSeedScatter seed_scatter = MPG_SEED_SCATTER_NONE;
   float seed_branch_pdf = 0.0f;
   float seed_direction_pdf = 0.0f;
+  float seed_scatter_pdf = 0.0f;
   int seed_guided_trial_count = 0;
   int seed_fallback_trial_count = 0;
   MpgSpecularVertex specular_vertices[2];
