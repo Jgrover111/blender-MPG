@@ -2037,7 +2037,15 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   }
 
   MpgSeedRay primary_seed_for_jacobian = seed;
+  const bool seed_light_was_distant = (seed.light_sample.t == FLT_MAX) ||
+                                      (seed.light_sample.type == LIGHT_DISTANT) ||
+                                      (seed.light_sample.type == LIGHT_BACKGROUND);
   primary_seed_for_jacobian.light_sample.P = eval.secondary.point;
+  primary_seed_for_jacobian.light_sample.t = eval.primary.distance_sl;
+  primary_seed_for_jacobian.light_sample.D = eval.primary.dir_sl;
+  if (seed_light_was_distant) {
+    primary_seed_for_jacobian.light_sample.type = LIGHT_POINT;
+  }
 
   float matrix_primary[2][2];
   if (!compute_residual_matrix(receiver, primary_seed_for_jacobian, primary_geometry, eval.primary, matrix_primary)) {
