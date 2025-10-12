@@ -371,6 +371,10 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   const MpgSpecularVertex &exit_vertex =
       solution.specular_vertices[solution.specular_vertex_count - 1];
+  const bool exit_is_refraction = exit_vertex.is_refraction;
+#ifdef WITH_CYCLES_DEBUG
+  DCHECK(solution.is_refraction == exit_is_refraction);
+#endif
 
   LightSample light_sample = seed.light_sample;
   const float pdf_selection = light_sample.pdf_selection;
@@ -414,7 +418,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   light_sample.pdf /= pdf_selection;
 
   uint32_t updated_path_flag = path_flag;
-  if (solution.is_refraction) {
+  if (exit_is_refraction) {
     updated_path_flag |= PATH_RAY_MIS_HAD_TRANSMISSION;
   }
 

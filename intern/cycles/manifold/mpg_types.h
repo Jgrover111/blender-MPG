@@ -113,7 +113,7 @@ struct MpgSpecularVertex {
   float u = 0.0f;
   float v = 0.0f;
   float jacobian = 0.0f;
-  bool is_refraction = false;
+  bool is_refraction = false; /* True when this specular vertex is refractive. */
   bool total_internal_reflection = false;
   int object = -1;
   int prim = -1;
@@ -145,7 +145,7 @@ struct MpgSolverOutput {
   float3 dir_sl = zero_float3();
   float distance_ds = 0.0f;
   float distance_sl = 0.0f;
-  bool is_refraction = false;
+  bool is_refraction = false; /* True only when the terminal specular vertex is refractive. */
   Spectrum spec_weight = zero_spectrum();
   float3 dXdu = zero_float3();
   float3 dXdv = zero_float3();

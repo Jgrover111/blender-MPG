@@ -2167,7 +2167,6 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   result.jacobian = jacobian_total;
   result.specular_throughput = spec_throughput;
   result.spec_weight = spec_throughput;
-  result.is_refraction = primary_params.is_refraction || secondary_params.is_refraction;
 
   MpgSpecularVertex &primary_vertex = result.specular_vertices[0];
   primary_vertex.position = eval.primary.point;
@@ -2215,6 +2214,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   secondary_vertex.object = secondary_seed.object;
   secondary_vertex.prim = secondary_seed.prim;
 
+  result.is_refraction = secondary_vertex.is_refraction;
   result.specular_point = primary_vertex.position;
   result.specular_normal = primary_vertex.normal;
   result.dir_ds = -primary_vertex.dir_in;
