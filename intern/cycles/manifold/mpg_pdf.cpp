@@ -86,11 +86,11 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
 
   pdf = 0.0f;
 
-  const float p_seed_raw = seed.seed_pdf;
-  if (!(isfinite_safe(p_seed_raw) && p_seed_raw > 0.0f)) {
+  const float p_seed_rebuilt = mpg_rebuild_seed_pdf(seed);
+  if (!(isfinite_safe(p_seed_rebuilt) && p_seed_rebuilt > 0.0f)) {
     return false;
   }
-  const float p_seed = fmaxf(p_seed_raw, 1.0e-16f);
+  const float p_seed = fmaxf(p_seed_rebuilt, 1.0e-16f);
 
   const int vertex_count = solution.specular_vertex_count;
   if (vertex_count <= 0) {
@@ -134,14 +134,11 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
   }
 
 #ifdef WITH_CYCLES_DEBUG
+  if (p_seed > 0.0f && isfinite_safe(p_seed) &&
+      isfinite_safe(seed.seed_pdf) && seed.seed_pdf > 0.0f)
   {
-    const float reference_seed_pdf = mpg_rebuild_seed_pdf(seed);
-    if (reference_seed_pdf > 0.0f && p_seed > 0.0f &&
-        isfinite_safe(reference_seed_pdf) && isfinite_safe(p_seed))
-    {
-      const float tolerance = fmaxf(fabsf(reference_seed_pdf), 1.0e-16f) * 1.0e-4f;
-      DCHECK(fabsf(reference_seed_pdf - p_seed) <= tolerance);
-    }
+    const float tolerance = fmaxf(fabsf(seed.seed_pdf), 1.0e-16f) * 1.0e-4f;
+    DCHECK(fabsf(seed.seed_pdf - p_seed) <= tolerance);
   }
 #endif
 

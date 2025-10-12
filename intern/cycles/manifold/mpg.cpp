@@ -467,10 +467,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   const float acceptance_probability = (expected_trials > 0.0f) ?
                                            (1.0f / expected_trials) :
                                            0.0f;
-  const float mitsuba_seed_pdf =
-      (isfinite_safe(seed.seed_pdf_raw) && seed.seed_pdf_raw > 0.0f && acceptance_probability > 0.0f) ?
-          (seed.seed_pdf_raw * acceptance_probability) :
-          0.0f;
+  const float mitsuba_seed_pdf = mpg_rebuild_seed_pdf(seed);
   if (total_trials > 0 && mitsuba_seed_pdf > 0.0f) {
     if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
       DCHECK(seed.scatter != MPG_SEED_SCATTER_NONE);
@@ -484,7 +481,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
                 << ", dir=" << seed.seed_direction_pdf
                 << ", scatter=" << seed.seed_scatter_pdf
                 << ", scatter_branch=" << static_cast<int>(seed.scatter)
-                << ", bounce=" << seed.bounce_pdf << " (folded into seed)";
+                << ", bounce=" << seed.bounce_pdf << " (folded into seed)"
+                << ", bounce_raw=" << seed.bounce_pdf_raw;
     }
     if (isfinite_safe(p_seed) && isfinite_safe(mitsuba_seed_pdf)) {
       const float tolerance = fmaxf(fabsf(mitsuba_seed_pdf), 1.0e-16f) * 1.0e-4f;

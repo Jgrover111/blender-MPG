@@ -50,7 +50,36 @@ float mpg_rebuild_seed_pdf(const MpgSeedRay &seed)
     return 0.0f;
   }
 
-  return normalized_pdf;
+  const float bounce_pdf = seed.bounce_pdf;
+  const float bounce_pdf_raw = seed.bounce_pdf_raw;
+
+  float bounce_factor = 1.0f;
+  if (isfinite_safe(bounce_pdf_raw) && bounce_pdf_raw > 0.0f) {
+    if (!(isfinite_safe(bounce_pdf) && bounce_pdf > 0.0f)) {
+      return 0.0f;
+    }
+
+    const float inv_bounce_pdf_raw = 1.0f / fmaxf(bounce_pdf_raw, 1.0e-16f);
+    if (!(isfinite_safe(inv_bounce_pdf_raw) && inv_bounce_pdf_raw > 0.0f)) {
+      return 0.0f;
+    }
+
+    bounce_factor = bounce_pdf * inv_bounce_pdf_raw;
+  }
+  else {
+    if (!(isfinite_safe(bounce_pdf) && bounce_pdf > 0.0f)) {
+      return 0.0f;
+    }
+
+    bounce_factor = bounce_pdf;
+  }
+
+  const float combined_pdf = normalized_pdf * bounce_factor;
+  if (!(isfinite_safe(combined_pdf) && combined_pdf > 0.0f)) {
+    return 0.0f;
+  }
+
+  return combined_pdf;
 }
 
 float mpg_seed_branch_probability(const int guided_attempt_budget,
