@@ -921,14 +921,6 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   ccl_attr_maybe_unused const bool surface_guiding_active = false;
 #    endif
 
-  const int current_sample = INTEGRATOR_STATE(state, path, sample);
-  const int current_bounce = INTEGRATOR_STATE(state, path, bounce);
-  const int bootstrap_sample_limit = 32;
-  const int bootstrap_depth_limit = 2;
-  const int bootstrap_extended_limit = 128;
-  const bool bootstrap_window = (current_sample < bootstrap_sample_limit) ||
-                                (current_bounce < bootstrap_depth_limit &&
-                                 current_sample < bootstrap_extended_limit);
   bool relax_gate = false;
   bool relax_gate_summary = false;
   bool bootstrap_gate = false;
@@ -1013,33 +1005,12 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   const bool gate_active_local = (manifold_options.gate_w > 0.0f) ||
                                  (manifold_options.gate_kappa > 0.0f);
 
-  if (manifold_guiding_enabled && !manifold_guiding_ready) {
-    if (!summary_available) {
-      if (!gate_active_local || bootstrap_window) {
-        /* Allow a bootstrap attempt without an OpenPGL summary by mirroring the Mitsuba
-         * fallback: relax the gate and flag the bootstrap path so mpg_try_connect() can emit a
-         * wide seed around the shading normal. */
-        bootstrap_gate = true;
-        relax_gate = true;
-        manifold_guiding_ready = true;
-      }
-      else {
-        /* Outside the bootstrap window we still record the gate failure for diagnostics. */
-        manifold_summary.mean_dir = make_float3(0.0f, 0.0f, 0.0f);
-        manifold_summary.peak_weight = 0.0f;
-        manifold_summary.kappa = 0.0f;
-        manifold_summary.rbar = 0.0f;
-        manifold_failure_code = int(MPG_FAILURE_GATE);
-      }
-    }
-  }
-
   manifold_options.relax_gate = relax_gate;
 
   if (manifold_guiding_enabled) {
     const bool has_dir_relaxed_local = (manifold_summary.rbar > 1.0e-4f);
     const bool has_dir_strict_local = (manifold_summary.rbar > 1.0e-3f);
-    if (gate_active_local) {
+    if (gate_active_local || !summary_available) {
       manifold_gate_mask |= MPG_GATE_MASK_ACTIVE;
     }
     if (has_dir_relaxed_local) {
@@ -1071,13 +1042,25 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                          render_buffer);
   }
 
-  if (manifold_guiding_enabled && !manifold_guiding_ready) {
-    if (summary_available && !manifold_gate_pass && !relax_gate) {
-      manifold_failure_code = int(MPG_FAILURE_GATE);
+  const bool mpg_can_run = manifold_guiding_enabled && manifold_guiding_ready &&
+                           guiding_features_enabled && summary_available;
+
+  if (manifold_guiding_enabled) {
+    if (!manifold_guiding_ready) {
+      if ((manifold_failure_code == int(MPG_FAILURE_NONE)) &&
+          (!summary_available || (!manifold_gate_pass && !relax_gate)))
+      {
+        manifold_failure_code = int(MPG_FAILURE_GATE);
+      }
+    }
+    else if (!mpg_can_run) {
+      if (manifold_failure_code == int(MPG_FAILURE_NONE)) {
+        manifold_failure_code = int(MPG_FAILURE_GATE);
+      }
     }
   }
 
-  if (manifold_guiding_enabled && manifold_guiding_ready) {
+  if (mpg_can_run) {
     const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
     const int bounce = INTEGRATOR_STATE(state, path, bounce);
     RNGState manifold_rng_state = *rng_state;
