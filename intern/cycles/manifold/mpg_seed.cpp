@@ -1299,7 +1299,17 @@ bool mpg_generate_seed(KernelGlobals kg,
 
   seed.direction = seed_direction;
   seed.direction_normalized = accepted_direction_normalized;
-  seed.seed_pdf_raw = accepted_seed_pdf;
+  const float combined_seed_pdf_raw = accepted_seed_pdf * seed.bounce_pdf_raw;
+  const float combined_seed_pdf = normalized_pdf * seed.bounce_pdf;
+
+  if (!(isfinite_safe(combined_seed_pdf_raw) && combined_seed_pdf_raw > 0.0f) ||
+      !(isfinite_safe(combined_seed_pdf) && combined_seed_pdf > 0.0f))
+  {
+    failure_code = MPG_FAILURE_INVALID_SEED_PDF;
+    return false;
+  }
+
+  seed.seed_pdf_raw = combined_seed_pdf_raw;
   seed.seed_branch_pdf = accepted_branch_pdf;
   seed.seed_direction_pdf = accepted_direction_pdf;
   seed.seed_scatter_pdf = fmaxf(accepted_scatter_pdf, 1.0e-16f);
@@ -1313,7 +1323,7 @@ bool mpg_generate_seed(KernelGlobals kg,
   seed.scatter = successful_scatter_branch;
   seed.tau_bits = accepted_tau_bits;
   seed.tau_count = accepted_tau_count;
-  seed.seed_pdf = fmaxf(normalized_pdf, 1.0e-16f);
+  seed.seed_pdf = fmaxf(combined_seed_pdf, 1.0e-16f);
   seed.light_sample = light_sample;
   seed.path_flag = path_flag;
   /* Keep the light endpoint provided by the Cycles light sampler. For distant/background

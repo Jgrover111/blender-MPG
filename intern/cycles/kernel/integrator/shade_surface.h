@@ -259,7 +259,8 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
 
   if (kernel_data.film.pass_manifold_pdf_factors != PASS_UNUSED) {
     const float3 factor_values = make_float3(seed_pdf, light_pdf, jacobian);
-    /* `light_pdf` is stored in receiver solid angle and already includes the Jacobian. */
+    /* `seed_pdf` already includes the bounce-selection probability.
+     * `light_pdf` is stored in receiver solid angle and already includes the Jacobian. */
     const float invalid_sentinel_offset = 1.0f;
     /* Invalid PDF components are stored as -(abs(value) + offset) so the sign flags the
      * failure while the magnitude retains the previously accumulated average. Downstream tools
@@ -350,7 +351,8 @@ ccl_device_inline void surface_write_manifold_debug_metrics(KernelGlobals kg,
     if (manifold_pdf_factors_valid || sample == 0) {
       const bool denominator_valid = (isfinite_safe(mis_denominator) && mis_denominator >= 0.0f);
       const bool bounce_valid = (isfinite_safe(bounce_pdf) && bounce_pdf >= 0.0f);
-      /* Store the technique pdf, MIS weight, and the bounce-selection pdf for parity comparisons. */
+      /* Store the technique pdf (seed * light * J), MIS weight, and the bounce-selection pdf for
+       * parity comparisons. */
       float3 mis_values = make_float3(
           pdf_mpg, mis_weight, bounce_valid ? bounce_pdf : 0.0f);
       const bool mis_valid = (isfinite_safe(mis_values.x) &&
@@ -1109,8 +1111,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
         (isfinite_safe(mpg_result.bounce_pdf) && mpg_result.bounce_pdf > 0.0f);
 
     manifold_pdf_factors_valid = (gate_pass_any_result && !mpg_failure && mpg_result.success &&
-                                  seed_pdf_valid && light_pdf_valid && bounce_pdf_valid &&
-                                  jacobian_abs > 0.0f &&
+                                  seed_pdf_valid && light_pdf_valid && jacobian_abs > 0.0f &&
                                   pdf_mpg_sa > 0.0f);
 
     if (manifold_pdf_factors_valid) {

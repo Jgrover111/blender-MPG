@@ -456,15 +456,6 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
   result.visibility = compute_visibility_after_update(kg, sd, light_sample, result);
 
-  const float p_bounce = fmaxf(seed.bounce_pdf, 1.0e-16f);
-  if (!isfinite_safe(p_bounce) || p_bounce <= 0.0f) {
-    result.attempt_count = attempt_count;
-    result.failure_code = MPG_FAILURE_INVALID_PDF;
-    return result;
-  }
-  result.bounce_pdf = p_bounce;
-  result.bounce_pdf_raw = seed.bounce_pdf_raw;
-
   const float p_seed = fmaxf(seed.seed_pdf, 1.0e-16f);
   result.seed_pdf = p_seed;
 #ifdef WITH_CYCLES_DEBUG
@@ -493,7 +484,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
                 << ", dir=" << seed.seed_direction_pdf
                 << ", scatter=" << seed.seed_scatter_pdf
                 << ", scatter_branch=" << static_cast<int>(seed.scatter)
-                << ", bounce=" << seed.bounce_pdf;
+                << ", bounce=" << seed.bounce_pdf << " (folded into seed)";
     }
     if (isfinite_safe(p_seed) && isfinite_safe(mitsuba_seed_pdf)) {
       const float tolerance = fmaxf(fabsf(mitsuba_seed_pdf), 1.0e-16f) * 1.0e-4f;
@@ -518,7 +509,15 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.jacobian_total = J_total;
   result.light_pdf *= result.jacobian_total;
 
-  const float pdf_product = p_bounce * p_seed * result.light_pdf;
+  if (!isfinite_safe(seed.bounce_pdf) || seed.bounce_pdf <= 0.0f) {
+    result.attempt_count = attempt_count;
+    result.failure_code = MPG_FAILURE_INVALID_PDF;
+    return result;
+  }
+  result.bounce_pdf = seed.bounce_pdf;
+  result.bounce_pdf_raw = seed.bounce_pdf_raw;
+
+  const float pdf_product = p_seed * result.light_pdf;
   result.pdf = pdf_product;
   if (!isfinite_safe(pdf_product) || pdf_product <= 0.0f) {
     result.attempt_count = attempt_count;
@@ -543,7 +542,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   result.wi = solution.wi;
   result.seed_pdf = p_seed;
   result.seed_pdf_raw = seed.seed_pdf_raw;
-  result.bounce_pdf = p_bounce;
+  result.bounce_pdf = seed.bounce_pdf;
   result.bounce_pdf_raw = seed.bounce_pdf_raw;
   result.light = light_sample;
   result.attempt_count = attempt_count;
@@ -563,8 +562,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     DCHECK(isfinite_safe(result.jacobian_total) && result.jacobian_total > 0.0f);
     DCHECK(isfinite_safe(result.pdf) && result.pdf > 0.0f);
     if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
-      LOG_DEBUG << "MPG strict gate factors: bounce=" << result.bounce_pdf
-                << ", seed=" << result.seed_pdf
+      LOG_DEBUG << "MPG strict gate factors: seed(with bounce)=" << result.seed_pdf
+                << ", bounce=" << result.bounce_pdf
                 << ", light_receiver=" << result.light_pdf
                 << " (light_spec=" << p_light << ")"
                 << ", J=" << result.jacobian_total << ", pdf=" << result.pdf;
