@@ -12,6 +12,7 @@
 
 #include <cfloat>
 
+#include "util/log.h"
 #include "util/math.h"
 
 CCL_NAMESPACE_BEGIN

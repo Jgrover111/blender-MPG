@@ -16,6 +16,7 @@
 #include "kernel/types.h"
 
 #include "util/color.h"
+#include "util/log.h"
 #include "util/math_base.h"
 #include "util/math_float4.h"
 #include "util/math_intersect.h"
