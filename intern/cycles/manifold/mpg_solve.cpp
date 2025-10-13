@@ -614,6 +614,28 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   const bool seed_prefers_transmission = (seed_hemisphere == SeedHemisphere::Transmission);
   const bool seed_prefers_reflection = (seed_hemisphere == SeedHemisphere::Reflection);
 
+  const bool tau_hint_valid = (seed.tau_count > 0);
+  bool force_transmission = false;
+  bool force_reflection = false;
+  if (tau_hint_valid) {
+    force_transmission = (seed.tau_bits & 1u) != 0u;
+    force_reflection = !force_transmission;
+  }
+  else if (seed.scatter == MPG_SEED_SCATTER_REFRACTION) {
+    force_transmission = true;
+  }
+  else if (seed.scatter == MPG_SEED_SCATTER_REFLECTION) {
+    force_reflection = true;
+  }
+  const bool has_forced_scatter = force_transmission || force_reflection;
+
+  bool prefer_transmission = force_transmission;
+  bool prefer_reflection = force_reflection;
+  if (!prefer_transmission && !prefer_reflection) {
+    prefer_transmission = seed_prefers_transmission;
+    prefer_reflection = seed_prefers_reflection;
+  }
+
   bool have_singular_reflection = false;
   float eta_singular = 1.5f; // overwritten below with microfacet IOR when available
   SpecularParameters singular_refraction_params;
@@ -725,13 +747,30 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   };
 
   if (have_singular_reflection || have_singular_refraction_params) {
-    if (seed_prefers_transmission && have_singular_refraction_params) {
-      params = singular_refraction_params;
-      return true;
+    if (prefer_transmission) {
+      if (!have_singular_refraction_params) {
+        if (has_forced_scatter) {
+          return false;
+        }
+      }
+      else {
+        params = singular_refraction_params;
+        return true;
+      }
     }
-    if (seed_prefers_reflection && have_singular_reflection) {
-      fill_singular_reflection();
-      return true;
+    if (prefer_reflection) {
+      if (!have_singular_reflection) {
+        if (has_forced_scatter) {
+          return false;
+        }
+      }
+      else {
+        fill_singular_reflection();
+        return true;
+      }
+    }
+    if (has_forced_scatter) {
+      return false;
     }
     if (!have_singular_reflection) {
       params = singular_refraction_params;
@@ -747,11 +786,14 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   }
 
   const MicrofacetBsdf *microfacet = nullptr;
-  if (seed_prefers_transmission && refraction_microfacet != nullptr) {
+  if (prefer_transmission && refraction_microfacet != nullptr) {
     microfacet = refraction_microfacet;
   }
-  else if (seed_prefers_reflection && reflection_microfacet != nullptr) {
+  else if (prefer_reflection && reflection_microfacet != nullptr) {
     microfacet = reflection_microfacet;
+  }
+  else if (has_forced_scatter) {
+    return false;
   }
   else if (refraction_microfacet != nullptr && reflection_microfacet == nullptr) {
     microfacet = refraction_microfacet;
@@ -1195,6 +1237,11 @@ bool trace_secondary_seed(KernelGlobals kg,
   secondary_seed.prim = isect.prim;
   secondary_seed.bary_u = isect.u;
   secondary_seed.bary_v = isect.v;
+  if (secondary_seed.tau_count > 0) {
+    const uint8_t remaining_tau_count = secondary_seed.tau_count;
+    secondary_seed.tau_bits = static_cast<uint8_t>(secondary_seed.tau_bits >> 1);
+    secondary_seed.tau_count = (remaining_tau_count > 0) ? static_cast<uint8_t>(remaining_tau_count - 1) : 0;
+  }
 
   bool has_smooth_normals = secondary_seed.use_smooth_normals;
   smooth_normals_at_hit(kg, ray, isect, has_smooth_normals);
