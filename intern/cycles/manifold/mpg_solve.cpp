@@ -22,6 +22,10 @@
 #include <cfloat>
 #include <cmath>
 
+#ifdef WITH_CYCLES_DEBUG
+#  include "util/log.h"
+#endif
+
 CCL_NAMESPACE_BEGIN
 
 namespace {
@@ -1807,6 +1811,39 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   if (!trace_secondary_seed(
           kg, sd, primary_geometry, primary_u, primary_v, seed, primary_params, secondary_seed))
   {
+    const bool refractive_seed = (seed.scatter == MPG_SEED_SCATTER_REFRACTION);
+    const bool expects_double_bounce = (seed.bounce_count == 2);
+    if (refractive_seed && expects_double_bounce) {
+      MpgSeedRay single_bounce_seed = seed;
+      single_bounce_seed.bounce_count = 1;
+      if (single_bounce_seed.tau_count > 0) {
+        single_bounce_seed.tau_bits &= 1u;
+        single_bounce_seed.tau_count = 1;
+      }
+
+#ifdef WITH_CYCLES_DEBUG
+      if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
+        LOG_DEBUG
+            << "MPG double-bounce refraction seed missing exit surface, retrying as single bounce";
+      }
+#endif
+
+      MpgSolverOutput single_result;
+      MpgFailureCode single_failure = MPG_FAILURE_NONE;
+      if (mpg_solve_single_bounce(
+              kg, sd, bsdf, single_bounce_seed, options, rng_state, single_result, single_failure))
+      {
+        result = single_result;
+        failure_code = MPG_FAILURE_NONE;
+        return true;
+      }
+
+      if (single_failure != MPG_FAILURE_NONE) {
+        failure_code = single_failure;
+        return false;
+      }
+    }
+
     failure_code = MPG_FAILURE_SEED;
     return false;
   }

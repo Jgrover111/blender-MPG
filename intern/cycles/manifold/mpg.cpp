@@ -518,6 +518,17 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   }
   result.bounce_pdf = seed.bounce_pdf;
   result.bounce_pdf_raw = seed.bounce_pdf_raw;
+#ifdef WITH_CYCLES_DEBUG
+  if (LOG_IS_ON(LOG_LEVEL_DEBUG) && seed.bounce_count != result.bounce_count) {
+    LOG_DEBUG << "MPG solver adjusted bounce count (seed=" << seed.bounce_count
+              << ", solution=" << result.bounce_count
+              << ", scatter=" << static_cast<int>(seed.scatter)
+              << ", seed_pdf=" << result.seed_pdf
+              << ", light_pdf=" << result.light_pdf
+              << ", jacobian=" << result.jacobian_total
+              << ", bounce_pdf=" << result.bounce_pdf << ")";
+  }
+#endif
 
   const float pdf_product = p_seed * result.light_pdf;
   result.pdf = pdf_product;
