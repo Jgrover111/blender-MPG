@@ -391,7 +391,7 @@ float3 compute_specular(const float3 &dir_ds,
                         float &cos_theta_t,
                         float &eta_used)
 {
-  const float3 incident = dir_ds;
+  const float3 incident = -dir_ds;
   const float dot_normal_incident = dot(normal, incident);
   const bool entering = dot_normal_incident <= 0.0f;
 
@@ -984,21 +984,21 @@ void compute_jacobian(const ShadingPoint &D,
 
   float3 d_spec_du, d_spec_dv;
   if (!eval.refractive) {
-    d_spec_du = derivative_specular_reflection(eval.dir_ds, d_dir_ds_du, eval.normal, eval.dNdu);
-    d_spec_dv = derivative_specular_reflection(eval.dir_ds, d_dir_ds_dv, eval.normal, eval.dNdv);
+    d_spec_du = derivative_specular_reflection(-eval.dir_ds, -d_dir_ds_du, eval.normal, eval.dNdu);
+    d_spec_dv = derivative_specular_reflection(-eval.dir_ds, -d_dir_ds_dv, eval.normal, eval.dNdv);
   }
   else {
     const float sin_theta_i = sqrtf(fmaxf(0.0f, 1.0f - eval.cos_theta_i * eval.cos_theta_i));
-    d_spec_du = derivative_specular_refraction(eval.dir_ds,
-                                               d_dir_ds_du,
+    d_spec_du = derivative_specular_refraction(-eval.dir_ds,
+                                               -d_dir_ds_du,
                                                eval.normal,
                                                eval.dNdu,
                                                eval.eta,
                                                eval.cos_theta_i,
                                                eval.cos_theta_t,
                                                sin_theta_i);
-    d_spec_dv = derivative_specular_refraction(eval.dir_ds,
-                                               d_dir_ds_dv,
+    d_spec_dv = derivative_specular_refraction(-eval.dir_ds,
+                                               -d_dir_ds_dv,
                                                eval.normal,
                                                eval.dNdv,
                                                eval.eta,
