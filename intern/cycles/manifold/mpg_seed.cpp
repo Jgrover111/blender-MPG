@@ -425,23 +425,26 @@ bool mpg_generate_seed(KernelGlobals kg,
   }
 
   const float transmission_dot_wi = geometric_normal_valid ? dot(transmission_normal, sd.wi) : 0.0f;
-  const float transmission_hemisphere_sign = geometric_normal_valid ?
-                                                 ((transmission_dot_wi >= 0.0f) ? -1.0f : 1.0f) :
-                                                 1.0f;
+  float3 transmission_hemisphere_normal = transmission_normal;
+  bool transmission_hemisphere_valid = !is_zero(transmission_hemisphere_normal);
+  if (transmission_hemisphere_valid && geometric_normal_valid) {
+    if (transmission_dot_wi < 0.0f) {
+      transmission_hemisphere_normal = -transmission_hemisphere_normal;
+    }
+  }
+  if (transmission_hemisphere_valid) {
+    transmission_hemisphere_normal = safe_normalize(transmission_hemisphere_normal);
+    transmission_hemisphere_valid = !is_zero(transmission_hemisphere_normal);
+  }
   const float hemisphere_epsilon = 1.0e-5f;
 
   bool prefer_transmission = false;
   bool prefer_transmission_from_guide = false;
 
-  if (guided_axis_valid && geometric_normal_valid) {
-    const float dot_axis_transmission = dot(guided_axis, transmission_normal);
+  if (guided_axis_valid && transmission_hemisphere_valid) {
+    const float dot_axis_transmission = dot(guided_axis, transmission_hemisphere_normal);
     if (fabsf(dot_axis_transmission) > hemisphere_epsilon) {
-      if (fabsf(transmission_dot_wi) > hemisphere_epsilon) {
-        prefer_transmission = (dot_axis_transmission * transmission_dot_wi < 0.0f);
-      }
-      else {
-        prefer_transmission = (dot_axis_transmission < 0.0f);
-      }
+      prefer_transmission = (dot_axis_transmission > 0.0f);
       prefer_transmission_from_guide = true;
     }
   }
@@ -452,8 +455,8 @@ bool mpg_generate_seed(KernelGlobals kg,
     }
     else if (seed_lobe == SeedLobe::Dual) {
       bool decided = false;
-      if (guided_axis_valid && geometric_normal_valid) {
-        const float ref_dot_trans = dot(guided_axis, transmission_normal);
+      if (guided_axis_valid && transmission_hemisphere_valid) {
+        const float ref_dot_trans = dot(guided_axis, transmission_hemisphere_normal);
         const float ref_dot_refl = dot(guided_axis, reflection_normal);
         if (fabsf(ref_dot_trans) > hemisphere_epsilon || fabsf(ref_dot_refl) > hemisphere_epsilon) {
           prefer_transmission = fabsf(ref_dot_trans) > fabsf(ref_dot_refl);
@@ -467,7 +470,7 @@ bool mpg_generate_seed(KernelGlobals kg,
         if (reference_valid) {
           const float3 reference = safe_normalize(reference_dir);
           if (!is_zero(reference)) {
-            const float ref_dot_trans = dot(reference, transmission_normal);
+            const float ref_dot_trans = dot(reference, transmission_hemisphere_normal);
             const float ref_dot_refl = dot(reference, reflection_normal);
             prefer_transmission = fabsf(ref_dot_trans) > fabsf(ref_dot_refl);
           }
@@ -554,17 +557,14 @@ bool mpg_generate_seed(KernelGlobals kg,
     axis_valid = !is_zero(axis);
   }
 
-  if (axis_valid && geometric_normal_valid) {
-    const float dot_axis_transmission = dot(axis, transmission_normal);
-    if (fabsf(dot_axis_transmission) > hemisphere_epsilon &&
-        (dot_axis_transmission * transmission_hemisphere_sign) >= 0.0f)
-    {
+  if (axis_valid && transmission_hemisphere_valid) {
+    const float dot_axis_transmission = dot(axis, transmission_hemisphere_normal);
+    if (fabsf(dot_axis_transmission) > hemisphere_epsilon && dot_axis_transmission >= 0.0f) {
       prefer_transmission = true;
     }
   }
 
   const bool reflection_hemisphere_valid = !is_zero(reflection_normal);
-  const bool transmission_hemisphere_valid = !is_zero(transmission_normal);
 
   float3 axis_reflection = axis;
   bool axis_reflection_valid = axis_valid;
@@ -591,17 +591,13 @@ bool mpg_generate_seed(KernelGlobals kg,
     axis_transmission_valid = !is_zero(axis_transmission);
   }
   if (axis_transmission_valid && transmission_hemisphere_valid) {
-    float dot_axis_transmission = dot(axis_transmission, transmission_normal);
-    if (fabsf(dot_axis_transmission) > hemisphere_epsilon &&
-        (dot_axis_transmission * transmission_hemisphere_sign) < 0.0f)
-    {
+    float dot_axis_transmission = dot(axis_transmission, transmission_hemisphere_normal);
+    if (fabsf(dot_axis_transmission) > hemisphere_epsilon && dot_axis_transmission < 0.0f) {
       axis_transmission = safe_normalize(-axis_transmission);
       axis_transmission_valid = !is_zero(axis_transmission);
-      dot_axis_transmission = dot(axis_transmission, transmission_normal);
+      dot_axis_transmission = dot(axis_transmission, transmission_hemisphere_normal);
     }
-    if (axis_transmission_valid &&
-        (dot_axis_transmission * transmission_hemisphere_sign) < 0.0f)
-    {
+    if (axis_transmission_valid && dot_axis_transmission < 0.0f) {
       axis_transmission_valid = false;
     }
   }
@@ -632,10 +628,7 @@ bool mpg_generate_seed(KernelGlobals kg,
 
   float3 fallback_uniform_transmission_axis = zero_float3();
   if (fallback_transmission_enforces_hemisphere) {
-    float3 transmission_axis = transmission_normal;
-    if (transmission_hemisphere_sign < 0.0f) {
-      transmission_axis = -transmission_axis;
-    }
+    float3 transmission_axis = transmission_hemisphere_normal;
     if (!is_zero(transmission_axis)) {
       fallback_uniform_transmission_axis = safe_normalize(transmission_axis);
     }
@@ -655,8 +648,8 @@ bool mpg_generate_seed(KernelGlobals kg,
       if (!transmission_hemisphere_valid) {
         return true;
       }
-      const float dot_ng_dir = dot(direction, transmission_normal);
-      return dot_ng_dir * transmission_hemisphere_sign >= 0.0f;
+      const float dot_ng_dir = dot(direction, transmission_hemisphere_normal);
+      return dot_ng_dir >= 0.0f;
     }
     if (!reflection_hemisphere_valid) {
       return true;
@@ -803,12 +796,9 @@ bool mpg_generate_seed(KernelGlobals kg,
     reflection_hemisphere_axis_valid = !is_zero(reflection_hemisphere_axis);
   }
 
-  float3 transmission_hemisphere_axis = transmission_normal;
+  float3 transmission_hemisphere_axis = transmission_hemisphere_normal;
   bool transmission_hemisphere_axis_valid = transmission_hemisphere_valid;
   if (transmission_hemisphere_axis_valid) {
-    if (transmission_hemisphere_sign < 0.0f) {
-      transmission_hemisphere_axis = -transmission_hemisphere_axis;
-    }
     transmission_hemisphere_axis = safe_normalize(transmission_hemisphere_axis);
     transmission_hemisphere_axis_valid = !is_zero(transmission_hemisphere_axis);
   }
