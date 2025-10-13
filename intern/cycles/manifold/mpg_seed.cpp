@@ -380,7 +380,7 @@ bool mpg_generate_seed(KernelGlobals kg,
     if (CLOSURE_IS_GLASS(closure.type)) {
       return SeedLobe::Dual;
     }
-    return SeedLobe::Reflection;
+    return SeedLobe::Dual;
   };
 
   const SeedLobe seed_lobe = classify_seed_lobe(bsdf);
@@ -440,18 +440,21 @@ bool mpg_generate_seed(KernelGlobals kg,
 
   bool prefer_transmission = false;
   bool prefer_transmission_from_guide = false;
+  bool prefer_transmission_decided = false;
 
   if (guided_axis_valid && transmission_hemisphere_valid) {
     const float dot_axis_transmission = dot(guided_axis, transmission_hemisphere_normal);
     if (fabsf(dot_axis_transmission) > hemisphere_epsilon) {
       prefer_transmission = (dot_axis_transmission > 0.0f);
       prefer_transmission_from_guide = true;
+      prefer_transmission_decided = true;
     }
   }
 
   if (!prefer_transmission_from_guide) {
     if (seed_lobe == SeedLobe::Transmission) {
       prefer_transmission = true;
+      prefer_transmission_decided = true;
     }
     else if (seed_lobe == SeedLobe::Dual) {
       bool decided = false;
@@ -473,14 +476,16 @@ bool mpg_generate_seed(KernelGlobals kg,
             const float ref_dot_trans = dot(reference, transmission_hemisphere_normal);
             const float ref_dot_refl = dot(reference, reflection_normal);
             prefer_transmission = fabsf(ref_dot_trans) > fabsf(ref_dot_refl);
+            decided = true;
           }
         }
       }
+      prefer_transmission_decided |= decided;
     }
   }
 
-  float reflection_probability = 1.0f;
-  float transmission_probability = 0.0f;
+  float reflection_probability = 0.5f;
+  float transmission_probability = 0.5f;
 
   if (seed_lobe == SeedLobe::Transmission) {
     reflection_probability = 0.0f;
@@ -500,8 +505,11 @@ bool mpg_generate_seed(KernelGlobals kg,
         transmission_probability = 1.0f - reflection_probability;
       }
       else {
-        reflection_probability = prefer_transmission ? 0.0f : 1.0f;
-        transmission_probability = 1.0f - reflection_probability;
+        if (prefer_transmission_decided) {
+          const float preferred_reflection = prefer_transmission ? 0.25f : 0.75f;
+          reflection_probability = preferred_reflection;
+          transmission_probability = 1.0f - preferred_reflection;
+        }
       }
     }
   }
@@ -525,9 +533,11 @@ bool mpg_generate_seed(KernelGlobals kg,
     const float diff = transmission_probability - reflection_probability;
     if (diff > 1.0e-5f) {
       prefer_transmission = true;
+      prefer_transmission_decided = true;
     }
     else if (diff < -1.0e-5f) {
       prefer_transmission = false;
+      prefer_transmission_decided = true;
     }
   }
 
@@ -561,6 +571,7 @@ bool mpg_generate_seed(KernelGlobals kg,
     const float dot_axis_transmission = dot(axis, transmission_hemisphere_normal);
     if (fabsf(dot_axis_transmission) > hemisphere_epsilon && dot_axis_transmission >= 0.0f) {
       prefer_transmission = true;
+      prefer_transmission_decided = true;
     }
   }
 
