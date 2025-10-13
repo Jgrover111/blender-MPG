@@ -690,9 +690,6 @@ bool specular_parameters_from_surface(KernelGlobals kg,
         if (refraction_microfacet) {
           eta = fmaxf(1.0e-6f, refraction_microfacet->ior);
         }
-        if (spec_sd.flag & SD_BACKFACING) {
-          eta = (eta > 1e-6f) ? 1.0f / eta : eta;
-        }
         refraction_params.base_eta = fabsf(eta);
         if (has_shading_normal) {
           refraction_params.normal = shading_normal;
@@ -814,9 +811,8 @@ bool specular_parameters_from_surface(KernelGlobals kg,
 
   params.is_refraction = (microfacet == refraction_microfacet);
   if (params.is_refraction) {
-    float eta = microfacet->ior;
+    const float eta = microfacet->ior;
     if (fabsf(eta) <= 1e-6f) return false;
-    if (spec_sd.flag & SD_BACKFACING) eta = 1.0f / eta;
     params.base_eta = fabsf(eta);
   }
   else {
