@@ -640,6 +640,20 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     prefer_reflection = seed_prefers_reflection;
   }
 
+#ifdef WITH_CYCLES_DEBUG
+  auto log_forced_scatter_mismatch = [&](const char *requested, const char *fallback) {
+    if (!has_forced_scatter) {
+      return;
+    }
+    if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
+      LOG_DEBUG << "MPG seed forced " << requested << " scatter but only " << fallback
+                << " available; falling back.";
+    }
+  };
+#else
+  auto log_forced_scatter_mismatch = [&](const char *, const char *) {};
+#endif
+
   bool have_singular_reflection = false;
   float eta_singular = 1.5f; // overwritten below with microfacet IOR when available
   SpecularParameters singular_refraction_params;
@@ -750,9 +764,7 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   if (have_singular_reflection || have_singular_refraction_params) {
     if (prefer_transmission) {
       if (!have_singular_refraction_params) {
-        if (has_forced_scatter) {
-          return false;
-        }
+        log_forced_scatter_mismatch("refraction", "singular reflection");
       }
       else {
         params = singular_refraction_params;
@@ -761,17 +773,12 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     }
     if (prefer_reflection) {
       if (!have_singular_reflection) {
-        if (has_forced_scatter) {
-          return false;
-        }
+        log_forced_scatter_mismatch("reflection", "singular refraction");
       }
       else {
         fill_singular_reflection();
         return true;
       }
-    }
-    if (has_forced_scatter) {
-      return false;
     }
     if (!have_singular_reflection) {
       params = singular_refraction_params;
@@ -790,19 +797,30 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   if (prefer_transmission && refraction_microfacet != nullptr) {
     microfacet = refraction_microfacet;
   }
-  else if (prefer_reflection && reflection_microfacet != nullptr) {
+  else if (prefer_transmission && has_forced_scatter) {
+    const char *available = (reflection_microfacet != nullptr) ? "microfacet reflection"
+                                                              : "no microfacet lobe";
+    log_forced_scatter_mismatch("refraction", available);
+  }
+
+  if (microfacet == nullptr && prefer_reflection && reflection_microfacet != nullptr) {
     microfacet = reflection_microfacet;
   }
-  else if (has_forced_scatter) {
-    return false;
+  else if (microfacet == nullptr && prefer_reflection && has_forced_scatter) {
+    const char *available = (refraction_microfacet != nullptr) ? "microfacet refraction"
+                                                              : "no microfacet lobe";
+    log_forced_scatter_mismatch("reflection", available);
   }
-  else if (refraction_microfacet != nullptr && reflection_microfacet == nullptr) {
+
+  if (microfacet == nullptr && refraction_microfacet != nullptr && reflection_microfacet == nullptr) {
     microfacet = refraction_microfacet;
   }
-  else if (reflection_microfacet != nullptr && refraction_microfacet == nullptr) {
+  else if (microfacet == nullptr && reflection_microfacet != nullptr &&
+           refraction_microfacet == nullptr)
+  {
     microfacet = reflection_microfacet;
   }
-  else if (refraction_microfacet != nullptr) {
+  else if (microfacet == nullptr && refraction_microfacet != nullptr) {
     microfacet = refraction_microfacet;
   }
   if (microfacet == nullptr) return false;
