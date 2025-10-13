@@ -374,7 +374,7 @@ float3 refract_dir(const float3 &dir_in,
                    float &cos_theta_i,
                    float &cos_theta_t)
 {
-  float3 dir_out;
+  float3 dir_out = zero_float3();
   if (!refract_dir(dir_in, normal, eta, dir_out, cos_theta_i, cos_theta_t)) {
     tir = true;
     return dir_out;
