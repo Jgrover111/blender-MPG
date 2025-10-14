@@ -393,12 +393,9 @@ float3 compute_specular(const float3 &dir_ds,
 {
   const float3 incident = -dir_ds;
   const float dot_normal_incident = dot(normal, incident);
-  const bool entering = dot_normal_incident >= 0.0f;
+  const bool entering = dot_normal_incident <= 0.0f;
 
-  float3 oriented_normal = normal;
-  if (dot_normal_incident > 0.0f) {
-    oriented_normal = -oriented_normal;
-  }
+  float3 oriented_normal = entering ? normal : -normal;
 
   if (!params.is_refraction) {
     tir = false;
