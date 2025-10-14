@@ -501,6 +501,18 @@ void evaluate_specular(const ShadingPoint &D,
     eval.dNdv = zero_float3();
   }
 
+  if (!is_zero(eval.normal)) {
+    eval.normal = safe_normalize(eval.normal);
+
+    const bool flip_to_params = params.has_normal && dot(eval.normal, params.normal) < 0.0f;
+    const bool flip_to_receiver = !params.has_normal && dot(eval.normal, eval.dir_ds) > 0.0f;
+    if (flip_to_params || flip_to_receiver) {
+      eval.normal = -eval.normal;
+      eval.dNdu = -eval.dNdu;
+      eval.dNdv = -eval.dNdv;
+    }
+  }
+
   float cos_theta_i = 0.0f, cos_theta_t = 0.0f, eta = 1.0f;
   const float3 spec_dir = compute_specular(
       eval.dir_ds, eval.normal, params, eval.tir, cos_theta_i, cos_theta_t, eta);
