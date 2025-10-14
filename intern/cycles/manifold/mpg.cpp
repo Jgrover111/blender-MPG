@@ -346,6 +346,13 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     }
     result.attempt_count = attempt_count;
 #ifdef WITH_CYCLES_DEBUG
+    if (solver_failure == MPG_FAILURE_NEWTON_DIVERGED && seed.scatter == MPG_SEED_SCATTER_REFRACTION &&
+        seed.bounce_count == 1)
+    {
+      DCHECK(false);
+    }
+#endif
+#ifdef WITH_CYCLES_DEBUG
     if (bootstrap_gate_pass && LOG_IS_ON(LOG_LEVEL_DEBUG)) {
       LOG_DEBUG << "MPG bootstrap gate solver attempts=" << attempt_count
                 << " (used_bootstrap_seed=" << (used_bootstrap_seed ? "yes" : "no")

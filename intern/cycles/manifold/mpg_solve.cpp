@@ -212,8 +212,8 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     return mf.weight * fw;
   }
   else {
-    const bool has_cos_i = (cos_theta_i_hint >= 0.0f);
-    const bool has_cos_t = (cos_theta_t_hint >= 0.0f);
+    const bool has_cos_i = isfinite_safe(cos_theta_i_hint);
+    const bool has_cos_t = isfinite_safe(cos_theta_t_hint);
     float3 normal = params.normal;
     if (!params.has_normal) {
       normal = params.has_microfacet ? params.microfacet.N : normal;
@@ -224,43 +224,27 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     normal = normalize(normal);
 
     float3 oriented_normal = normal;
-    if (cos_theta_i_hint < 0.0f) {
+    if (has_cos_i && cos_theta_i_hint < 0.0f) {
       oriented_normal = -oriented_normal;
     }
     else if (dot(oriented_normal, dir_ds) > 0.0f) {
       oriented_normal = -oriented_normal;
     }
 
-    float cos_theta_i = has_cos_i ? fabsf(cos_theta_i_hint) : -dot(oriented_normal, dir_ds);
+    const float cos_theta_i_signed = has_cos_i ? cos_theta_i_hint : -dot(oriented_normal, dir_ds);
+    const float cos_theta_i = fabsf(cos_theta_i_signed);
     const float cos_theta_o = dot(oriented_normal, dir_sl);
 
     if (params.is_refraction) {
-      if (!has_cos_i) {
-        if (cos_theta_i == 0.0f || cos_theta_o == 0.0f || cos_theta_i * cos_theta_o >= 0.0f) {
-          return zero_spectrum();
-        }
-        cos_theta_i = fabsf(cos_theta_i);
-      }
-      else {
-        if (!(cos_theta_i > 0.0f) || cos_theta_o >= 0.0f) {
-          return zero_spectrum();
-        }
+      if (!(cos_theta_i > 0.0f) || cos_theta_o == 0.0f || cos_theta_i_signed * cos_theta_o >= 0.0f) {
+        return zero_spectrum();
       }
     }
     else {
-      if (!has_cos_i) {
-        if (cos_theta_i <= 0.0f || cos_theta_o <= 0.0f) {
-          return zero_spectrum();
-        }
-        cos_theta_i = fabsf(cos_theta_i);
-      }
-      else {
-        if (!(cos_theta_i > 0.0f) || cos_theta_o <= 0.0f) {
-          return zero_spectrum();
-        }
+      if (!(cos_theta_i > 0.0f) || cos_theta_o <= 0.0f) {
+        return zero_spectrum();
       }
     }
-    cos_theta_i = fabsf(cos_theta_i);
 
     if (params.has_conductor_fresnel) {
       if (!(cos_theta_i > 1e-7f)) {
@@ -274,7 +258,7 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
       return zero_spectrum();
     }
 
-    float cos_theta_t = has_cos_t ? cos_theta_t_hint : 0.0f;
+    float cos_theta_t = has_cos_t ? fabsf(cos_theta_t_hint) : 0.0f;
     float relative_eta = eta;
     if (params.is_refraction) {
       const float dot_incident_normal = dot(normal, dir_ds);
@@ -397,7 +381,7 @@ float3 compute_specular(const float3 &dir_ds,
 
   if (!params.is_refraction) {
     tir = false;
-    cos_theta_i = fabsf(dot(incoming, oriented_normal));
+    cos_theta_i = dot(incoming, oriented_normal);
     cos_theta_t = cos_theta_i;
     eta_used = 1.0f;
     return reflect_dir(incoming, oriented_normal);
@@ -410,13 +394,10 @@ float3 compute_specular(const float3 &dir_ds,
   float3 dir = refract_dir(incoming, oriented_normal, safe_eta_ratio, tir, cos_theta_i, cos_theta_t);
   eta_used = safe_eta_ratio;
   if (tir) {
-    cos_theta_i = fabsf(cos_theta_i);
     cos_theta_t = 0.0f;
     return dir;
   }
 
-  cos_theta_i = fabsf(cos_theta_i);
-  cos_theta_t = fabsf(cos_theta_t);
   return dir;
 }
 
@@ -1015,7 +996,8 @@ float3 derivative_specular_refraction(const float3 &dir_ds,
   const float3 dir_in = -dir_ds;
   const float3 d_dir_in = -d_dir_ds;
   const float d_cos_theta_i = -dot(d_dir_in, normal) - dot(dir_in, d_normal);
-  const float denom = fmaxf(1e-8f, cos_theta_t);
+  const float abs_cos_theta_t = fmaxf(1e-8f, fabsf(cos_theta_t));
+  const float denom = copysignf(abs_cos_theta_t, cos_theta_t);
   const float d_cos_theta_t = (eta * eta * cos_theta_i / denom) * d_cos_theta_i;
   const float3 term_dir = eta * d_dir_in;
   const float3 term_normal = (eta * d_cos_theta_i - d_cos_theta_t) * normal +
