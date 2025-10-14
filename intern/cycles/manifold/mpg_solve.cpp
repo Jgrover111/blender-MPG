@@ -212,7 +212,6 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     return mf.weight * fw;
   }
   else {
-    const float3 wi = -dir_ds;
     const bool has_cos_i = (cos_theta_i_hint >= 0.0f);
     const bool has_cos_t = (cos_theta_t_hint >= 0.0f);
     float3 normal = params.normal;
@@ -228,11 +227,11 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     if (cos_theta_i_hint < 0.0f) {
       oriented_normal = -oriented_normal;
     }
-    else if (dot(oriented_normal, wi) < 0.0f) {
+    else if (dot(oriented_normal, dir_ds) > 0.0f) {
       oriented_normal = -oriented_normal;
     }
 
-    float cos_theta_i = has_cos_i ? fabsf(cos_theta_i_hint) : dot(oriented_normal, wi);
+    float cos_theta_i = has_cos_i ? fabsf(cos_theta_i_hint) : -dot(oriented_normal, dir_ds);
     const float cos_theta_o = dot(oriented_normal, dir_sl);
 
     if (params.is_refraction) {
@@ -278,8 +277,8 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     float cos_theta_t = has_cos_t ? cos_theta_t_hint : 0.0f;
     float relative_eta = eta;
     if (params.is_refraction) {
-      const float dot_wi_normal = dot(normal, wi);
-      const bool entering = dot_wi_normal >= 0.0f;
+      const float dot_incident_normal = dot(normal, dir_ds);
+      const bool entering = dot_incident_normal <= 0.0f;
       relative_eta = entering ? (1.0f / eta) : eta;
       if (!has_cos_t) {
         const float sin2_theta_i = fmaxf(0.0f, 1.0f - cos_theta_i * cos_theta_i);
@@ -391,25 +390,26 @@ float3 compute_specular(const float3 &dir_ds,
                         float &cos_theta_t,
                         float &eta_used)
 {
-  const float3 incident = -dir_ds;
+  const float3 incident = dir_ds;
+  const float3 incoming = -incident;
   const float dot_normal_incident = dot(normal, incident);
-  const bool entering = dot_normal_incident <= 0.0f;
+  const bool entering = dot_normal_incident >= 0.0f;
 
   float3 oriented_normal = entering ? normal : -normal;
 
   if (!params.is_refraction) {
     tir = false;
-    cos_theta_i = fmaxf(-dot(incident, oriented_normal), 0.0f);
+    cos_theta_i = fmaxf(dot(incident, oriented_normal), 0.0f);
     cos_theta_t = cos_theta_i;
     eta_used = 1.0f;
-    return reflect_dir(incident, oriented_normal);
+    return reflect_dir(incoming, oriented_normal);
   }
 
   const float safe_base_eta = fmaxf(params.base_eta, 1e-6f);
   const float eta_ratio = entering ? (1.0f / safe_base_eta) : safe_base_eta;
   const float safe_eta_ratio = fmaxf(eta_ratio, 1e-6f);
 
-  float3 dir = refract_dir(incident, oriented_normal, safe_eta_ratio, tir, cos_theta_i, cos_theta_t);
+  float3 dir = refract_dir(incoming, oriented_normal, safe_eta_ratio, tir, cos_theta_i, cos_theta_t);
   eta_used = safe_eta_ratio;
   if (tir) {
     cos_theta_i = fabsf(cos_theta_i);
@@ -992,19 +992,21 @@ float compute_visibility(KernelGlobals kg,
   return occluded ? 0.0f : 1.0f;
 }
 
-float3 derivative_specular_reflection(const float3 &dir_in,
-                                      const float3 &d_dir_in,
+float3 derivative_specular_reflection(const float3 &dir_ds,
+                                      const float3 &d_dir_ds,
                                       const float3 &normal,
                                       const float3 &d_normal)
 {
+  const float3 dir_in = -dir_ds;
+  const float3 d_dir_in = -d_dir_ds;
   const float dot_in_n = dot(dir_in, normal);
   const float d_dot = dot(d_dir_in, normal) + dot(dir_in, d_normal);
   const float3 d_reflect = d_dir_in - 2.0f * (d_dot * normal + dot_in_n * d_normal);
   return d_reflect;
 }
 
-float3 derivative_specular_refraction(const float3 &dir_in,
-                                      const float3 &d_dir_in,
+float3 derivative_specular_refraction(const float3 &dir_ds,
+                                      const float3 &d_dir_ds,
                                       const float3 &normal,
                                       const float3 &d_normal,
                                       const float eta,
@@ -1012,6 +1014,8 @@ float3 derivative_specular_refraction(const float3 &dir_in,
                                       const float cos_theta_t,
                                       const float sin_theta_i)
 {
+  const float3 dir_in = -dir_ds;
+  const float3 d_dir_in = -d_dir_ds;
   const float d_cos_theta_i = -dot(d_dir_in, normal) - dot(dir_in, d_normal);
   const float denom = fmaxf(1e-8f, cos_theta_t);
   const float d_cos_theta_t = (eta * eta * cos_theta_i / denom) * d_cos_theta_i;
@@ -1037,21 +1041,21 @@ void compute_jacobian(const ShadingPoint &D,
 
   float3 d_spec_du, d_spec_dv;
   if (!eval.refractive) {
-    d_spec_du = derivative_specular_reflection(-eval.dir_ds, -d_dir_ds_du, eval.normal, eval.dNdu);
-    d_spec_dv = derivative_specular_reflection(-eval.dir_ds, -d_dir_ds_dv, eval.normal, eval.dNdv);
+    d_spec_du = derivative_specular_reflection(eval.dir_ds, d_dir_ds_du, eval.normal, eval.dNdu);
+    d_spec_dv = derivative_specular_reflection(eval.dir_ds, d_dir_ds_dv, eval.normal, eval.dNdv);
   }
   else {
     const float sin_theta_i = sqrtf(fmaxf(0.0f, 1.0f - eval.cos_theta_i * eval.cos_theta_i));
-    d_spec_du = derivative_specular_refraction(-eval.dir_ds,
-                                               -d_dir_ds_du,
+    d_spec_du = derivative_specular_refraction(eval.dir_ds,
+                                               d_dir_ds_du,
                                                eval.normal,
                                                eval.dNdu,
                                                eval.eta,
                                                eval.cos_theta_i,
                                                eval.cos_theta_t,
                                                sin_theta_i);
-    d_spec_dv = derivative_specular_refraction(-eval.dir_ds,
-                                               -d_dir_ds_dv,
+    d_spec_dv = derivative_specular_refraction(eval.dir_ds,
+                                               d_dir_ds_dv,
                                                eval.normal,
                                                eval.dNdv,
                                                eval.eta,
@@ -1782,12 +1786,12 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   result.prim = vertex.prim;
   result.is_refraction = vertex.is_refraction;
 
-  /* Evaluate the specular weight using the incident direction that points from the specular
-   * vertex back to the receiver. This matches the convention used by the double-bounce solver
-   * while keeping `result.dir_ds`/`result.wi` as the receiver -> specular direction for callers.
+  /* Evaluate the specular weight using the receiver -> specular direction so the acceptance
+   * checks align with the Mitsuba reference while `result.dir_ds`/`result.wi` remain the forward
+   * ray from the receiver.
    */
   result.spec_weight = evaluate_specular_weight(
-      kg, params, vertex.dir_in, result.dir_sl, vertex.cos_theta_in, vertex.cos_theta_out);
+      kg, params, result.dir_ds, result.dir_sl, vertex.cos_theta_in, vertex.cos_theta_out);
   if (is_zero(result.spec_weight)) {
     failure_code = MPG_FAILURE_ZERO_THROUGHPUT;
     return false;
@@ -1809,7 +1813,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   }
 
   const float area_element = len(cross(eval.dXdu, eval.dXdv));
-  const float cos_theta = fabsf(dot(eval.normal, -result.wi));
+  const float cos_theta = fabsf(dot(eval.normal, result.wi));
   if (area_element <= 0.0f || cos_theta <= 0.0f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
@@ -2198,7 +2202,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   }
 
   const float area_primary = len(cross(eval.primary.dXdu, eval.primary.dXdv));
-  const float cos_primary = fabsf(dot(eval.primary.normal, -eval.primary.dir_ds));
+  const float cos_primary = fabsf(dot(eval.primary.normal, eval.primary.dir_ds));
   if (!(area_primary > 0.0f) || !(cos_primary > 0.0f)) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
@@ -2224,7 +2228,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   }
 
   const float area_secondary = len(cross(eval.secondary.dXdu, eval.secondary.dXdv));
-  const float cos_secondary = fabsf(dot(eval.secondary.normal, -eval.secondary.dir_sl));
+  const float cos_secondary = fabsf(dot(eval.secondary.normal, eval.secondary.dir_sl));
   if (!(area_secondary > 0.0f) || !(cos_secondary > 0.0f)) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
@@ -2237,7 +2241,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     return false;
   }
 
-  const float3 dir_primary_in = -eval.primary.dir_ds;
+  const float3 dir_primary_in = eval.primary.dir_ds;
   const float3 dir_primary_out = eval.primary.dir_sl;
   const Spectrum primary_weight = evaluate_specular_weight(
       kg, primary_params, dir_primary_in, dir_primary_out, eval.primary.cos_theta_i, eval.primary.cos_theta_t);
@@ -2246,7 +2250,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     return false;
   }
 
-  const float3 dir_secondary_in = -eval.secondary.dir_ds;
+  const float3 dir_secondary_in = eval.secondary.dir_ds;
   const float3 dir_secondary_out = eval.secondary.dir_sl;
   const Spectrum secondary_weight = evaluate_specular_weight(kg,
                                                             secondary_params,
