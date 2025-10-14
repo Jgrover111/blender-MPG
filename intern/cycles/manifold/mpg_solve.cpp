@@ -590,6 +590,7 @@ bool specular_parameters_from_surface(KernelGlobals kg,
 
   const MicrofacetBsdf *reflection_microfacet = nullptr;
   const MicrofacetBsdf *refraction_microfacet = nullptr;
+  const bool shader_reports_transmission = (spec_sd.flag & SD_BSDF_HAS_TRANSMISSION) != 0;
 
   enum class SeedHemisphere {
     Unknown,
@@ -693,6 +694,7 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     }
 
     const bool is_trans = CLOSURE_IS_BSDF_TRANSMISSION(closure->type);
+    const bool is_glass = CLOSURE_IS_GLASS(closure->type);
     const bool is_micro = CLOSURE_IS_BSDF_MICROFACET(closure->type);
     const bool is_singular = CLOSURE_IS_BSDF_SINGULAR(closure->type);
 
@@ -706,18 +708,22 @@ bool specular_parameters_from_surface(KernelGlobals kg,
       const float ay = fmaxf(mf->alpha_y, 0.0f);
       const bool delta_like = (ax <= 1.0e-6f) && (ay <= 1.0e-6f);
       if (delta_like) {
-        if (is_trans) {
-        }
-        else {
+        if (!(is_trans || is_glass)) {
           have_singular_reflection = true;
         }
         if (mf->ior > 0.0f) {
           eta_singular = mf->ior;
         }
       }
-      if (is_trans) {
+      const bool reports_reflection = !is_trans || is_glass;
+      bool reports_transmission = is_trans || is_glass;
+      if (!reports_transmission && shader_reports_transmission) {
+        reports_transmission = fabsf(mf->ior) > 1.0f + 1.0e-6f;
+      }
+      if (reports_transmission) {
         refraction_microfacet = mf;
-      } else {
+      }
+      if (reports_reflection) {
         reflection_microfacet = mf;
       }
     }
@@ -821,8 +827,10 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   }
 
   const MicrofacetBsdf *microfacet = nullptr;
+  bool selected_refraction = false;
   if (prefer_transmission && refraction_microfacet != nullptr) {
     microfacet = refraction_microfacet;
+    selected_refraction = true;
   }
   else if (prefer_transmission && has_forced_scatter) {
     const char *available = (reflection_microfacet != nullptr) ? "microfacet reflection"
@@ -832,6 +840,7 @@ bool specular_parameters_from_surface(KernelGlobals kg,
 
   if (microfacet == nullptr && prefer_reflection && reflection_microfacet != nullptr) {
     microfacet = reflection_microfacet;
+    selected_refraction = false;
   }
   else if (microfacet == nullptr && prefer_reflection && has_forced_scatter) {
     const char *available = (refraction_microfacet != nullptr) ? "microfacet refraction"
@@ -841,20 +850,23 @@ bool specular_parameters_from_surface(KernelGlobals kg,
 
   if (microfacet == nullptr && refraction_microfacet != nullptr && reflection_microfacet == nullptr) {
     microfacet = refraction_microfacet;
+    selected_refraction = true;
   }
   else if (microfacet == nullptr && reflection_microfacet != nullptr &&
            refraction_microfacet == nullptr)
   {
     microfacet = reflection_microfacet;
+    selected_refraction = false;
   }
   else if (microfacet == nullptr && refraction_microfacet != nullptr) {
     microfacet = refraction_microfacet;
+    selected_refraction = true;
   }
   if (microfacet == nullptr) return false;
   params = SpecularParameters();
   copy_microfacet_to_parameters(microfacet, params);
 
-  params.is_refraction = (microfacet == refraction_microfacet);
+  params.is_refraction = selected_refraction;
   if (params.is_refraction) {
     const float eta = microfacet->ior;
     if (fabsf(eta) <= 1e-6f) return false;
