@@ -618,6 +618,13 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   const bool seed_prefers_transmission = (seed_hemisphere == SeedHemisphere::Transmission);
   const bool seed_prefers_reflection = (seed_hemisphere == SeedHemisphere::Reflection);
 
+  float3 light_dir = zero_float3();
+  float light_distance = 0.0f;
+  compute_light_sample_direction(seed.light_sample, spec_point, light_dir, light_distance);
+
+  const bool light_dir_degenerate = (seed.light_sample.t == FLT_MAX) ? is_zero(seed.light_sample.D) :
+                                                                            !(light_distance > 0.0f);
+
   const bool tau_hint_valid = (seed.tau_count > 0);
   bool force_transmission = false;
   bool force_reflection = false;
@@ -631,6 +638,17 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   else if (seed.scatter == MPG_SEED_SCATTER_REFLECTION) {
     force_reflection = true;
   }
+
+  if (!light_dir_degenerate && hemisphere_normal_valid) {
+    /* Compare directions in the shading-normal frame (hemisphere_normal) to detect interface crossings. */
+    const float dot_in = dot(hemisphere_normal, -ray_dir);
+    const float dot_light = dot(hemisphere_normal, light_dir);
+    if ((dot_in < 0.0f && dot_light > 0.0f) || (dot_in > 0.0f && dot_light < 0.0f)) {
+      force_transmission = true;
+      force_reflection = false;
+    }
+  }
+
   const bool has_forced_scatter = force_transmission || force_reflection;
 
   bool prefer_transmission = force_transmission;
