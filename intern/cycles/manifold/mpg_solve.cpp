@@ -628,6 +628,7 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     force_reflection = true;
   }
 
+  bool prefer_reflection_from_geometry = false;
   if (!light_dir_degenerate && hemisphere_normal_valid) {
     /* Compare directions in the shading-normal frame (hemisphere_normal) to detect interface crossings. */
     const float dot_in = dot(hemisphere_normal, -ray_dir);
@@ -635,6 +636,11 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     if ((dot_in < 0.0f && dot_light > 0.0f) || (dot_in > 0.0f && dot_light < 0.0f)) {
       force_transmission = true;
       force_reflection = false;
+    }
+    else if ((dot_in > 0.0f && dot_light > 0.0f) || (dot_in < 0.0f && dot_light < 0.0f)) {
+      /* When both rays occupy the same half-space the Mitsuba reference prefers
+       * the reflective branch even if the seed requested refraction. */
+      prefer_reflection_from_geometry = true;
     }
   }
 
@@ -645,6 +651,35 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   if (!prefer_transmission && !prefer_reflection) {
     prefer_transmission = seed_prefers_transmission;
     prefer_reflection = seed_prefers_reflection;
+  }
+
+  bool prefer_reflection_from_seed = false;
+  if (seed.scatter == MPG_SEED_SCATTER_REFRACTION || seed.scatter == MPG_SEED_SCATTER_REFLECTION) {
+    const bool selected_refraction = (seed.scatter == MPG_SEED_SCATTER_REFRACTION);
+    if (isfinite_safe(seed.seed_scatter_pdf)) {
+      const float scatter_pdf = clamp(seed.seed_scatter_pdf, 0.0f, 1.0f);
+      const bool has_dual_branches = (scatter_pdf > 1.0e-6f) && (scatter_pdf < 1.0f - 1.0e-6f);
+      if (selected_refraction && has_dual_branches) {
+        const float reflection_probability = 1.0f - scatter_pdf;
+        const float transmission_probability = scatter_pdf;
+        if (reflection_probability > transmission_probability + 1.0e-4f) {
+          prefer_reflection_from_seed = true;
+        }
+      }
+      else if (!selected_refraction && !has_dual_branches) {
+        prefer_reflection_from_seed = true;
+      }
+    }
+  }
+
+  /* Mirror Mitsuba's branch selection: geometric same-side tests and the
+   * Fresnel/guide probabilities can override a refraction request so we still
+   * explore the reflective branch when it is the only valid transport mode. */
+  if (prefer_reflection_from_geometry || prefer_reflection_from_seed) {
+    prefer_reflection = true;
+    if (!force_transmission && !force_reflection) {
+      prefer_transmission = false;
+    }
   }
 
 #ifdef WITH_CYCLES_DEBUG
@@ -837,9 +872,15 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     microfacet = reflection_microfacet;
     selected_refraction = false;
   }
-  else if (microfacet == nullptr && refraction_microfacet != nullptr) {
-    microfacet = refraction_microfacet;
-    selected_refraction = true;
+  else if (microfacet == nullptr && refraction_microfacet != nullptr && reflection_microfacet != nullptr) {
+    if (prefer_reflection) {
+      microfacet = reflection_microfacet;
+      selected_refraction = false;
+    }
+    else {
+      microfacet = refraction_microfacet;
+      selected_refraction = true;
+    }
   }
   if (microfacet == nullptr) return false;
   params = SpecularParameters();
@@ -848,10 +889,28 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   params.is_refraction = selected_refraction;
   if (params.is_refraction) {
     const float eta = microfacet->ior;
-    if (fabsf(eta) <= 1e-6f) return false;
-    params.base_eta = fabsf(eta);
+    if (fabsf(eta) <= 1e-6f) {
+      if (reflection_microfacet != nullptr) {
+        /* Refraction lobe turned out invalid (e.g., eta ~ 0). Try the reflective
+         * branch instead to mirror Mitsuba's retry logic. */
+        microfacet = reflection_microfacet;
+        selected_refraction = false;
+        prefer_reflection = true;
+        prefer_transmission = false;
+        params = SpecularParameters();
+        copy_microfacet_to_parameters(microfacet, params);
+        params.is_refraction = false;
+        params.base_eta = 1.0f;
+      }
+      else {
+        return false;
+      }
+    }
+    else {
+      params.base_eta = fabsf(eta);
+    }
   }
-  else {
+  if (!params.is_refraction) {
     params.base_eta = 1.0f;
   }
   params.microfacet.N = normalize(params.microfacet.N);
