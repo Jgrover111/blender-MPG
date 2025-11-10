@@ -930,10 +930,10 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     float tmp_distance = 0.0f;
     float3 dir_sl;
     compute_light_sample_direction(seed.light_sample, spec_point, dir_sl, tmp_distance);
-    const float3 incident  = dir_ds;
-    const float3 outgoing  = params.is_refraction ? dir_sl : -dir_sl;
+    const float3 incident = -dir_ds;
+    const float3 outgoing = dir_sl;
     const float s = dot(params.microfacet.N, incident) * dot(params.microfacet.N, outgoing);
-    const bool bad_refraction =  params.is_refraction ? (s > 0.0f) : false;
+    const bool bad_refraction = params.is_refraction ? (s > 0.0f) : false;
     const bool bad_reflection = !params.is_refraction ? (s < 0.0f) : false;
     if (bad_refraction || bad_reflection) {
       params.microfacet.N = -params.microfacet.N;
