@@ -1001,8 +1001,15 @@ float compute_visibility(KernelGlobals kg,
                          const SpecularEval &eval)
 {
   if (eval.distance_sl <= 0.0f) {
-    /* DIAGNOSTIC: Check if distance check is failing */
     return 0.0f;
+  }
+
+  /* Skip visibility test for directional lights (sun, etc.) following the
+   * Mitsuba reference implementation. Directional lights are infinitely distant
+   * and illuminate from a direction rather than a point, so shadow ray tests
+   * don't apply. */
+  if (seed.light_sample.t == FLT_MAX) {
+    return 1.0f;
   }
 
   Ray shadow_ray;
@@ -1016,11 +1023,7 @@ float compute_visibility(KernelGlobals kg,
   shadow_ray.P = ray_offset(eval.point, offset_normal);
   shadow_ray.D = eval.dir_sl;
   shadow_ray.tmin = 1.0e-4f;
-  float ray_length = eval.distance_sl;
-  if (seed.light_sample.t == FLT_MAX) {
-    ray_length = MPG_DISTANT_LIGHT_VISIBILITY_DISTANCE;
-  }
-  shadow_ray.tmax = fmaxf(ray_length - 1e-4f, 0.0f);
+  shadow_ray.tmax = fmaxf(eval.distance_sl - 1e-4f, 0.0f);
   shadow_ray.time = sd.time;
   shadow_ray.self.prim = seed.prim;
   shadow_ray.self.object = seed.object;
@@ -1028,9 +1031,7 @@ float compute_visibility(KernelGlobals kg,
   shadow_ray.self.light_object = seed.light_sample.object;
 
   const bool occluded = scene_intersect_shadow(kg, &shadow_ray, PATH_RAY_SHADOW);
-
-  /* DIAGNOSTIC: Always return 1.0 to test if visibility is the issue */
-  return 1.0f;  /* Temporarily disabled: occluded ? 0.0f : 1.0f; */
+  return occluded ? 0.0f : 1.0f;
 }
 
 float3 derivative_specular_reflection(const float3 &dir_ds,
@@ -1611,9 +1612,7 @@ float compute_segment_visibility(KernelGlobals kg,
   ray.self.light_object = skip_light_object;
 
   const bool occluded = scene_intersect_shadow(kg, &ray, PATH_RAY_SHADOW);
-
-  /* DIAGNOSTIC: Always return 1.0 to test if visibility is the issue */
-  return 1.0f;  /* Temporarily disabled: occluded ? 0.0f : 1.0f; */
+  return occluded ? 0.0f : 1.0f;
 }
 
 }  // namespace
@@ -2361,17 +2360,22 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                                                    seed.prim,
                                                                    OBJECT_NONE,
                                                                    PRIM_NONE);
-  const float3 secondary_light_point =
-      compute_distant_visibility_endpoint(seed.light_sample, eval.secondary.point);
-  const float visibility_secondary = compute_segment_visibility(kg,
-                                                                eval.secondary.point,
-                                                                eval.secondary.normal,
-                                                                secondary_light_point,
-                                                                sd.time,
-                                                                secondary_seed.object,
-                                                                secondary_seed.prim,
-                                                                seed.light_sample.object,
-                                                                seed.light_sample.prim);
+  /* Skip visibility test for directional lights following the Mitsuba reference.
+   * Directional lights are infinitely distant so shadow ray tests don't apply. */
+  float visibility_secondary = 1.0f;
+  if (seed.light_sample.t != FLT_MAX) {
+    const float3 secondary_light_point =
+        compute_distant_visibility_endpoint(seed.light_sample, eval.secondary.point);
+    visibility_secondary = compute_segment_visibility(kg,
+                                                      eval.secondary.point,
+                                                      eval.secondary.normal,
+                                                      secondary_light_point,
+                                                      sd.time,
+                                                      secondary_seed.object,
+                                                      secondary_seed.prim,
+                                                      seed.light_sample.object,
+                                                      seed.light_sample.prim);
+  }
   const float visibility = visibility_primary * visibility_intermediate * visibility_secondary;
 
   result.success = true;
