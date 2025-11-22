@@ -1858,7 +1858,19 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     return false;
   }
 
-  result.jacobian_total = fabsf(determinant);
+  /* Compute the complete Jacobian including the geometric term.
+   * The Jacobian transforms from the specular surface area measure to the receiver's
+   * solid angle measure. Following the Mitsuba reference, this includes:
+   * - The manifold constraint Jacobian (determinant of residual matrix)
+   * - The geometric factor: cos(θ) / r²
+   * where θ is the angle at the specular surface and r is the distance from receiver. */
+  const float distance_sq = eval.distance_ds * eval.distance_ds;
+  if (distance_sq <= 0.0f) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+    return false;
+  }
+  const float geometric_factor = cos_theta / distance_sq;
+  result.jacobian_total = fabsf(determinant) * geometric_factor;
   result.jacobian = result.jacobian_total;
   vertex.jacobian = result.jacobian_total;
 
@@ -2246,7 +2258,14 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
-  const float jacobian_primary = fabsf(determinant_primary);
+  /* Compute Jacobian for primary bounce including geometric term. */
+  const float distance_primary_sq = eval.primary.distance_ds * eval.primary.distance_ds;
+  if (distance_primary_sq <= 0.0f) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+    return false;
+  }
+  const float geometric_factor_primary = cos_primary / distance_primary_sq;
+  const float jacobian_primary = fabsf(determinant_primary) * geometric_factor_primary;
 
   ShadingPoint intermediate_point = receiver;
   intermediate_point.position = eval.primary.point;
@@ -2272,7 +2291,14 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
-  const float jacobian_secondary = fabsf(determinant_secondary);
+  /* Compute Jacobian for secondary bounce including geometric term. */
+  const float distance_secondary_sq = eval.secondary.distance_ds * eval.secondary.distance_ds;
+  if (distance_secondary_sq <= 0.0f) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+    return false;
+  }
+  const float geometric_factor_secondary = cos_secondary / distance_secondary_sq;
+  const float jacobian_secondary = fabsf(determinant_secondary) * geometric_factor_secondary;
 
   const float jacobian_total = jacobian_primary * jacobian_secondary;
   if (!isfinite_safe(jacobian_total) || fabsf(jacobian_total) <= 1.0e-12f) {
