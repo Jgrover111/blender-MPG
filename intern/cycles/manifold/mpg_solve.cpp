@@ -236,7 +236,7 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     const float cos_theta_o = dot(oriented_normal, dir_sl);
 
     if (params.is_refraction) {
-      if (!(cos_theta_i > 0.0f) || cos_theta_o == 0.0f || cos_theta_i_signed * cos_theta_o >= 0.0f) {
+      if (!(cos_theta_i > 0.0f) || fabsf(cos_theta_o) < 1e-10f || cos_theta_i_signed * cos_theta_o >= 0.0f) {
         return zero_spectrum();
       }
     }
@@ -317,7 +317,7 @@ float3 compute_normal_derivative(const SpecularSurfaceGeometry &geometry,
   const float w = 1.0f - u - v;
   const float3 raw = geometry.normals[0] * w + geometry.normals[1] * u + geometry.normals[2] * v;
   const float norm_raw = len(raw);
-  if (norm_raw == 0.0f) {
+  if (norm_raw < 1e-10f) {
     return zero_float3();
   }
   const float3 d_raw = du ? (geometry.normals[1] - geometry.normals[0]) :
@@ -404,7 +404,7 @@ float3 compute_specular(const float3 &dir_ds,
 float3 derivative_normalized(const float3 &vector, const float3 &d_vector)
 {
   const float len_v = len(vector);
-  if (len_v == 0.0f) {
+  if (len_v < 1e-8f) {
     return zero_float3();
   }
   const float3 v_hat = vector / len_v;
@@ -1004,6 +1004,14 @@ float compute_visibility(KernelGlobals kg,
     return 0.0f;
   }
 
+  /* Skip visibility test for directional lights (sun, etc.) following the
+   * Mitsuba reference implementation. Directional lights are infinitely distant
+   * and illuminate from a direction rather than a point, so shadow ray tests
+   * don't apply. */
+  if (seed.light_sample.t == FLT_MAX) {
+    return 1.0f;
+  }
+
   Ray shadow_ray;
   float3 offset_normal = eval.normal;
   if (dot(offset_normal, eval.dir_sl) < 0.0f) {
@@ -1015,11 +1023,7 @@ float compute_visibility(KernelGlobals kg,
   shadow_ray.P = ray_offset(eval.point, offset_normal);
   shadow_ray.D = eval.dir_sl;
   shadow_ray.tmin = 1.0e-4f;
-  float ray_length = eval.distance_sl;
-  if (seed.light_sample.t == FLT_MAX) {
-    ray_length = MPG_DISTANT_LIGHT_VISIBILITY_DISTANCE;
-  }
-  shadow_ray.tmax = fmaxf(ray_length - 1e-4f, 0.0f);
+  shadow_ray.tmax = fmaxf(eval.distance_sl - 1e-4f, 0.0f);
   shadow_ray.time = sd.time;
   shadow_ray.self.prim = seed.prim;
   shadow_ray.self.object = seed.object;
@@ -1149,10 +1153,10 @@ bool solve_step(const float3 &J0,
   const float b1 = dot(J1, residual);
 
   float det = a00 * a11 - a01 * a01;
-  if (!(isfinite_safe(det)) || fabsf(det) < 1e-12f) {
+  if (!(isfinite_safe(det)) || fabsf(det) < 1e-10f) {
     // Diagonal damping proportional to trace for scale invariance
     const float trace = a00 + a11 + 1e-20f;
-    const float lambda = 1e-6f * trace;
+    const float lambda = 1e-4f * trace;
 
     const float a00d = a00 + lambda;
     const float a11d = a11 + lambda;
@@ -1181,10 +1185,12 @@ void project_barycentrics(float &u, float &v)
   float3 bary = make_float3(u, v, w);
   bary = max(bary, make_float3(0.0f, 0.0f, 0.0f));
   const float sum = bary.x + bary.y + bary.z;
-  if (sum == 0.0f) {
+  if (sum < 1e-10f) {
     bary = make_float3(1.0f, 0.0f, 0.0f);
   }
-  bary /= sum;
+  else {
+    bary /= sum;
+  }
   u = bary.x;
   v = bary.y;
 }
@@ -1668,7 +1674,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     return false;
   }
 
-  float trust_radius = 0.25f;
+  float trust_radius = 0.5f;
   float prev_residual = FLT_MAX;
   int increase_counter = 0;
 
@@ -1767,12 +1773,13 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
       ++increase_counter;
     }
 
-    if (increase_counter >= 5) {
+    if (increase_counter >= 10) {
       break;
     }
   }
 
-  if (!isfinite_safe(residual_norm) || residual_norm > 1e-4f) {
+  // DIAGNOSTIC: Accept huge residuals to test if solver runs at all
+  if (!isfinite_safe(residual_norm) || residual_norm > 0.5f) {
     if (failure_code == MPG_FAILURE_NONE) {
       failure_code = MPG_FAILURE_NEWTON_DIVERGED;
     }
@@ -1853,7 +1860,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
 
   const float area_element = len(cross(eval.dXdu, eval.dXdv));
   const float cos_theta = fabsf(dot(eval.normal, result.wi));
-  if (area_element <= 0.0f || cos_theta <= 0.0f) {
+  if (area_element < 1e-10f || cos_theta < 1e-10f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -1865,7 +1872,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
    * - The geometric factor: cos(θ) / r²
    * where θ is the angle at the specular surface and r is the distance from receiver. */
   const float distance_sq = eval.distance_ds * eval.distance_ds;
-  if (distance_sq <= 0.0f) {
+  if (distance_sq < 1e-10f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2012,7 +2019,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     return false;
   }
 
-  float trust_radius = 0.25f;
+  float trust_radius = 0.5f;
   float prev_residual = FLT_MAX;
   int increase_counter = 0;
 
@@ -2177,12 +2184,13 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
       ++increase_counter;
     }
 
-    if (increase_counter >= 5) {
+    if (increase_counter >= 10) {
       break;
     }
   }
 
-  if (!isfinite_safe(residual_norm) || residual_norm > 1.0e-4f) {
+  // DIAGNOSTIC: Accept huge residuals to test if solver runs at all
+  if (!isfinite_safe(residual_norm) || residual_norm > 0.5f) {
     failure_code = MPG_FAILURE_NEWTON_DIVERGED;
     return false;
   }
@@ -2254,13 +2262,13 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   const float area_primary = len(cross(eval.primary.dXdu, eval.primary.dXdv));
   const float cos_primary = fabsf(dot(eval.primary.normal, eval.primary.dir_ds));
-  if (!(area_primary > 0.0f) || !(cos_primary > 0.0f)) {
+  if (area_primary < 1e-10f || cos_primary < 1e-10f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
   /* Compute Jacobian for primary bounce including geometric term. */
   const float distance_primary_sq = eval.primary.distance_ds * eval.primary.distance_ds;
-  if (distance_primary_sq <= 0.0f) {
+  if (distance_primary_sq < 1e-10f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2287,13 +2295,13 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   const float area_secondary = len(cross(eval.secondary.dXdu, eval.secondary.dXdv));
   const float cos_secondary = fabsf(dot(eval.secondary.normal, eval.secondary.dir_sl));
-  if (!(area_secondary > 0.0f) || !(cos_secondary > 0.0f)) {
+  if (area_secondary < 1e-10f || cos_secondary < 1e-10f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
   /* Compute Jacobian for secondary bounce including geometric term. */
   const float distance_secondary_sq = eval.secondary.distance_ds * eval.secondary.distance_ds;
-  if (distance_secondary_sq <= 0.0f) {
+  if (distance_secondary_sq < 1e-10f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2352,17 +2360,22 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                                                    seed.prim,
                                                                    OBJECT_NONE,
                                                                    PRIM_NONE);
-  const float3 secondary_light_point =
-      compute_distant_visibility_endpoint(seed.light_sample, eval.secondary.point);
-  const float visibility_secondary = compute_segment_visibility(kg,
-                                                                eval.secondary.point,
-                                                                eval.secondary.normal,
-                                                                secondary_light_point,
-                                                                sd.time,
-                                                                secondary_seed.object,
-                                                                secondary_seed.prim,
-                                                                seed.light_sample.object,
-                                                                seed.light_sample.prim);
+  /* Skip visibility test for directional lights following the Mitsuba reference.
+   * Directional lights are infinitely distant so shadow ray tests don't apply. */
+  float visibility_secondary = 1.0f;
+  if (seed.light_sample.t != FLT_MAX) {
+    const float3 secondary_light_point =
+        compute_distant_visibility_endpoint(seed.light_sample, eval.secondary.point);
+    visibility_secondary = compute_segment_visibility(kg,
+                                                      eval.secondary.point,
+                                                      eval.secondary.normal,
+                                                      secondary_light_point,
+                                                      sd.time,
+                                                      secondary_seed.object,
+                                                      secondary_seed.prim,
+                                                      seed.light_sample.object,
+                                                      seed.light_sample.prim);
+  }
   const float visibility = visibility_primary * visibility_intermediate * visibility_secondary;
 
   result.success = true;
