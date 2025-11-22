@@ -947,7 +947,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   int manifold_failure_code = int(MPG_FAILURE_NONE);
 
 #    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
-  if (manifold_guiding_enabled && guiding_features_enabled && kg->opgl_surface_sampling_distribution) {
+  if (manifold_guiding_enabled && guiding_features_enabled && kg->opgl_surface_sampling_distribution_ptr) {
     const float guiding_seed = INTEGRATOR_STATE(state, guiding, sample_surface_guiding_rand);
     bool guiding_distribution_ready = guiding_surface_init_distribution(kg, sd->P, guiding_seed);
 
@@ -961,7 +961,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                    uint(rng_state->sample),
                                    rng_state->rng_offset);
 
-      summary_available = pgl_estimate_summary(*kg->opgl_surface_sampling_distribution,
+      summary_available = pgl_estimate_summary(*kg->opgl_surface_sampling_distribution_ptr,
                                                sd->Ng,
                                                seed,
                                                manifold_summary);
