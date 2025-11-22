@@ -1609,7 +1609,9 @@ float compute_segment_visibility(KernelGlobals kg,
   ray.self.light_object = skip_light_object;
 
   const bool occluded = scene_intersect_shadow(kg, &ray, PATH_RAY_SHADOW);
-  return occluded ? 0.0f : 1.0f;
+
+  /* DIAGNOSTIC: Always return 1.0 to test if visibility is the issue */
+  return 1.0f;  /* Temporarily disabled: occluded ? 0.0f : 1.0f; */
 }
 
 }  // namespace
