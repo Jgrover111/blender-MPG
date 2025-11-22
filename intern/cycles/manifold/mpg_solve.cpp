@@ -236,7 +236,7 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     const float cos_theta_o = dot(oriented_normal, dir_sl);
 
     if (params.is_refraction) {
-      if (!(cos_theta_i > 0.0f) || cos_theta_o == 0.0f || cos_theta_i_signed * cos_theta_o >= 0.0f) {
+      if (!(cos_theta_i > 0.0f) || fabsf(cos_theta_o) < 1e-10f || cos_theta_i_signed * cos_theta_o >= 0.0f) {
         return zero_spectrum();
       }
     }
@@ -317,7 +317,7 @@ float3 compute_normal_derivative(const SpecularSurfaceGeometry &geometry,
   const float w = 1.0f - u - v;
   const float3 raw = geometry.normals[0] * w + geometry.normals[1] * u + geometry.normals[2] * v;
   const float norm_raw = len(raw);
-  if (norm_raw == 0.0f) {
+  if (norm_raw < 1e-10f) {
     return zero_float3();
   }
   const float3 d_raw = du ? (geometry.normals[1] - geometry.normals[0]) :
@@ -1184,10 +1184,12 @@ void project_barycentrics(float &u, float &v)
   float3 bary = make_float3(u, v, w);
   bary = max(bary, make_float3(0.0f, 0.0f, 0.0f));
   const float sum = bary.x + bary.y + bary.z;
-  if (sum == 0.0f) {
+  if (sum < 1e-10f) {
     bary = make_float3(1.0f, 0.0f, 0.0f);
   }
-  bary /= sum;
+  else {
+    bary /= sum;
+  }
   u = bary.x;
   v = bary.y;
 }
