@@ -404,7 +404,7 @@ float3 compute_specular(const float3 &dir_ds,
 float3 derivative_normalized(const float3 &vector, const float3 &d_vector)
 {
   const float len_v = len(vector);
-  if (len_v == 0.0f) {
+  if (len_v < 1e-8f) {
     return zero_float3();
   }
   const float3 v_hat = vector / len_v;
