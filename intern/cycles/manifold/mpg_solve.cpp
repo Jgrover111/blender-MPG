@@ -1772,7 +1772,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     }
   }
 
-  if (!isfinite_safe(residual_norm) || residual_norm > 1e-4f) {
+  if (!isfinite_safe(residual_norm) || residual_norm > 1e-3f) {
     if (failure_code == MPG_FAILURE_NONE) {
       failure_code = MPG_FAILURE_NEWTON_DIVERGED;
     }
@@ -2182,7 +2182,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     }
   }
 
-  if (!isfinite_safe(residual_norm) || residual_norm > 1.0e-4f) {
+  if (!isfinite_safe(residual_norm) || residual_norm > 1.0e-3f) {
     failure_code = MPG_FAILURE_NEWTON_DIVERGED;
     return false;
   }
