@@ -1001,6 +1001,7 @@ float compute_visibility(KernelGlobals kg,
                          const SpecularEval &eval)
 {
   if (eval.distance_sl <= 0.0f) {
+    /* DIAGNOSTIC: Check if distance check is failing */
     return 0.0f;
   }
 
@@ -1027,7 +1028,9 @@ float compute_visibility(KernelGlobals kg,
   shadow_ray.self.light_object = seed.light_sample.object;
 
   const bool occluded = scene_intersect_shadow(kg, &shadow_ray, PATH_RAY_SHADOW);
-  return occluded ? 0.0f : 1.0f;
+
+  /* DIAGNOSTIC: Always return 1.0 to test if visibility is the issue */
+  return 1.0f;  /* Temporarily disabled: occluded ? 0.0f : 1.0f; */
 }
 
 float3 derivative_specular_reflection(const float3 &dir_ds,
