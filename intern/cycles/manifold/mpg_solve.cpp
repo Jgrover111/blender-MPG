@@ -1149,10 +1149,10 @@ bool solve_step(const float3 &J0,
   const float b1 = dot(J1, residual);
 
   float det = a00 * a11 - a01 * a01;
-  if (!(isfinite_safe(det)) || fabsf(det) < 1e-12f) {
+  if (!(isfinite_safe(det)) || fabsf(det) < 1e-10f) {
     // Diagonal damping proportional to trace for scale invariance
     const float trace = a00 + a11 + 1e-20f;
-    const float lambda = 1e-6f * trace;
+    const float lambda = 1e-4f * trace;
 
     const float a00d = a00 + lambda;
     const float a11d = a11 + lambda;
@@ -1668,7 +1668,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     return false;
   }
 
-  float trust_radius = 0.25f;
+  float trust_radius = 0.5f;
   float prev_residual = FLT_MAX;
   int increase_counter = 0;
 
@@ -2012,7 +2012,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     return false;
   }
 
-  float trust_radius = 0.25f;
+  float trust_radius = 0.5f;
   float prev_residual = FLT_MAX;
   int increase_counter = 0;
 
