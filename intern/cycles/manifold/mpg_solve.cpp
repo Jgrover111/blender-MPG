@@ -1054,7 +1054,7 @@ float3 derivative_specular_refraction(const float3 &dir_ds,
 {
   const float3 dir_in = -dir_ds;
   const float3 d_dir_in = -d_dir_ds;
-  const float d_cos_theta_i = -dot(d_dir_in, normal) - dot(dir_in, d_normal);
+  const float d_cos_theta_i = dot(d_dir_in, normal) + dot(dir_in, d_normal);
   const float abs_cos_theta_t = fmaxf(1e-8f, fabsf(cos_theta_t));
   const float denom = copysignf(abs_cos_theta_t, cos_theta_t);
   const float d_cos_theta_t = (eta * eta * cos_theta_i / denom) * d_cos_theta_i;
