@@ -1853,7 +1853,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
 
   const float area_element = len(cross(eval.dXdu, eval.dXdv));
   const float cos_theta = fabsf(dot(eval.normal, result.wi));
-  if (area_element <= 0.0f || cos_theta <= 0.0f) {
+  if (area_element < 1e-10f || cos_theta < 1e-10f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -1865,7 +1865,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
    * - The geometric factor: cos(θ) / r²
    * where θ is the angle at the specular surface and r is the distance from receiver. */
   const float distance_sq = eval.distance_ds * eval.distance_ds;
-  if (distance_sq <= 0.0f) {
+  if (distance_sq < 1e-10f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2254,13 +2254,13 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   const float area_primary = len(cross(eval.primary.dXdu, eval.primary.dXdv));
   const float cos_primary = fabsf(dot(eval.primary.normal, eval.primary.dir_ds));
-  if (!(area_primary > 0.0f) || !(cos_primary > 0.0f)) {
+  if (area_primary < 1e-10f || cos_primary < 1e-10f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
   /* Compute Jacobian for primary bounce including geometric term. */
   const float distance_primary_sq = eval.primary.distance_ds * eval.primary.distance_ds;
-  if (distance_primary_sq <= 0.0f) {
+  if (distance_primary_sq < 1e-10f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2287,13 +2287,13 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   const float area_secondary = len(cross(eval.secondary.dXdu, eval.secondary.dXdv));
   const float cos_secondary = fabsf(dot(eval.secondary.normal, eval.secondary.dir_sl));
-  if (!(area_secondary > 0.0f) || !(cos_secondary > 0.0f)) {
+  if (area_secondary < 1e-10f || cos_secondary < 1e-10f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
   /* Compute Jacobian for secondary bounce including geometric term. */
   const float distance_secondary_sq = eval.secondary.distance_ds * eval.secondary.distance_ds;
-  if (distance_secondary_sq <= 0.0f) {
+  if (distance_secondary_sq < 1e-10f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
