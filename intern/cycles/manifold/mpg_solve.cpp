@@ -1767,7 +1767,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
       ++increase_counter;
     }
 
-    if (increase_counter >= 5) {
+    if (increase_counter >= 10) {
       break;
     }
   }
@@ -2177,7 +2177,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
       ++increase_counter;
     }
 
-    if (increase_counter >= 5) {
+    if (increase_counter >= 10) {
       break;
     }
   }
