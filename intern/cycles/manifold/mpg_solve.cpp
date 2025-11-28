@@ -195,13 +195,14 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     if (!(fabsf(cos_NI) > 1e-7f && fabsf(cos_NO) > 1e-7f)) {
       return zero_spectrum();
     }
+    const bool same_side = (cos_NI * cos_NO > 0.0f);
     if (params.is_refraction) {
-      if (!(cos_NI > 0.0f) || cos_NO >= 0.0f) {
+      if (same_side) {
         return zero_spectrum();
       }
     }
     else {
-      if (!(cos_NI > 0.0f) || !(cos_NO > 0.0f)) {
+      if (!same_side) {
         return zero_spectrum();
       }
     }
@@ -241,7 +242,7 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
       }
     }
     else {
-      if (!(cos_theta_i > 0.0f) || cos_theta_o <= 0.0f) {
+      if (!(cos_theta_i > 0.0f) || fabsf(cos_theta_o) < 1e-10f || cos_theta_i_signed * cos_theta_o <= 0.0f) {
         return zero_spectrum();
       }
     }
@@ -531,7 +532,7 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   const bool has_geometric_normal = !is_zero(geometric_normal);
   float3 ray_dir = spec_point - sd.P;
   const float distance = len(ray_dir);
-  if (!(distance > 1e-6f)) {
+  if (!(distance > 1e-4f)) {
     return false;
   }
   ray_dir /= distance;
@@ -1259,7 +1260,7 @@ bool trace_secondary_seed(KernelGlobals kg,
 
   float3 dir_ds = primary_point - sd.P;
   float distance_ds = len(dir_ds);
-  if (!(distance_ds > 1e-6f)) {
+  if (!(distance_ds > 1e-4f)) {
     return false;
   }
   dir_ds /= distance_ds;
@@ -1382,10 +1383,10 @@ bool evaluate_double_bounce(const ShadingPoint &receiver,
   primary_seed.use_smooth_normals = primary_use_smooth_normals;
 
   evaluate_specular(receiver, primary_seed, primary_geometry, primary_params, u1, v1, eval.primary);
-  if (!isfinite_safe(eval.primary.distance_ds) || !(eval.primary.distance_ds > 1e-6f)) {
+  if (!isfinite_safe(eval.primary.distance_ds) || !(eval.primary.distance_ds > 1e-4f)) {
     return false;
   }
-  if (!isfinite_safe(eval.primary.distance_sl) || !(eval.primary.distance_sl > 1e-6f)) {
+  if (!isfinite_safe(eval.primary.distance_sl) || !(eval.primary.distance_sl > 1e-4f)) {
     return false;
   }
   if (eval.primary.tir) {
@@ -1402,10 +1403,10 @@ bool evaluate_double_bounce(const ShadingPoint &receiver,
   secondary_seed.use_smooth_normals = secondary_use_smooth_normals;
 
   evaluate_specular(intermediate_point, secondary_seed, secondary_geometry, secondary_params, u2, v2, eval.secondary);
-  if (!isfinite_safe(eval.secondary.distance_ds) || !(eval.secondary.distance_ds > 1e-6f)) {
+  if (!isfinite_safe(eval.secondary.distance_ds) || !(eval.secondary.distance_ds > 1e-4f)) {
     return false;
   }
-  if (!isfinite_safe(eval.secondary.distance_sl) || !(eval.secondary.distance_sl > 1e-6f)) {
+  if (!isfinite_safe(eval.secondary.distance_sl) || !(eval.secondary.distance_sl > 1e-4f)) {
     return false;
   }
   if (eval.secondary.tir) {
@@ -1587,7 +1588,7 @@ float compute_segment_visibility(KernelGlobals kg,
 {
   float3 dir = end_point - start_point;
   const float distance = len(dir);
-  if (!(distance > 1e-6f)) {
+  if (!(distance > 1e-4f)) {
     return 0.0f;
   }
   dir /= distance;
@@ -1674,7 +1675,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     return false;
   }
 
-  float trust_radius = 0.5f;
+  float trust_radius = 2.0f;
   float prev_residual = FLT_MAX;
   int increase_counter = 0;
 
@@ -1689,9 +1690,16 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
 
   float residual_norm = len(eval.residual);
   if (!isfinite_safe(residual_norm)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG DEBUG: Initial residual NaN/inf\n");
+#endif
     failure_code = MPG_FAILURE_NEWTON_DIVERGED;
     return false;
   }
+
+#ifdef WITH_CYCLES_DEBUG
+  printf("MPG DEBUG single-bounce: initial_residual=%.6f\n", residual_norm);
+#endif
 
   for (int iter = 0; iter < options.max_iters; ++iter) {
     if (residual_norm < 1e-5f) {
@@ -1725,10 +1733,6 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     SpecularParameters new_params;
     if (!specular_parameters_from_surface(kg, sd, geometry, seed, new_u, new_v, new_params)) {
       trust_radius *= 0.5f;
-      if (trust_radius < 1e-6f) {
-        failure_code = (failure_code != MPG_FAILURE_NONE) ? failure_code : MPG_FAILURE_GEOMETRY;
-        return false;
-      }
       continue;
     }
 
@@ -1736,10 +1740,6 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     evaluate_specular(shading_point, seed, geometry, new_params, new_u, new_v, new_eval);
     if (new_eval.tir) {
       trust_radius *= 0.5f;
-      if (trust_radius < 1e-6f) {
-        failure_code = MPG_FAILURE_TOTAL_INTERNAL_REFLECTION;
-        return false;
-      }
       continue;
     }
 
@@ -1755,36 +1755,30 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
       eval = new_eval;
       params = new_params;
       residual_norm = new_residual_norm;
-      trust_radius = fminf(trust_radius * 1.5f, 1.0f);
-      if (prev_residual - residual_norm < 1e-6f) {
-        ++increase_counter;
-      }
-      else {
-        increase_counter = 0;
-      }
+      trust_radius = fminf(trust_radius * 1.5f, 5.0f);
       prev_residual = residual_norm;
     }
     else {
       trust_radius *= 0.5f;
-      if (trust_radius < 1e-6f) {
-        failure_code = (failure_code != MPG_FAILURE_NONE) ? failure_code : MPG_FAILURE_NEWTON_DIVERGED;
-        return false;
-      }
-      ++increase_counter;
-    }
-
-    if (increase_counter >= 10) {
-      break;
+      continue;
     }
   }
 
   // DIAGNOSTIC: Accept huge residuals to test if solver runs at all
   if (!isfinite_safe(residual_norm) || residual_norm > 0.5f) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG DEBUG single-bounce: FAILED convergence, final_residual=%.6f (finite=%d)\n",
+           residual_norm, isfinite_safe(residual_norm) ? 1 : 0);
+#endif
     if (failure_code == MPG_FAILURE_NONE) {
       failure_code = MPG_FAILURE_NEWTON_DIVERGED;
     }
     return false;
   }
+
+#ifdef WITH_CYCLES_DEBUG
+  printf("MPG DEBUG single-bounce: SUCCESS, final_residual=%.6f\n", residual_norm);
+#endif
 
   result.success = true;
   result.specular_vertex_count = 1;
@@ -1860,7 +1854,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
 
   const float area_element = len(cross(eval.dXdu, eval.dXdv));
   const float cos_theta = fabsf(dot(eval.normal, result.wi));
-  if (area_element < 1e-10f || cos_theta < 1e-10f) {
+  if (area_element < 1e-4f || cos_theta < 1e-4f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -1872,7 +1866,10 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
    * - The geometric factor: cos(θ) / r²
    * where θ is the angle at the specular surface and r is the distance from receiver. */
   const float distance_sq = eval.distance_ds * eval.distance_ds;
-  if (distance_sq < 1e-10f) {
+  if (distance_sq < 1e-4f) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG DEBUG single-bounce: FAILED distance check, distance_sq=%.9f\n", distance_sq);
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2019,7 +2016,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     return false;
   }
 
-  float trust_radius = 0.5f;
+  float trust_radius = 2.0f;
   float prev_residual = FLT_MAX;
   int increase_counter = 0;
 
@@ -2047,10 +2044,6 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                         J))
     {
       trust_radius *= 0.5f;
-      if (trust_radius < 1.0e-6f) {
-        failure_code = MPG_FAILURE_JACOBIAN_ZERO;
-        return false;
-      }
       continue;
     }
 
@@ -2087,20 +2080,12 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
             kg, sd, primary_geometry, seed, new_primary_u, new_primary_v, new_primary_params))
     {
       trust_radius *= 0.5f;
-      if (trust_radius < 1.0e-6f) {
-        failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
-        return false;
-      }
       continue;
     }
 
     ShaderData new_primary_sd;
     if (!build_primary_shading_data(sd, primary_geometry, seed, new_primary_u, new_primary_v, new_primary_sd)) {
       trust_radius *= 0.5f;
-      if (trust_radius < 1.0e-6f) {
-        failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
-        return false;
-      }
       continue;
     }
 
@@ -2114,10 +2099,6 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                           new_secondary_params))
     {
       trust_radius *= 0.5f;
-      if (trust_radius < 1.0e-6f) {
-        failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
-        return false;
-      }
       continue;
     }
 
@@ -2137,12 +2118,6 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                 new_eval))
     {
       trust_radius *= 0.5f;
-      if (trust_radius < 1.0e-6f) {
-        failure_code = (new_eval.primary.tir || new_eval.secondary.tir) ?
-                            MPG_FAILURE_TOTAL_INTERNAL_REFLECTION :
-                            MPG_FAILURE_NEWTON_DIVERGED;
-        return false;
-      }
       continue;
     }
 
@@ -2166,31 +2141,22 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
       secondary_params = new_secondary_params;
       primary_sd = new_primary_sd;
       residual_norm = new_norm;
-      trust_radius = fminf(trust_radius * 1.5f, 1.0f);
-      if (prev_residual - residual_norm < 1.0e-6f) {
-        ++increase_counter;
-      }
-      else {
-        increase_counter = 0;
-      }
+      trust_radius = fminf(trust_radius * 1.5f, 5.0f);
       prev_residual = residual_norm;
     }
     else {
       trust_radius *= 0.5f;
-      if (trust_radius < 1.0e-6f) {
-        failure_code = MPG_FAILURE_NEWTON_DIVERGED;
-        return false;
-      }
-      ++increase_counter;
-    }
-
-    if (increase_counter >= 10) {
-      break;
+      continue;
     }
   }
 
   // DIAGNOSTIC: Accept huge residuals to test if solver runs at all
   if (!isfinite_safe(residual_norm) || residual_norm > 0.5f) {
+    failure_code = MPG_FAILURE_NEWTON_DIVERGED;
+    return false;
+  }
+
+  if (!isfinite_safe(residual_norm)) {
     failure_code = MPG_FAILURE_NEWTON_DIVERGED;
     return false;
   }
@@ -2262,13 +2228,13 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   const float area_primary = len(cross(eval.primary.dXdu, eval.primary.dXdv));
   const float cos_primary = fabsf(dot(eval.primary.normal, eval.primary.dir_ds));
-  if (area_primary < 1e-10f || cos_primary < 1e-10f) {
+  if (area_primary < 1e-4f || cos_primary < 1e-4f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
   /* Compute Jacobian for primary bounce including geometric term. */
   const float distance_primary_sq = eval.primary.distance_ds * eval.primary.distance_ds;
-  if (distance_primary_sq < 1e-10f) {
+  if (distance_primary_sq < 1e-4f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2295,13 +2261,13 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   const float area_secondary = len(cross(eval.secondary.dXdu, eval.secondary.dXdv));
   const float cos_secondary = fabsf(dot(eval.secondary.normal, eval.secondary.dir_sl));
-  if (area_secondary < 1e-10f || cos_secondary < 1e-10f) {
+  if (area_secondary < 1e-4f || cos_secondary < 1e-4f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
   /* Compute Jacobian for secondary bounce including geometric term. */
   const float distance_secondary_sq = eval.secondary.distance_ds * eval.secondary.distance_ds;
-  if (distance_secondary_sq < 1e-10f) {
+  if (distance_secondary_sq < 1e-4f) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }

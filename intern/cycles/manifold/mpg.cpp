@@ -314,27 +314,44 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   int attempt_count = 0;
   MpgFailureCode solver_failure = MPG_FAILURE_NONE;
 
-  solution.seed_resample_factor = seed.seed_resample_factor;
-  solution.seed_branch = seed.branch;
-  solution.seed_branch_pdf = seed.seed_branch_pdf;
-  solution.seed_direction_pdf = seed.seed_direction_pdf;
-  solution.seed_scatter = seed.scatter;
-  solution.seed_scatter_pdf = seed.seed_scatter_pdf;
-  solution.seed_guided_trial_count = seed.guided_trial_count;
-  solution.seed_fallback_trial_count = seed.fallback_trial_count;
+  /* Retry loop: try up to max_seed_repeat_trials different seeds */
+  const int max_trials = (opt.max_seed_repeat_trials > 0) ? opt.max_seed_repeat_trials : 1;
+  for (int trial = 0; trial < max_trials && !solved; ++trial) {
+    /* For retries (trial > 0), generate a new seed */
+    if (trial > 0) {
+      MpgFailureCode retry_seed_failure = MPG_FAILURE_NONE;
+      bool retry_seed_success = mpg_generate_seed(
+          kg, sd, bsdf, guide, opt, path_flag, bounce, rng_state, seed, retry_seed_failure);
 
-  if (seed.bounce_count == 2) {
-    ++attempt_count;
-    solved = mpg_solve_double_bounce(kg, sd, bsdf, seed, opt, rng_state, solution, solver_failure);
-    if (!solved && solver_failure != MPG_FAILURE_NONE) {
-      result.failure_code = solver_failure;
+      if (!retry_seed_success) {
+        /* If we can't generate a new seed, continue to next trial or give up */
+        seed_failure = retry_seed_failure;
+        continue;
+      }
     }
-  }
-  else {
-    ++attempt_count;
-    solved = mpg_solve_single_bounce(kg, sd, bsdf, seed, opt, rng_state, solution, solver_failure);
-    if (!solved && solver_failure != MPG_FAILURE_NONE) {
-      result.failure_code = solver_failure;
+
+    solution.seed_resample_factor = seed.seed_resample_factor;
+    solution.seed_branch = seed.branch;
+    solution.seed_branch_pdf = seed.seed_branch_pdf;
+    solution.seed_direction_pdf = seed.seed_direction_pdf;
+    solution.seed_scatter = seed.scatter;
+    solution.seed_scatter_pdf = seed.seed_scatter_pdf;
+    solution.seed_guided_trial_count = seed.guided_trial_count;
+    solution.seed_fallback_trial_count = seed.fallback_trial_count;
+
+    if (seed.bounce_count == 2) {
+      ++attempt_count;
+      solved = mpg_solve_double_bounce(kg, sd, bsdf, seed, opt, rng_state, solution, solver_failure);
+      if (!solved && solver_failure != MPG_FAILURE_NONE) {
+        result.failure_code = solver_failure;
+      }
+    }
+    else {
+      ++attempt_count;
+      solved = mpg_solve_single_bounce(kg, sd, bsdf, seed, opt, rng_state, solution, solver_failure);
+      if (!solved && solver_failure != MPG_FAILURE_NONE) {
+        result.failure_code = solver_failure;
+      }
     }
   }
 
