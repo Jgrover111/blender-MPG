@@ -341,14 +341,14 @@ MpgResult mpg_try_connect(KernelGlobals kg,
 
     if (seed.bounce_count == 2) {
       ++attempt_count;
-      solved = mpg_solve_double_bounce(kg, sd, bsdf, seed, opt, rng_state, solution, solver_failure);
+      solved = mpg_solve_double_bounce(kg, sd, bsdf, seed, guide, opt, rng_state, solution, solver_failure);
       if (!solved && solver_failure != MPG_FAILURE_NONE) {
         result.failure_code = solver_failure;
       }
     }
     else {
       ++attempt_count;
-      solved = mpg_solve_single_bounce(kg, sd, bsdf, seed, opt, rng_state, solution, solver_failure);
+      solved = mpg_solve_single_bounce(kg, sd, bsdf, seed, guide, opt, rng_state, solution, solver_failure);
       if (!solved && solver_failure != MPG_FAILURE_NONE) {
         result.failure_code = solver_failure;
       }

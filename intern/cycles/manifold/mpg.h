@@ -23,7 +23,7 @@ CCL_NAMESPACE_BEGIN
 struct MpgOptions {
   /* Number of specular bounces supported by the solver. */
   int max_bounces = 2;
-  int max_iters = 200;
+  int max_iters = 20;
   float gate_w = 0.35f;
   float gate_kappa = 40.0f;
   float angular_jitter = 0.02f;

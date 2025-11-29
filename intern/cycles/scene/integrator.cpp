@@ -92,8 +92,8 @@ NODE_DEFINE(Integrator)
 
 #ifdef WITH_CYCLES_MANIFOLD
   SOCKET_BOOLEAN(manifold_guiding_enable, "Manifold Path Guiding", false);
-  SOCKET_INT(manifold_max_bounces, "Manifold Max Bounces", 1);
-  SOCKET_INT(manifold_iters, "Manifold Solver Iterations", 6);
+  SOCKET_INT(manifold_max_bounces, "Manifold Max Bounces", 2);
+  SOCKET_INT(manifold_iters, "Manifold Solver Iterations", 20);
   SOCKET_FLOAT(manifold_gate_weight, "Manifold Gate Weight", 0.35f);
   SOCKET_FLOAT(manifold_gate_kappa, "Manifold Gate Sharpness", 40.0f);
   SOCKET_INT(manifold_seed_trials, "Manifold Seed Trials", 8);
