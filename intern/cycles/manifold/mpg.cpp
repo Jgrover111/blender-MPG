@@ -112,20 +112,20 @@ float compute_visibility_after_update(KernelGlobals kg,
     skip_prim = vertex.prim;
   }
 
-  float3 light_point = light_sample.P;
-  if (light_sample.t == FLT_MAX) {
-    light_point = compute_distant_light_endpoint(light_sample, segment_start);
+  /* Skip visibility test for directional lights following the Mitsuba reference.
+   * Directional lights are infinitely distant so shadow ray tests don't apply.
+   * This matches the solver's behavior in mpg_solve.cpp. */
+  if (light_sample.t != FLT_MAX) {
+    visibility *= mpg_compute_segment_visibility(kg,
+                                                 segment_start,
+                                                 segment_normal,
+                                                 light_sample.P,
+                                                 sd.time,
+                                                 skip_object,
+                                                 skip_prim,
+                                                 light_sample.object,
+                                                 light_sample.prim);
   }
-
-  visibility *= mpg_compute_segment_visibility(kg,
-                                               segment_start,
-                                               segment_normal,
-                                               light_point,
-                                               sd.time,
-                                               skip_object,
-                                               skip_prim,
-                                               light_sample.object,
-                                               light_sample.prim);
 
   return visibility;
 }
@@ -533,7 +533,14 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
   result.jacobian_total = J_total;
-  result.light_pdf *= result.jacobian_total;
+
+  /* Technique PDF = seed_pdf * jacobian * light_pdf.
+   * The Jacobian converts seed sampling from specular surface parameter space
+   * to solid angle measure at the receiver. Store light_pdf WITHOUT Jacobian
+   * so it can be compared correctly with NEE PDF in MIS weighting. */
+  const float technique_pdf = p_seed * J_total * p_light;
+  result.pdf = technique_pdf;
+  result.light_pdf = p_light;
 
   if (!isfinite_safe(seed.bounce_pdf) || seed.bounce_pdf <= 0.0f) {
     result.attempt_count = attempt_count;
@@ -542,6 +549,12 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   }
   result.bounce_pdf = seed.bounce_pdf;
   result.bounce_pdf_raw = seed.bounce_pdf_raw;
+
+  if (!isfinite_safe(technique_pdf) || technique_pdf <= 0.0f) {
+    result.attempt_count = attempt_count;
+    result.failure_code = MPG_FAILURE_INVALID_PDF;
+    return result;
+  }
 #ifdef WITH_CYCLES_DEBUG
   if (LOG_IS_ON(LOG_LEVEL_DEBUG) && seed.bounce_count != result.bounce_count) {
     LOG_DEBUG << "MPG solver adjusted bounce count (seed=" << seed.bounce_count
@@ -550,17 +563,10 @@ MpgResult mpg_try_connect(KernelGlobals kg,
               << ", seed_pdf=" << result.seed_pdf
               << ", light_pdf=" << result.light_pdf
               << ", jacobian=" << result.jacobian_total
+              << ", technique_pdf=" << technique_pdf
               << ", bounce_pdf=" << result.bounce_pdf << ")";
   }
 #endif
-
-  const float pdf_product = p_seed * result.light_pdf;
-  result.pdf = pdf_product;
-  if (!isfinite_safe(pdf_product) || pdf_product <= 0.0f) {
-    result.attempt_count = attempt_count;
-    result.failure_code = MPG_FAILURE_INVALID_PDF;
-    return result;
-  }
 
 #ifdef WITH_CYCLES_DEBUG
   {

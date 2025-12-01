@@ -1007,13 +1007,24 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   const bool gate_active_local = (manifold_options.gate_w > 0.0f) ||
                                  (manifold_options.gate_kappa > 0.0f);
 
+  /* When gate is disabled, allow MPG to run without path guiding data */
+  if (!gate_active_local) {
+    manifold_guiding_ready = true;
+  }
+
   manifold_options.relax_gate = relax_gate;
 
   if (manifold_guiding_enabled) {
     const bool has_dir_relaxed_local = (manifold_summary.rbar > 1.0e-4f);
     const bool has_dir_strict_local = (manifold_summary.rbar > 1.0e-3f);
-    if (gate_active_local || !summary_available) {
+    /* Only mark gate as active if thresholds are set.
+     * Don't activate gate just because guide data is unavailable. */
+    if (gate_active_local) {
       manifold_gate_mask |= MPG_GATE_MASK_ACTIVE;
+    }
+    /* When gate is disabled, automatically pass strict gate (matches mpg.cpp logic) */
+    if (!gate_active_local) {
+      manifold_gate_mask |= MPG_GATE_MASK_STRICT_PASS;
     }
     if (has_dir_relaxed_local) {
       manifold_gate_mask |= MPG_GATE_MASK_HAS_DIRECTION_RELAXED;
@@ -1044,13 +1055,21 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                          render_buffer);
   }
 
+  /* Allow MPG to run even without path guiding data when gate is disabled.
+   * When gate is disabled, path guiding features are not required (bootstrap mode). */
   const bool mpg_can_run = manifold_guiding_enabled && manifold_guiding_ready &&
-                           guiding_features_enabled && summary_available;
+                           (guiding_features_enabled || !gate_active_local) &&
+                           (summary_available || !gate_active_local);
 
   if (manifold_guiding_enabled) {
     if (!manifold_guiding_ready) {
+      /* Only fail with GATE error if:
+       * 1. Summary unavailable AND gate is active (thresholds > 0), OR
+       * 2. Gate is active and failed (strict gate failed and relax_gate disabled)
+       * Allow MPG to run without path guiding when gate is disabled (thresholds = 0) */
+      const bool gate_is_active = gate_active_local;
       if ((manifold_failure_code == int(MPG_FAILURE_NONE)) &&
-          (!summary_available || (!manifold_gate_pass && !relax_gate)))
+          ((!summary_available && gate_is_active) || (!manifold_gate_pass && !relax_gate && gate_is_active)))
       {
         manifold_failure_code = int(MPG_FAILURE_GATE);
       }
@@ -1205,6 +1224,24 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     manifold_mis_denominator = mis_denominator;
     manifold_mis_weight = mis_weight;
 
+    /* Diagnostic: Track why contribution failed (stored in Jacobian as negative debug code):
+     * -100: mpg_ok failed (visibility=0, invalid wi, or invalid PDFs)
+     * -101: spec_weight is zero
+     * -102: light_eval is zero
+     * -103: mpg_bsdf_pdf is zero
+     * -104: bsdf_eval is zero
+     * -105: visibility_weight is zero or non-finite */
+    int contribution_block_reason = 0;
+
+    if (mpg_result.success && manifold_failure_code == int(MPG_FAILURE_NONE)) {
+      if (!mpg_ok) {
+        contribution_block_reason = -100;
+      }
+      else if (is_zero(mpg_result.spec_weight)) {
+        contribution_block_reason = -101;
+      }
+    }
+
     if (mpg_ok && !is_zero(mpg_result.spec_weight))
     {
       ShaderDataCausticsStorage mpg_emission_sd_storage;
@@ -1265,9 +1302,26 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
               }
 #      endif
             }
+            else if (contribution_block_reason == 0) {
+              contribution_block_reason = -105;  /* visibility_weight failed */
+            }
+          }
+          else if (contribution_block_reason == 0) {
+            contribution_block_reason = -104;  /* bsdf_eval zero or mis_weight zero */
           }
         }
+        else if (contribution_block_reason == 0) {
+          contribution_block_reason = -103;  /* mpg_bsdf_pdf zero */
+        }
       }
+      else if (contribution_block_reason == 0) {
+        contribution_block_reason = -102;  /* light_eval zero */
+      }
+    }
+
+    /* Store diagnostic in Jacobian AOV for successful solves with no contribution */
+    if (contribution_block_reason < 0 && manifold_abs_jacobian > 0.0f) {
+      manifold_abs_jacobian = float(contribution_block_reason);
     }
 
     if (!mpg_result.success &&

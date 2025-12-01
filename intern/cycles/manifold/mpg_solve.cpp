@@ -487,7 +487,10 @@ void evaluate_specular(const ShadingPoint &D,
     eval.normal = safe_normalize(eval.normal);
 
     const bool flip_to_params = params.has_normal && dot(eval.normal, params.normal) < 0.0f;
-    const bool flip_to_receiver = !params.has_normal && dot(eval.normal, eval.dir_ds) > 0.0f;
+    /* For refraction, don't flip normal based on receiver direction.
+     * This breaks underwater caustics where receiver is below refractive surface. */
+    const bool flip_to_receiver = !params.is_refraction && !params.has_normal &&
+                                  dot(eval.normal, eval.dir_ds) > 0.0f;
     if (flip_to_params || flip_to_receiver) {
       eval.normal = -eval.normal;
       eval.dNdu = -eval.dNdu;
@@ -509,15 +512,16 @@ void evaluate_specular(const ShadingPoint &D,
   const float3 wi = -eval.dir_ds;  /* Incoming: receiver to specular point */
   const float3 wo = eval.dir_sl;    /* Outgoing: specular point to light */
 
-  /* Determine eta based on which side of surface we're entering from */
-  float h_eta = eta;
+  /* Mitsuba uses base material IOR for half-vector, not the relative IOR from Snell's law.
+   * Invert eta when ray comes from inside surface (dot(wi, normal) < 0). */
+  float h_eta = params.is_refraction ? params.base_eta : 1.0f;
   if (params.is_refraction && dot(wi, eval.normal) < 0.0f) {
-    h_eta = 1.0f / fmaxf(eta, 1e-6f);
+    h_eta = 1.0f / fmaxf(h_eta, 1e-6f);
   }
 
-  /* Generalized half-vector: h = normalize(wi + eta * wo), negated for refraction */
+  /* Generalized half-vector: h = normalize(wi + eta * wo), negated when eta != 1 */
   float3 h = wi + h_eta * wo;
-  if (params.is_refraction) {
+  if (h_eta != 1.0f) {
     h = -h;
   }
   const float h_len = len(h);
@@ -1705,6 +1709,9 @@ float compute_segment_visibility(KernelGlobals kg,
   return occluded ? 0.0f : 1.0f;
 }
 
+/* Compute 2D offset normal from path guiding data.
+ * Projects the guide's mean direction onto the surface tangent frame.
+ * Returns zero offset if guide has no valid direction (rbar too small). */
 ccl_device_inline float2 compute_guide_offset_normal(const GuideSummary &guide,
                                                       const float3 &tangent_u,
                                                       const float3 &tangent_v,
@@ -1828,12 +1835,12 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   /* Compute generalized half-vector (matching Mitsuba) */
   const float3 wi = -eval.dir_ds;
   const float3 wo = eval.dir_sl;
-  float h_eta = eval.eta;
-  if (eval.refractive && dot(wi, eval.normal) < 0.0f) {
-    h_eta = 1.0f / fmaxf(eval.eta, 1e-6f);
+  float h_eta = params.is_refraction ? params.base_eta : 1.0f;
+  if (params.is_refraction && dot(wi, eval.normal) < 0.0f) {
+    h_eta = 1.0f / fmaxf(h_eta, 1e-6f);
   }
   float3 h = wi + h_eta * wo;
-  if (eval.refractive) {
+  if (h_eta != 1.0f) {
     h = -h;
   }
   const float h_len = len(h);
@@ -1843,11 +1850,13 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   }
   h /= h_len;
 
-  /* Compute 2D offset normal from path guiding data */
-  const float2 offset_2d = compute_guide_offset_normal(guide, tangent_u, tangent_v, eval.normal);
-
   /* Mitsuba's 2D constraint: C = H - N
-   * where H is the projected half-vector and N is the offset normal from path guiding */
+   * where H is the projected half-vector and N is the offset normal.
+   * For perfect specular (roughness=0): N = 0, so C = H
+   * For glossy (roughness>0): N sampled from microfacet distribution
+   * TODO: Implement microfacet-based offset sampling for glossy surfaces */
+  const float2 offset_2d = make_float2(0.0f, 0.0f);  /* Zero offset for perfect specular */
+
   float residual_2d_u = dot(tangent_u, h) - offset_2d.x;
   float residual_2d_v = dot(tangent_v, h) - offset_2d.y;
   float residual_norm = sqrtf(residual_2d_u * residual_2d_u + residual_2d_v * residual_2d_v);
@@ -1918,12 +1927,12 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
 
     const float3 new_wi = -new_eval.dir_ds;
     const float3 new_wo = new_eval.dir_sl;
-    float new_h_eta = new_eval.eta;
-    if (new_eval.refractive && dot(new_wi, new_eval.normal) < 0.0f) {
-      new_h_eta = 1.0f / fmaxf(new_eval.eta, 1e-6f);
+    float new_h_eta = new_params.is_refraction ? new_params.base_eta : 1.0f;
+    if (new_params.is_refraction && dot(new_wi, new_eval.normal) < 0.0f) {
+      new_h_eta = 1.0f / fmaxf(new_h_eta, 1e-6f);
     }
     float3 new_h = new_wi + new_h_eta * new_wo;
-    if (new_eval.refractive) {
+    if (new_h_eta != 1.0f) {
       new_h = -new_h;
     }
     const float new_h_len = len(new_h);
@@ -1934,8 +1943,8 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     }
     new_h /= new_h_len;
 
-    /* Compute offset for new position (use same guide data) */
-    const float2 new_offset_2d = compute_guide_offset_normal(guide, new_tangent_u, new_tangent_v, new_eval.normal);
+    /* Use zero offset for perfect specular (matches Mitsuba for roughness=0) */
+    const float2 new_offset_2d = make_float2(0.0f, 0.0f);
 
     /* Apply Mitsuba's constraint: C = H - N */
     const float new_residual_2d_u = dot(new_tangent_u, new_h) - new_offset_2d.x;
