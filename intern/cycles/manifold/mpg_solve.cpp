@@ -486,15 +486,27 @@ void evaluate_specular(const ShadingPoint &D,
   if (!is_zero(eval.normal)) {
     eval.normal = safe_normalize(eval.normal);
 
-    const bool flip_to_params = params.has_normal && dot(eval.normal, params.normal) < 0.0f;
-    /* For refraction, don't flip normal based on receiver direction.
-     * This breaks underwater caustics where receiver is below refractive surface. */
-    const bool flip_to_receiver = !params.is_refraction && !params.has_normal &&
-                                  dot(eval.normal, eval.dir_ds) > 0.0f;
-    if (flip_to_params || flip_to_receiver) {
-      eval.normal = -eval.normal;
-      eval.dNdu = -eval.dNdu;
-      eval.dNdv = -eval.dNdv;
+    /* For refraction, preserve geometric normal orientation to avoid flipping
+     * interfaces in underwater caustics. Only flip if explicitly contradicting
+     * the closure's configured normal (params.normal).
+     * For reflection, align with incoming ray to ensure same-side scattering. */
+    if (params.is_refraction) {
+      /* Refraction: only flip if closure normal exists and points opposite */
+      if (params.has_normal && dot(eval.normal, params.normal) < 0.0f) {
+        eval.normal = -eval.normal;
+        eval.dNdu = -eval.dNdu;
+        eval.dNdv = -eval.dNdv;
+      }
+    }
+    else {
+      /* Reflection: flip if pointing toward receiver (same-side requirement) */
+      const bool flip_to_params = params.has_normal && dot(eval.normal, params.normal) < 0.0f;
+      const bool flip_to_receiver = !params.has_normal && dot(eval.normal, eval.dir_ds) > 0.0f;
+      if (flip_to_params || flip_to_receiver) {
+        eval.normal = -eval.normal;
+        eval.dNdu = -eval.dNdu;
+        eval.dNdv = -eval.dNdv;
+      }
     }
   }
 
@@ -1473,6 +1485,7 @@ bool evaluate_double_bounce(const ShadingPoint &receiver,
 
   MpgSeedRay primary_seed = {};
   primary_seed.light_sample.P = secondary_point;
+  primary_seed.light_sample.t = 0.0f;
   primary_seed.use_smooth_normals = primary_use_smooth_normals;
 
   evaluate_specular(receiver, primary_seed, primary_geometry, primary_params, u1, v1, eval.primary);
@@ -2419,7 +2432,8 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                       (seed.light_sample.type == LIGHT_DISTANT) ||
                                       (seed.light_sample.type == LIGHT_BACKGROUND);
   primary_seed_for_jacobian.light_sample.P = eval.secondary.point;
-  primary_seed_for_jacobian.light_sample.t = eval.primary.distance_sl;
+  const float actual_distance_primary_to_secondary = len(eval.secondary.point - eval.primary.point);
+  primary_seed_for_jacobian.light_sample.t = actual_distance_primary_to_secondary;
   primary_seed_for_jacobian.light_sample.D = eval.primary.dir_sl;
   if (seed_light_was_distant) {
     primary_seed_for_jacobian.light_sample.type = LIGHT_POINT;
