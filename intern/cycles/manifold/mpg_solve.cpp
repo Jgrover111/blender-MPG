@@ -443,10 +443,15 @@ float3 compute_light_sample_direction_derivative(const LightSample &light_sample
                                                  const float3 &point,
                                                  const float3 &d_point)
 {
+  /* For directional/infinite lights (sun, background), direction is fixed
+   * regardless of specular vertex position. Derivative is zero, matching
+   * Mitsuba's fixed_direction flag behavior. */
   if (light_sample.t == FLT_MAX) {
     return zero_float3();
   }
 
+  /* For finite lights (point, area), direction changes with vertex position.
+   * Compute derivative of normalized direction vector. */
   return derivative_normalized(light_sample.P - point, -d_point);
 }
 
@@ -675,7 +680,11 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   }
 
   bool prefer_reflection_from_geometry = false;
-  if (!light_dir_degenerate && hemisphere_normal_valid) {
+  /* For directional lights, light_dir points TO the light source (opposite of actual light ray
+   * travel direction), making the "same side" test invalid. Only apply geometric checks for
+   * finite lights where light_dir represents the actual light ray direction. */
+  const bool is_directional_light = (seed.light_sample.t == FLT_MAX);
+  if (!light_dir_degenerate && hemisphere_normal_valid && !is_directional_light) {
     /* Compare directions in the shading-normal frame (hemisphere_normal) to detect interface crossings. */
     const float dot_in = dot(hemisphere_normal, -ray_dir);
     const float dot_light = dot(hemisphere_normal, light_dir);
@@ -1483,9 +1492,12 @@ bool evaluate_double_bounce(const ShadingPoint &receiver,
 {
   const float3 secondary_point = surface_point_from_barycentric(secondary_geometry, u2, v2);
 
+  /* For double-bounce, the primary vertex treats the secondary vertex as a finite light.
+   * Initialize light_sample with the secondary point and ensure t != FLT_MAX so derivatives
+   * are computed correctly (not treated as directional). */
   MpgSeedRay primary_seed = {};
   primary_seed.light_sample.P = secondary_point;
-  primary_seed.light_sample.t = 0.0f;
+  primary_seed.light_sample.t = 0.0f;  /* Finite light, distance will be computed from positions */
   primary_seed.use_smooth_normals = primary_use_smooth_normals;
 
   evaluate_specular(receiver, primary_seed, primary_geometry, primary_params, u1, v1, eval.primary);
@@ -1551,6 +1563,26 @@ bool compute_double_bounce_jacobian(KernelGlobals kg,
                                     const float base_residual[4],
                                     float J[4][4])
 {
+  /* For double-bounce with directional lights, we need to use the secondary vertex position
+   * as a finite light source for Jacobian computation. Compute the secondary point from
+   * current barycentric coordinates. */
+  const float3 secondary_point = surface_point_from_barycentric(secondary_geometry, u2, v2);
+
+  LightSample adjusted_light_sample = light_sample;
+  const bool is_directional = (light_sample.t == FLT_MAX) ||
+                             (light_sample.type == LIGHT_DISTANT) ||
+                             (light_sample.type == LIGHT_BACKGROUND);
+
+  if (is_directional) {
+    /* For the secondary bounce, treat the light as coming from the secondary vertex
+     * instead of from infinity. This matches Mitsuba's approach of creating a fake
+     * vertex at finite distance for directional lights. */
+    adjusted_light_sample.P = secondary_point;
+    adjusted_light_sample.t = 1.0f;  /* Arbitrary small distance, direction matters more */
+    adjusted_light_sample.type = LIGHT_POINT;
+    /* D stays the same - light direction from secondary vertex toward light */
+  }
+
   const float epsilon = 1.0e-4f;
 
   for (int column = 0; column < 4; ++column) {
@@ -1603,12 +1635,21 @@ bool compute_double_bounce_jacobian(KernelGlobals kg,
       return false;
     }
 
+    /* For directional lights, need to update the adjusted light sample position
+     * for each iteration since the secondary vertex moves with offset_u2/offset_v2 */
+    LightSample iteration_light_sample = adjusted_light_sample;
+    if (is_directional && (du2 != 0.0f || dv2 != 0.0f)) {
+      const float3 offset_secondary_point = surface_point_from_barycentric(
+          secondary_geometry, offset_u2, offset_v2);
+      iteration_light_sample.P = offset_secondary_point;
+    }
+
     if (!evaluate_double_bounce(receiver,
                                 primary_geometry,
                                 offset_primary_params,
                                 secondary_geometry,
                                 offset_secondary_params,
-                                light_sample,
+                                iteration_light_sample,
                                 offset_u1,
                                 offset_v1,
                                 offset_u2,
@@ -2103,9 +2144,17 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     return false;
   }
   const float geometric_factor = cos_theta / distance_sq;
-  result.jacobian_total = fabsf(determinant) * geometric_factor;
-  result.jacobian = result.jacobian_total;
-  vertex.jacobian = result.jacobian_total;
+  const float jacobian = fabsf(determinant) * geometric_factor;
+
+  /* Check for numerical issues in Jacobian computation */
+  if (!isfinite_safe(jacobian) || jacobian <= 1.0e-12f) {
+    failure_code = MPG_FAILURE_JACOBIAN_ZERO;
+    return false;
+  }
+
+  result.jacobian_total = jacobian;
+  result.jacobian = jacobian;
+  vertex.jacobian = jacobian;
 
   failure_code = MPG_FAILURE_NONE;
 
@@ -2427,11 +2476,16 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     return false;
   }
 
+  /* For double-bounce with directional lights, convert to point light for Jacobian.
+   * The primary vertex "sees" the secondary vertex as a finite light source.
+   * Distance is the actual geometric distance, not the fake infinite distance. */
   MpgSeedRay primary_seed_for_jacobian = seed;
   const bool seed_light_was_distant = (seed.light_sample.t == FLT_MAX) ||
                                       (seed.light_sample.type == LIGHT_DISTANT) ||
                                       (seed.light_sample.type == LIGHT_BACKGROUND);
   primary_seed_for_jacobian.light_sample.P = eval.secondary.point;
+  /* Use actual distance between primary and secondary vertices, not fake infinite distance.
+   * This matches Mitsuba's approach of placing a fake vertex at distance 1 for directional lights. */
   const float actual_distance_primary_to_secondary = len(eval.secondary.point - eval.primary.point);
   primary_seed_for_jacobian.light_sample.t = actual_distance_primary_to_secondary;
   primary_seed_for_jacobian.light_sample.D = eval.primary.dir_sl;
@@ -2467,6 +2521,12 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   const float geometric_factor_primary = cos_primary / distance_primary_sq;
   const float jacobian_primary = fabsf(determinant_primary) * geometric_factor_primary;
 
+  /* Check primary Jacobian for numerical issues */
+  if (!isfinite_safe(jacobian_primary) || jacobian_primary <= 1.0e-12f) {
+    failure_code = MPG_FAILURE_JACOBIAN_ZERO;
+    return false;
+  }
+
   ShadingPoint intermediate_point = receiver;
   intermediate_point.position = eval.primary.point;
   intermediate_point.geometric_normal = eval.primary.normal;
@@ -2499,6 +2559,12 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   }
   const float geometric_factor_secondary = cos_secondary / distance_secondary_sq;
   const float jacobian_secondary = fabsf(determinant_secondary) * geometric_factor_secondary;
+
+  /* Check secondary Jacobian for numerical issues before multiplying */
+  if (!isfinite_safe(jacobian_secondary) || jacobian_secondary <= 1.0e-12f) {
+    failure_code = MPG_FAILURE_JACOBIAN_ZERO;
+    return false;
+  }
 
   const float jacobian_total = jacobian_primary * jacobian_secondary;
   if (!isfinite_safe(jacobian_total) || fabsf(jacobian_total) <= 1.0e-12f) {
@@ -2543,6 +2609,10 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                                               sd.prim,
                                                               OBJECT_NONE,
                                                               PRIM_NONE);
+  /* For glass refraction, the intermediate ray travels through the glass interior.
+   * Don't exclude anything as the "light" since we want to detect if the path
+   * from primary to secondary is clear. The self exclusion (seed.object/prim) prevents
+   * hitting the starting surface. */
   const float visibility_intermediate = compute_segment_visibility(kg,
                                                                    eval.primary.point,
                                                                    eval.primary.normal,

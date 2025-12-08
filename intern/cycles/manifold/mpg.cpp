@@ -580,6 +580,18 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   }
 #endif
 
+  /* Final sanity check - ensure all PDFs and Jacobian are valid before returning success */
+  if (!isfinite_safe(result.jacobian_total) || result.jacobian_total <= 0.0f) {
+    result.attempt_count = attempt_count;
+    result.failure_code = MPG_FAILURE_JACOBIAN_ZERO;
+    return result;
+  }
+  if (!isfinite_safe(result.pdf) || result.pdf <= 0.0f) {
+    result.attempt_count = attempt_count;
+    result.failure_code = MPG_FAILURE_INVALID_PDF;
+    return result;
+  }
+
   result.success = true;
   result.failure_code = MPG_FAILURE_NONE;
   result.wi = solution.wi;
