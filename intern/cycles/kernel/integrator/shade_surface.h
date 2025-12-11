@@ -1081,6 +1081,26 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     }
   }
 
+  /* Store diagnostic if MPG cannot run to help identify configuration issues.
+   * Use custom failure codes (300-series) for configuration problems. */
+  if (!mpg_can_run) {
+    int diagnostic_code = 300;  /* Base: MPG disabled or not ready */
+    if (!manifold_guiding_enabled) {
+      diagnostic_code = 301;  /* MPG not enabled in scene settings */
+    }
+    else if (!manifold_guiding_ready) {
+      diagnostic_code = 302;  /* Gate check failed and guide not ready */
+    }
+    else if (!summary_available && gate_active_local) {
+      diagnostic_code = 303;  /* No guide summary available with active gate */
+    }
+    else if (!guiding_features_enabled && gate_active_local) {
+      diagnostic_code = 304;  /* Guiding features disabled with active gate */
+    }
+    manifold_failure_code = diagnostic_code;
+    /* Jacobian stays at -1 to indicate no valid computation occurred */
+  }
+
   if (mpg_can_run) {
     const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
     const int bounce = INTEGRATOR_STATE(state, path, bounce);
@@ -1133,11 +1153,42 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                   seed_pdf_valid && light_pdf_valid && jacobian_abs > 0.0f &&
                                   pdf_mpg_sa > 0.0f);
 
+    /* Store comprehensive diagnostics when no valid result is produced.
+     * Use custom failure codes (200-series) for validation failures.
+     * The failure code is written to the third component of MPG Attempt AOV. */
+    if (!manifold_pdf_factors_valid) {
+      int diagnostic_code = 200;  /* Base code for validation failure */
+
+      /* Check if solver even attempted to run */
+      if (!gate_pass_any_result) {
+        diagnostic_code = 201;  /* Gate blocked solver */
+      }
+      else if (mpg_failure) {
+        /* Solver ran but failed - already set in mpg_result.failure_code */
+        diagnostic_code = int(mpg_result.failure_code);
+      }
+      else if (!mpg_result.success) {
+        diagnostic_code = 210;  /* Solver returned without success flag */
+      }
+      else {
+        /* Solver succeeded but validation failed */
+        if (!seed_pdf_valid) diagnostic_code = 220;
+        else if (!light_pdf_valid) diagnostic_code = 221;
+        else if (!(jacobian_abs > 0.0f)) diagnostic_code = 222;
+        else if (!(pdf_mpg_sa > 0.0f)) diagnostic_code = 223;
+        else diagnostic_code = 229;  /* Unknown validation failure */
+      }
+
+      manifold_failure_code = diagnostic_code;
+      /* Jacobian stays at -1 to indicate no valid computation occurred */
+    }
+
     if (manifold_pdf_factors_valid) {
       manifold_seed_pdf = mpg_result.seed_pdf;
       manifold_bounce_pdf = mpg_result.bounce_pdf;
       manifold_light_pdf = mpg_result.light_pdf;
-      manifold_abs_jacobian = jacobian_abs;
+      /* Ensure jacobian is finite even when validation passed - memory safety */
+      manifold_abs_jacobian = isfinite_safe(jacobian_abs) ? jacobian_abs : -998.0f;
       manifold_pdf = pdf_mpg_sa;
     }
 
@@ -1224,21 +1275,20 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     manifold_mis_denominator = mis_denominator;
     manifold_mis_weight = mis_weight;
 
-    /* Diagnostic: Track why contribution failed (stored in Jacobian as negative debug code):
-     * -100: mpg_ok failed (visibility=0, invalid wi, or invalid PDFs)
-     * -101: spec_weight is zero
-     * -102: light_eval is zero
-     * -103: mpg_bsdf_pdf is zero
-     * -104: bsdf_eval is zero
-     * -105: visibility_weight is zero or non-finite */
+    /* Diagnostic: Track why contribution failed using 100-series failure codes:
+     * 100: mpg_ok failed (visibility=0, invalid wi, or invalid PDFs)
+     * 101: spec_weight is zero
+     * 102: light_eval is zero
+     * 104: bsdf_eval is zero or mis_weight is zero
+     * 105: visibility_weight is zero or non-finite */
     int contribution_block_reason = 0;
 
     if (mpg_result.success && manifold_failure_code == int(MPG_FAILURE_NONE)) {
       if (!mpg_ok) {
-        contribution_block_reason = -100;
+        contribution_block_reason = 100;
       }
       else if (is_zero(mpg_result.spec_weight)) {
-        contribution_block_reason = -101;
+        contribution_block_reason = 101;
       }
     }
 
@@ -1275,60 +1325,52 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 
       if (!is_zero(light_eval)) {
         BsdfEval mpg_bsdf_eval;
-        const float mpg_bsdf_pdf = surface_shader_bsdf_eval(
-            kg, state, sd, wi_mpg, &mpg_bsdf_eval, mpg_light.shader);
+        /* Evaluate BSDF at camera-side surface. For manifold connections, we don't check if
+         * the PDF is zero (which happens for lights without MIS like sun lamps), since we're
+         * explicitly connecting via the manifold path, not trying to hit the light via BSDF
+         * sampling. This matches MNEE's approach. */
+        surface_shader_bsdf_eval(kg, state, sd, wi_mpg, &mpg_bsdf_eval, mpg_light.shader);
 
-        if (mpg_bsdf_pdf > 0.0f) {
-          bsdf_eval_mul(&mpg_bsdf_eval, mpg_result.spec_weight);
+        bsdf_eval_mul(&mpg_bsdf_eval, mpg_result.spec_weight);
 
-          if (!bsdf_eval_is_zero(&mpg_bsdf_eval) && mis_weight > 0.0f) {
-            const float visibility_weight = (mpg_result.visibility > 0.0f && pdf_mpg > 0.0f) ? (mpg_result.visibility * (mis_weight / pdf_mpg)) : 0.0f;
-            if (visibility_weight > 0.0f && isfinite_safe(visibility_weight)) {
-              bsdf_eval_mul(&mpg_bsdf_eval, visibility_weight);
+        if (!bsdf_eval_is_zero(&mpg_bsdf_eval) && mis_weight > 0.0f) {
+          const float visibility_weight = (mpg_result.visibility > 0.0f && pdf_mpg > 0.0f) ? (mpg_result.visibility * (mis_weight / pdf_mpg)) : 0.0f;
+          if (visibility_weight > 0.0f && isfinite_safe(visibility_weight)) {
+            bsdf_eval_mul(&mpg_bsdf_eval, visibility_weight);
 
-              Spectrum mpg_contribution =
-                  INTEGRATOR_STATE(state, path, throughput) * bsdf_eval_sum(&mpg_bsdf_eval) * light_eval;
+            Spectrum mpg_contribution =
+                INTEGRATOR_STATE(state, path, throughput) * bsdf_eval_sum(&mpg_bsdf_eval) * light_eval;
 
-              manifold_debug_contribution = mpg_contribution;
+            manifold_debug_contribution = mpg_contribution;
 
-              surface_write_manifold_direct_light(kg,
-                                                  state,
-                                                  mpg_contribution,
-                                                  mpg_light.group,
-                                                  render_buffer);
+            surface_write_manifold_direct_light(kg,
+                                                state,
+                                                mpg_contribution,
+                                                mpg_light.group,
+                                                render_buffer);
 #      if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 1
-              if (manifold_options.relax_gate) {
-                guiding_record_manifold_direct_light(kg, state, mpg_contribution, mis_weight);
-              }
+            if (manifold_options.relax_gate) {
+              guiding_record_manifold_direct_light(kg, state, mpg_contribution, mis_weight);
+            }
 #      endif
-            }
-            else if (contribution_block_reason == 0) {
-              contribution_block_reason = -105;  /* visibility_weight failed */
-            }
           }
           else if (contribution_block_reason == 0) {
-            contribution_block_reason = -104;  /* bsdf_eval zero or mis_weight zero */
+            contribution_block_reason = 105;  /* visibility_weight failed */
           }
         }
         else if (contribution_block_reason == 0) {
-          contribution_block_reason = -103;  /* mpg_bsdf_pdf zero */
+          contribution_block_reason = 104;  /* bsdf_eval zero or mis_weight zero */
         }
       }
       else if (contribution_block_reason == 0) {
-        contribution_block_reason = -102;  /* light_eval zero */
+        contribution_block_reason = 102;  /* light_eval zero */
       }
     }
 
-    /* Store diagnostic in Jacobian AOV for successful solves with no contribution */
-    if (contribution_block_reason < 0 && manifold_abs_jacobian > 0.0f) {
-      manifold_abs_jacobian = float(contribution_block_reason);
-    }
-
-    if (!mpg_result.success &&
-        manifold_abs_jacobian < 0.0f &&
-        mpg_result.failure_code != MPG_FAILURE_NONE)
-    {
-      manifold_abs_jacobian = -float(mpg_result.failure_code);
+    /* Store diagnostic in failure code for successful solves with no contribution.
+     * This uses 100-series codes to distinguish from solver failures (1-15). */
+    if (contribution_block_reason > 0 && manifold_failure_code == int(MPG_FAILURE_NONE)) {
+      manifold_failure_code = contribution_block_reason;
     }
   }
 

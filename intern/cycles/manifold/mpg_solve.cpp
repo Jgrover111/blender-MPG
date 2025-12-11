@@ -380,24 +380,40 @@ float3 compute_specular(const float3 &dir_ds,
                         float &cos_theta_t,
                         float &eta_used)
 {
-  const float3 incoming = -dir_ds;
-  const bool entering = dot(normal, incoming) >= 0.0f;
+  /* For reverse ray tracing from receiver toward light:
+   * Determine if ray exits or enters the material at this surface.
+   * dir_ds points from receiver toward specular point.
+   * normal points outward from the material.
+   *
+   * If dot(dir_ds, normal) > 0: both point in same hemisphere → ray comes from inside,
+   *   going toward outside → exiting (glass→air).
+   * If dot(dir_ds, normal) <= 0: opposite hemispheres → ray comes from outside,
+   *   going toward inside → entering (air→glass). */
+  const bool exiting = dot(normal, dir_ds) > 0.0f;
 
-  float3 oriented_normal = entering ? normal : -normal;
+  /* Orient normal to ensure it points toward the medium the ray came from.
+   * This ensures cos_theta_i = -dot(dir_ds, oriented_normal) > 0. */
+  float3 oriented_normal = exiting ? -normal : normal;
 
   if (!params.is_refraction) {
+    /* For reflection, use propagation direction (toward surface) */
+    const float3 incoming_reflect = dir_ds;
     tir = false;
-    cos_theta_i = dot(incoming, oriented_normal);
+    cos_theta_i = -dot(incoming_reflect, oriented_normal);
     cos_theta_t = cos_theta_i;
     eta_used = 1.0f;
-    return reflect_dir(incoming, oriented_normal);
+    return reflect_dir(incoming_reflect, oriented_normal);
   }
 
+  /* Compute eta ratio for reverse ray tracing.
+   * Eta = n_incident / n_transmitted for Snell's law.
+   * If exiting (glass→air): eta = n_glass/n_air = IOR.
+   * If entering (air→glass): eta = n_air/n_glass = 1/IOR. */
   const float safe_base_eta = fmaxf(params.base_eta, 1e-6f);
-  const float eta_ratio = entering ? (1.0f / safe_base_eta) : safe_base_eta;
+  const float eta_ratio = exiting ? (1.0f / safe_base_eta) : safe_base_eta;
   const float safe_eta_ratio = fmaxf(eta_ratio, 1e-6f);
 
-  float3 dir = refract_dir(incoming, oriented_normal, safe_eta_ratio, tir, cos_theta_i, cos_theta_t);
+  float3 dir = refract_dir(dir_ds, oriented_normal, safe_eta_ratio, tir, cos_theta_i, cos_theta_t);
   eta_used = safe_eta_ratio;
   if (tir) {
     cos_theta_t = 0.0f;
@@ -525,9 +541,12 @@ void evaluate_specular(const ShadingPoint &D,
 
   /* Mitsuba's half-vector constraint formulation (proven to converge to 1e-4).
    * Instead of directional constraint (dir_sl - spec_dir), use generalized half-vector
-   * projected onto surface tangent frame. This is the constraint used in Mitsuba reference. */
-  const float3 wi = -eval.dir_ds;  /* Incoming: receiver to specular point */
-  const float3 wo = eval.dir_sl;    /* Outgoing: specular point to light */
+   * projected onto surface tangent frame. This is the constraint used in Mitsuba reference.
+   *
+   * Note: Half-vector uses BSDF convention (directions away from surface), while refraction
+   * computation uses propagation direction (toward surface). These are intentionally different. */
+  const float3 wi = -eval.dir_ds;  /* Incident direction away from surface (X→C) */
+  const float3 wo = eval.dir_sl;    /* Outgoing direction away from surface (X→L) */
 
   /* Mitsuba uses base material IOR for half-vector, not the relative IOR from Snell's law.
    * Invert eta when ray comes from inside surface (dot(wi, normal) < 0). */
@@ -1431,10 +1450,17 @@ bool trace_secondary_seed(KernelGlobals kg,
     offset_sd.Ng = offset_n;
   }
 
+  /* For refraction through thin geometry, we need to handle the case where entry and exit
+   * surfaces are very close (solidified planes). Use a tiny offset in the refracted direction
+   * to move slightly away from the entry surface before tracing. This matches how Mitsuba
+   * handles thin dielectrics by ensuring we don't immediately re-hit the entry surface. */
+  const float tiny_offset = 1e-5f;
+  const float3 offset_point = primary_point + dir_sl * tiny_offset;
+
   Ray ray;
-  ray.P = mpg_surface_ray_offset(kg, offset_sd, primary_point, dir_sl);
+  ray.P = offset_point;
   ray.D = dir_sl;
-  ray.tmin = 1e-4f;
+  ray.tmin = 0.0f;  /* No additional tmin needed since we already offset the starting point */
   ray.tmax = FLT_MAX;
   ray.time = sd.time;
   /* Leave self references clear so refraction chains can re-hit the same triangle from
@@ -2610,9 +2636,9 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                                               OBJECT_NONE,
                                                               PRIM_NONE);
   /* For glass refraction, the intermediate ray travels through the glass interior.
-   * Don't exclude anything as the "light" since we want to detect if the path
-   * from primary to secondary is clear. The self exclusion (seed.object/prim) prevents
-   * hitting the starting surface. */
+   * For solidified geometry, entry and exit surfaces are different primitives of the
+   * same object. Skip BOTH primitives so the ray can travel through the interior
+   * without detecting either face as an occlusion. */
   const float visibility_intermediate = compute_segment_visibility(kg,
                                                                    eval.primary.point,
                                                                    eval.primary.normal,
@@ -2620,8 +2646,8 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                                                    sd.time,
                                                                    seed.object,
                                                                    seed.prim,
-                                                                   OBJECT_NONE,
-                                                                   PRIM_NONE);
+                                                                   secondary_seed.object,
+                                                                   secondary_seed.prim);
   /* Skip visibility test for directional lights following the Mitsuba reference.
    * Directional lights are infinitely distant so shadow ray tests don't apply. */
   float visibility_secondary = 1.0f;

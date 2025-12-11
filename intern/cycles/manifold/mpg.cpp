@@ -116,13 +116,21 @@ float compute_visibility_after_update(KernelGlobals kg,
    * Directional lights are infinitely distant so shadow ray tests don't apply.
    * This matches the solver's behavior in mpg_solve.cpp. */
   if (light_sample.t != FLT_MAX) {
+    /* For single-bounce refraction through closed geometry (solidified planes),
+     * the ray from specular vertex to light must pass through the opposite face
+     * of the same glass object. Skip all primitives of the glass object to allow
+     * this by setting skip_prim to PRIM_NONE. */
+    const bool is_single_bounce_refraction = (result.specular_vertex_count == 1 &&
+                                              result.specular_vertices[0].is_refraction);
+    const int skip_self_prim = is_single_bounce_refraction ? PRIM_NONE : skip_prim;
+
     visibility *= mpg_compute_segment_visibility(kg,
                                                  segment_start,
                                                  segment_normal,
                                                  light_sample.P,
                                                  sd.time,
                                                  skip_object,
-                                                 skip_prim,
+                                                 skip_self_prim,
                                                  light_sample.object,
                                                  light_sample.prim);
   }

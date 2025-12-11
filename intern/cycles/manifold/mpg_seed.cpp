@@ -734,12 +734,16 @@ bool mpg_generate_seed(KernelGlobals kg,
   const bool allow_single = pdf_single > 0.0f;
   const bool allow_double_pdf = allow_double_bounce && pdf_double > 0.0f;
 
+  const bool prefer_double_for_refraction = allow_double_pdf &&
+                                            prefer_transmission &&
+                                            bootstrap_seed;
+
   if (!allow_single && allow_double_pdf) {
     selected_bounce_count = 2;
     selected_bounce_pdf = pdf_double;
   }
   else if (allow_single && allow_double_pdf) {
-    if (bounce_rand >= pdf_single) {
+    if (prefer_double_for_refraction || bounce_rand >= pdf_single) {
       selected_bounce_count = 2;
       selected_bounce_pdf = pdf_double;
     }
