@@ -380,20 +380,33 @@ float3 compute_specular(const float3 &dir_ds,
                         float &cos_theta_t,
                         float &eta_used)
 {
-  /* For reverse ray tracing from receiver toward light:
-   * Determine if ray exits or enters the material at this surface.
-   * dir_ds points from receiver toward specular point.
-   * normal points outward from the material.
-   *
-   * If dot(dir_ds, normal) > 0: both point in same hemisphere → ray comes from inside,
-   *   going toward outside → exiting (glass→air).
-   * If dot(dir_ds, normal) <= 0: opposite hemispheres → ray comes from outside,
-   *   going toward inside → entering (air→glass). */
-  const bool exiting = dot(normal, dir_ds) > 0.0f;
+  /* For refraction with microfacets, use the microfacet normal (from BSDF) instead of
+   * geometric normal to determine exiting vs entering. The microfacet normal is oriented
+   * by Cycles based on the ray direction and correctly indicates which side we're on.
+   * Geometric normals can be flipped on thin shells (solidified planes). */
+  const float3 refraction_normal = (params.is_refraction && params.has_microfacet)
+                                     ? params.microfacet.N
+                                     : normal;
+
+#ifdef WITH_CYCLES_DEBUG
+  if (params.is_refraction && params.has_microfacet) {
+    printf("MPG DEBUG compute_specular: refraction direction determination\n");
+    printf("  geometric normal: (%.6f, %.6f, %.6f)\n", normal.x, normal.y, normal.z);
+    printf("  microfacet normal: (%.6f, %.6f, %.6f)\n",
+           params.microfacet.N.x, params.microfacet.N.y, params.microfacet.N.z);
+    printf("  dir_ds: (%.6f, %.6f, %.6f)\n", dir_ds.x, dir_ds.y, dir_ds.z);
+    printf("  dot(geom_normal, dir_ds): %.6f\n", dot(normal, dir_ds));
+    printf("  dot(micro_normal, dir_ds): %.6f\n", dot(params.microfacet.N, dir_ds));
+    printf("  Using MICROFACET normal for exiting/entering determination\n");
+  }
+#endif
+
+  const bool exiting = dot(refraction_normal, dir_ds) > 0.0f;
 
   /* Orient normal to ensure it points toward the medium the ray came from.
-   * This ensures cos_theta_i = -dot(dir_ds, oriented_normal) > 0. */
-  float3 oriented_normal = exiting ? -normal : normal;
+   * This ensures cos_theta_i = -dot(dir_ds, oriented_normal) > 0.
+   * Use the same normal (microfacet or geometric) that was used for exiting determination. */
+  float3 oriented_normal = exiting ? -refraction_normal : refraction_normal;
 
   if (!params.is_refraction) {
     /* For reflection, use propagation direction (toward surface) */
@@ -410,7 +423,7 @@ float3 compute_specular(const float3 &dir_ds,
    * If exiting (glass→air): eta = n_glass/n_air = IOR.
    * If entering (air→glass): eta = n_air/n_glass = 1/IOR. */
   const float safe_base_eta = fmaxf(params.base_eta, 1e-6f);
-  const float eta_ratio = exiting ? (1.0f / safe_base_eta) : safe_base_eta;
+  const float eta_ratio = exiting ? safe_base_eta : (1.0f / safe_base_eta);
   const float safe_eta_ratio = fmaxf(eta_ratio, 1e-6f);
 
   float3 dir = refract_dir(dir_ds, oriented_normal, safe_eta_ratio, tir, cos_theta_i, cos_theta_t);
@@ -483,6 +496,10 @@ void evaluate_specular(const ShadingPoint &D,
   eval.point = geometry.verts[0] * w + geometry.verts[1] * u + geometry.verts[2] * v;
   eval.dXdu = geometry.dPdu;
   eval.dXdv = geometry.dPdv;
+  /* Direction FROM reference TO specular point (current_vertex - previous_vertex).
+   * For path x_prev→x_cur→x_next: dir_ds = x_cur - x_prev (forward along path).
+   * Used with wi = -dir_ds to get Mitsuba convention: wi = x_prev - x_cur (backward).
+   * For refraction: dir_ds represents light arrival direction at specular vertex. */
   eval.dir_ds = eval.point - D.position;
   eval.distance_ds = len(eval.dir_ds);
   eval.dir_ds = (eval.distance_ds > 0.0f) ? (eval.dir_ds / eval.distance_ds) :
@@ -601,7 +618,13 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   const bool has_geometric_normal = !is_zero(geometric_normal);
   float3 ray_dir = spec_point - sd.P;
   const float distance = len(ray_dir);
-  if (!(distance > 1e-4f)) {
+  /* MPG reference does NOT check minimum distance here. Removed check to match.
+   * For thin geometry (solidified planes), vertices can be very close together.
+   * Only prevent exact zero for safe normalization. */
+  if (!(distance > 1e-12f)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG DEBUG specular_parameters: distance too small (%.12f)\n", distance);
+#endif
     return false;
   }
   ray_dir /= distance;
@@ -640,6 +663,10 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   const MicrofacetBsdf *reflection_microfacet = nullptr;
   const MicrofacetBsdf *refraction_microfacet = nullptr;
   const bool shader_reports_transmission = (spec_sd.flag & SD_BSDF_HAS_TRANSMISSION) != 0;
+
+#ifdef WITH_CYCLES_DEBUG
+  /* Closure details will be shown at function end */
+#endif
 
   enum class SeedHemisphere {
     Unknown,
@@ -775,8 +802,14 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   SpecularParameters singular_refraction_params;
   bool have_singular_refraction_params = false;
 
+  /* Track if we found any BSDF closures that were non-specular (incompatible with MPG).
+   * Type 3 (CLOSURE_BSDF_BURLEY_ID) is diffuse, which cannot be handled by manifold walk. */
+  bool found_non_specular_bsdf = false;
+  int non_specular_closure_type = -1;
+
   for (int i = 0; i < spec_sd.num_closure; ++i) {
     const ShaderClosure *closure = &spec_sd.closure[i];
+
     if (!CLOSURE_IS_BSDF(closure->type)) {
       continue;
     }
@@ -787,6 +820,8 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     const bool is_singular = CLOSURE_IS_BSDF_SINGULAR(closure->type);
 
     if (!(is_micro || is_singular)) {
+      found_non_specular_bsdf = true;
+      non_specular_closure_type = (int)closure->type;
       continue;
     }
 
@@ -808,6 +843,7 @@ bool specular_parameters_from_surface(KernelGlobals kg,
       if (!reports_transmission && shader_reports_transmission) {
         reports_transmission = fabsf(mf->ior) > 1.0f + 1.0e-6f;
       }
+
       if (reports_transmission) {
         refraction_microfacet = mf;
       }
@@ -956,7 +992,21 @@ bool specular_parameters_from_surface(KernelGlobals kg,
       selected_refraction = true;
     }
   }
-  if (microfacet == nullptr) return false;
+  if (microfacet == nullptr) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("----------------------------------------\n");
+    printf("ERROR: No suitable BSDF for MPG!\n");
+    printf("  Total closures evaluated: %d\n", spec_sd.num_closure);
+    printf("  Has reflection: %s\n", reflection_microfacet ? "YES" : "NO");
+    printf("  Has refraction: %s\n", refraction_microfacet ? "YES" : "NO");
+    if (found_non_specular_bsdf) {
+      printf("  Found incompatible BSDF: type=%d (diffuse/glossy)\n", non_specular_closure_type);
+      printf("  ** MPG requires glass/mirror surfaces only **\n");
+    }
+    printf("========================================\n\n");
+#endif
+    return false;
+  }
   params = SpecularParameters();
   copy_microfacet_to_parameters(microfacet, params);
 
@@ -977,11 +1027,21 @@ bool specular_parameters_from_surface(KernelGlobals kg,
         params.base_eta = 1.0f;
       }
       else {
+#ifdef WITH_CYCLES_DEBUG
+        printf("MPG DEBUG specular_parameters: refraction eta invalid (%.6f), no reflection fallback\n", eta);
+#endif
         return false;
       }
     }
     else {
-      params.base_eta = fabsf(eta);
+      /* Cycles may return the relative IOR in either direction depending on ray orientation.
+       * For MPG, we always need eta > 1.0 representing the absolute IOR of the refractive medium.
+       * If eta < 1.0, it's the reciprocal (e.g., 0.667 = 1/1.5), so invert it. */
+      float corrected_eta = fabsf(eta);
+      if (corrected_eta < 1.0f - 1e-6f) {
+        corrected_eta = 1.0f / corrected_eta;
+      }
+      params.base_eta = corrected_eta;
     }
   }
   if (!params.is_refraction) {
@@ -1356,6 +1416,9 @@ bool build_tangent_basis(const float3 &dXdu, const float3 &dXdv, float3 &tangent
   tangent_u = dXdu;
   const float len_u = len(tangent_u);
   if (!(len_u > 0.0f)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG DEBUG build_tangent_basis: dXdu is zero-length\n");
+#endif
     return false;
   }
   tangent_u /= len_u;
@@ -1363,6 +1426,14 @@ bool build_tangent_basis(const float3 &dXdu, const float3 &dXdv, float3 &tangent
   tangent_v = dXdv - tangent_u * dot(tangent_u, dXdv);
   const float len_v = len(tangent_v);
   if (!(len_v > 0.0f)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG DEBUG build_tangent_basis: tangent_v is zero after Gram-Schmidt\n");
+    printf("  dXdu=[%.9f, %.9f, %.9f] len=%.12f\n", dXdu.x, dXdu.y, dXdu.z, len_u);
+    printf("  dXdv=[%.9f, %.9f, %.9f] len=%.12f\n", dXdv.x, dXdv.y, dXdv.z, len(dXdv));
+    printf("  dot(tangent_u, dXdv)=%.12f\n", dot(tangent_u, dXdv));
+    printf("  dXdv - projection=[%.9f, %.9f, %.9f] len=%.12f\n",
+           tangent_v.x, tangent_v.y, tangent_v.z, len_v);
+#endif
     return false;
   }
   tangent_v /= len_v;
@@ -1391,7 +1462,10 @@ bool trace_secondary_seed(KernelGlobals kg,
     use_offset_ng = false;
   }
 
-  float3 dir_ds = primary_point - sd.P;
+  /* Direction light arrives at primary vertex (FROM receiver TO primary).
+   * For Mitsuba path x₀(receiver)→v[0](primary)→v[1](secondary), light travels:
+   * receiver→primary, so incoming direction is (primary - receiver). */
+  float3 dir_ds = primary_point - sd.P;  // Direction: receiver → primary (light arrival)
   float distance_ds = len(dir_ds);
   if (!(distance_ds > 1e-4f)) {
     return false;
@@ -1408,12 +1482,52 @@ bool trace_secondary_seed(KernelGlobals kg,
     offset_ng = specular_normal;
   }
 
+#ifdef WITH_CYCLES_DEBUG
+  printf("----------------------------------------\n");
+  printf("PRIMARY VERTEX COMPUTED:\n");
+  printf("  Position: (%.6f, %.6f, %.6f)\n", primary_point.x, primary_point.y, primary_point.z);
+  printf("  Normal: (%.6f, %.6f, %.6f)\n", specular_normal.x, specular_normal.y, specular_normal.z);
+  printf("  Z relative to receiver: %.6f %s\n",
+         primary_point.z - sd.P.z,
+         (primary_point.z - sd.P.z) > 0 ? "(ABOVE)" : "(BELOW)");
+  printf("\n");
+  printf("RAY: Primary → Receiver (light flow direction):\n");
+  printf("  Direction: (%.6f, %.6f, %.6f) %s\n",
+         dir_ds.x, dir_ds.y, dir_ds.z,
+         dir_ds.z > 0 ? "[UPWARD]" : "[DOWNWARD]");
+  printf("  Distance: %.6f\n", distance_ds);
+  printf("\n");
+#endif
+
   bool tir = false;
   float cos_theta_i = 0.0f;
   float cos_theta_t = 0.0f;
   float eta_used = 1.0f;
   const float3 dir_sl = compute_specular(
       dir_ds, specular_normal, primary_params, tir, cos_theta_i, cos_theta_t, eta_used);
+
+#ifdef WITH_CYCLES_DEBUG
+  printf("REFRACTION at primary vertex:\n");
+  printf("  Incoming ray (from diffuse): (%.6f, %.6f, %.6f) %s\n",
+         dir_ds.x, dir_ds.y, dir_ds.z,
+         dir_ds.z > 0 ? "[UPWARD]" : "[DOWNWARD]");
+  printf("  Surface normal: (%.6f, %.6f, %.6f) %s\n",
+         specular_normal.x, specular_normal.y, specular_normal.z,
+         specular_normal.z > 0 ? "[UP]" : "[DOWN]");
+  printf("  IOR used: %.6f (%s)\n", eta_used,
+         eta_used > 1.0 ? "exiting glass→air" : "entering air→glass");
+  printf("  Outgoing ray (toward receiver): (%.6f, %.6f, %.6f) %s\n",
+         dir_sl.x, dir_sl.y, dir_sl.z,
+         dir_sl.z > 0 ? "[UPWARD]" : "[DOWNWARD]");
+  if (tir) {
+    printf("  RESULT: TOTAL INTERNAL REFLECTION (angle exceeds critical angle)\n");
+  }
+  else {
+    printf("  RESULT: Refraction successful\n");
+  }
+  printf("\n");
+#endif
+
   (void)cos_theta_i;
   (void)cos_theta_t;
   (void)eta_used;
@@ -1472,12 +1586,38 @@ bool trace_secondary_seed(KernelGlobals kg,
 
   Intersection isect;
   if (!scene_intersect(kg, &ray, PATH_RAY_ALL_VISIBILITY, &isect)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("  trace_secondary_seed: NO intersection found\n");
+#endif
     return false;
   }
 
   if (!(isect.type & PRIMITIVE_TRIANGLE)) {
     return false;
   }
+
+#ifdef WITH_CYCLES_DEBUG
+  const float3 hit_point = ray.P + ray.D * isect.t;
+  printf("SECONDARY VERTEX FOUND:\n");
+  printf("  Position: (%.6f, %.6f, %.6f)\n", hit_point.x, hit_point.y, hit_point.z);
+  printf("  Object: %d, Prim: %d\n", isect.object, isect.prim);
+  printf("  Distance from primary: %.6f\n", isect.t);
+  printf("  Z relative to primary: %.6f %s\n",
+         hit_point.z - primary_point.z,
+         (hit_point.z - primary_point.z) > 0 ? "(ABOVE)" : "(BELOW)");
+  printf("\n");
+
+  const char *hit_surface = "UNKNOWN";
+  if (isect.object != seed.object) {
+    hit_surface = "DIFFERENT OBJECT (likely diffuse plane)";
+  } else if (hit_point.z > primary_point.z) {
+    hit_surface = "GLASS TOP (exit surface)";
+  } else {
+    hit_surface = "GLASS BOTTOM or OTHER";
+  }
+  printf("  Identified as: %s\n", hit_surface);
+  printf("\n");
+#endif
 
   secondary_seed = seed;
   secondary_seed.object = isect.object;
@@ -1908,6 +2048,11 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
    * This formulation is proven to converge to 1e-4 in Mitsuba. */
   float3 tangent_u, tangent_v;
   if (!build_tangent_basis(eval.dXdu, eval.dXdv, tangent_u, tangent_v)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG FAILURE: Degenerate normals at build_tangent_basis\n");
+    printf("  dXdu=[%.6f, %.6f, %.6f] len=%.9f\n", eval.dXdu.x, eval.dXdu.y, eval.dXdu.z, len(eval.dXdu));
+    printf("  dXdv=[%.6f, %.6f, %.6f] len=%.9f\n", eval.dXdv.x, eval.dXdv.y, eval.dXdv.z, len(eval.dXdv));
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -1919,16 +2064,35 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   if (params.is_refraction && dot(wi, eval.normal) < 0.0f) {
     h_eta = 1.0f / fmaxf(h_eta, 1e-6f);
   }
+
+  /* Mitsuba's half-vector normalization: h = normalize(wi + eta * wo).
+   * Mitsuba normalizes without checking length threshold, trusting that
+   * geometrically invalid configurations will fail naturally in the Newton solver.
+   * We check for zero-length to avoid NaN, but use a minimal tolerance that only
+   * catches truly degenerate cases (matching Mitsuba's approach). */
   float3 h = wi + h_eta * wo;
   if (h_eta != 1.0f) {
     h = -h;
   }
   const float h_len = len(h);
-  if (!(h_len > 1e-8f)) {
+  if (h_len > 0.0f) {
+    h /= h_len;
+  }
+  else {
+    /* Half-vector is exactly zero - this is truly degenerate.
+     * Set to normal as fallback (constraint will fail to converge). */
+    h = eval.normal;
+  }
+
+  /* Verify normalization produced valid result */
+  if (!isfinite_safe(h.x) || !isfinite_safe(h.y) || !isfinite_safe(h.z)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG FAILURE: Degenerate normals at half-vector normalization (NaN/Inf)\n");
+    printf("  h=[%.6f, %.6f, %.6f] h_len=%.9f\n", h.x, h.y, h.z, h_len);
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
-  h /= h_len;
 
   /* Mitsuba's 2D constraint: C = H - N
    * where H is the projected half-vector and N is the offset normal.
@@ -2011,17 +2175,27 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     if (new_params.is_refraction && dot(new_wi, new_eval.normal) < 0.0f) {
       new_h_eta = 1.0f / fmaxf(new_h_eta, 1e-6f);
     }
+
+    /* Normalize half-vector (matching Mitsuba's approach - see earlier comment) */
     float3 new_h = new_wi + new_h_eta * new_wo;
     if (new_h_eta != 1.0f) {
       new_h = -new_h;
     }
     const float new_h_len = len(new_h);
-    if (!(new_h_len > 1e-8f)) {
+    if (new_h_len > 0.0f) {
+      new_h /= new_h_len;
+    }
+    else {
+      /* Degenerate configuration - use normal as fallback and reduce step size */
+      new_h = new_eval.normal;
+    }
+
+    /* Check for NaN/Inf after normalization */
+    if (!isfinite_safe(new_h.x) || !isfinite_safe(new_h.y) || !isfinite_safe(new_h.z)) {
       beta *= 0.5f;
       needs_step_update = false;
       continue;
     }
-    new_h /= new_h_len;
 
     /* Use zero offset for perfect specular (matches Mitsuba for roughness=0) */
     const float2 new_offset_2d = make_float2(0.0f, 0.0f);
@@ -2131,6 +2305,10 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
 
   float residual_matrix[2][2];
   if (!compute_residual_matrix(shading_point, seed, geometry, eval, residual_matrix)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG FAILURE: Degenerate normals at compute_residual_matrix\n");
+    printf("  dir_sl=[%.6f, %.6f, %.6f]\n", eval.dir_sl.x, eval.dir_sl.y, eval.dir_sl.z);
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2160,16 +2338,12 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
    * solid angle measure. Following the Mitsuba reference, this includes:
    * - The manifold constraint Jacobian (determinant of residual matrix)
    * - The geometric factor: cos(θ) / r²
-   * where θ is the angle at the specular surface and r is the distance from receiver. */
+   * where θ is the angle at the specular surface and r is the distance from receiver.
+   *
+   * Note: MPG reference does NOT check minimum distance. Small distances produce large
+   * Jacobians, which is geometrically correct. Removed distance_sq < 1e-4f check to match. */
   const float distance_sq = eval.distance_ds * eval.distance_ds;
-  if (distance_sq < 1e-4f) {
-#ifdef WITH_CYCLES_DEBUG
-    printf("MPG DEBUG single-bounce: FAILED distance check, distance_sq=%.9f\n", distance_sq);
-#endif
-    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
-    return false;
-  }
-  const float geometric_factor = cos_theta / distance_sq;
+  const float geometric_factor = cos_theta / fmaxf(distance_sq, 1e-20f);
   const float jacobian = fabsf(determinant) * geometric_factor;
 
   /* Check for numerical issues in Jacobian computation */
@@ -2203,6 +2377,22 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   result = MpgSolverOutput();
   failure_code = MPG_FAILURE_NONE;
 
+#ifdef WITH_CYCLES_DEBUG
+  printf("\n");
+  printf("========================================\n");
+  printf("MPG DOUBLE-BOUNCE PATH TRACE\n");
+  printf("========================================\n");
+  printf("RECEIVER (where camera hit):\n");
+  printf("  Position: (%.6f, %.6f, %.6f)\n", sd.P.x, sd.P.y, sd.P.z);
+  printf("  Normal: (%.6f, %.6f, %.6f)\n", sd.N.x, sd.N.y, sd.N.z);
+  printf("  Object: %d\n", sd.object);
+  printf("\n");
+  printf("PRIMARY VERTEX (first specular bounce):\n");
+  printf("  Seed object: %d, prim: %d\n", seed.object, seed.prim);
+  printf("  Seed bary: (%.6f, %.6f)\n", seed.bary_u, seed.bary_v);
+  printf("\n");
+#endif
+
   if (seed.prim < 0 || seed.object < 0) {
     failure_code = MPG_FAILURE_GEOMETRY;
     return false;
@@ -2220,6 +2410,9 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   SpecularParameters primary_params;
   if (!specular_parameters_from_surface(kg, sd, primary_geometry, seed, primary_u, primary_v, primary_params)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG FAILURE: specular_parameters_from_surface failed for primary (line 2268)\n");
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2277,6 +2470,9 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   ShaderData primary_sd;
   if (!build_primary_shading_data(sd, primary_geometry, seed, primary_u, primary_v, primary_sd)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG FAILURE: build_primary_shading_data failed (line 2325)\n");
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2285,6 +2481,9 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   if (!specular_parameters_from_surface(
           kg, primary_sd, secondary_geometry, secondary_seed, secondary_u, secondary_v, secondary_params))
   {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG FAILURE: specular_parameters_from_surface failed for secondary (line 2333)\n");
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2462,11 +2661,17 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   }
 
   if (!specular_parameters_from_surface(kg, sd, primary_geometry, seed, primary_u, primary_v, primary_params)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG FAILURE: specular_parameters_from_surface (post-Newton, primary) (line 2518)\n");
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
 
   if (!build_primary_shading_data(sd, primary_geometry, seed, primary_u, primary_v, primary_sd)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG FAILURE: build_primary_shading_data (post-Newton) (line 2523)\n");
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2479,6 +2684,9 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                         secondary_v,
                                         secondary_params))
   {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG FAILURE: specular_parameters_from_surface (post-Newton, secondary) (line 2528)\n");
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2521,6 +2729,9 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   float matrix_primary[2][2];
   if (!compute_residual_matrix(receiver, primary_seed_for_jacobian, primary_geometry, eval.primary, matrix_primary)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG FAILURE: compute_residual_matrix (primary double-bounce) (line 2586)\n");
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2535,6 +2746,10 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   const float area_primary = len(cross(eval.primary.dXdu, eval.primary.dXdv));
   const float cos_primary = fabsf(dot(eval.primary.normal, eval.primary.dir_ds));
   if (area_primary < 1e-4f || cos_primary < 1e-4f) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG FAILURE: geometry check (primary double-bounce), area=%.9f cos=%.9f (line 2600)\n",
+           area_primary, cos_primary);
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2560,6 +2775,9 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   float matrix_secondary[2][2];
   if (!compute_residual_matrix(intermediate_point, secondary_seed, secondary_geometry, eval.secondary, matrix_secondary)) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG FAILURE: compute_residual_matrix (secondary double-bounce) (line 2632)\n");
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2574,6 +2792,10 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   const float area_secondary = len(cross(eval.secondary.dXdu, eval.secondary.dXdv));
   const float cos_secondary = fabsf(dot(eval.secondary.normal, eval.secondary.dir_sl));
   if (area_secondary < 1e-4f || cos_secondary < 1e-4f) {
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG FAILURE: geometry check (secondary double-bounce), area=%.9f cos=%.9f (line 2649)\n",
+           area_secondary, cos_secondary);
+#endif
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
