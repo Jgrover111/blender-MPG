@@ -380,27 +380,20 @@ float3 compute_specular(const float3 &dir_ds,
                         float &cos_theta_t,
                         float &eta_used)
 {
-  /* For refraction with microfacets, use the microfacet normal (from BSDF) instead of
-   * geometric normal to determine exiting vs entering. The microfacet normal is oriented
-   * by Cycles based on the ray direction and correctly indicates which side we're on.
-   * Geometric normals can be flipped on thin shells (solidified planes). */
-  const float3 refraction_normal = (params.is_refraction && params.has_microfacet)
-                                     ? params.microfacet.N
-                                     : normal;
+  /* Use geometric normal directly for entering/exiting determination.
+   * For refraction: dot(normal, ray) > 0 means exiting, < 0 means entering. */
+  const float3 refraction_normal = normal;
 
 #ifdef WITH_CYCLES_DEBUG
-  if (params.is_refraction && params.has_microfacet) {
+  if (params.is_refraction) {
     printf("MPG DEBUG compute_specular: refraction direction determination\n");
-    printf("  geometric normal: (%.6f, %.6f, %.6f)\n", normal.x, normal.y, normal.z);
-    printf("  microfacet normal: (%.6f, %.6f, %.6f)\n",
-           params.microfacet.N.x, params.microfacet.N.y, params.microfacet.N.z);
+    printf("  normal: (%.6f, %.6f, %.6f)\n", normal.x, normal.y, normal.z);
     printf("  dir_ds: (%.6f, %.6f, %.6f)\n", dir_ds.x, dir_ds.y, dir_ds.z);
-    printf("  dot(geom_normal, dir_ds): %.6f\n", dot(normal, dir_ds));
-    printf("  dot(micro_normal, dir_ds): %.6f\n", dot(params.microfacet.N, dir_ds));
-    printf("  Using MICROFACET normal for exiting/entering determination\n");
+    printf("  dot(normal, dir_ds): %.6f\n", dot(normal, dir_ds));
   }
 #endif
 
+  /* Determine exiting vs entering from dot product with geometric normal. */
   const bool exiting = dot(refraction_normal, dir_ds) > 0.0f;
 
   /* Orient normal to ensure it points toward the medium the ray came from.
@@ -507,45 +500,30 @@ void evaluate_specular(const ShadingPoint &D,
 
   compute_light_sample_direction(seed.light_sample, eval.point, eval.dir_sl, eval.distance_sl);
 
+  /* Use the precomputed normals from load_surface_geometry.
+   * For smooth shading: interpolate vertex normals
+   * For flat shading: use the face normal (already computed and stored in geometry.normals) */
   if (seed.use_smooth_normals) {
     eval.normal = combine_vertex_normals(geometry, u, v);
     if (is_zero(eval.normal)) {
-      eval.normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+      /* Fallback to face normal if interpolation gives zero */
+      eval.normal = geometry.normals[0];
     }
     eval.dNdu = compute_normal_derivative(geometry, u, v, eval.normal, true);
     eval.dNdv = compute_normal_derivative(geometry, u, v, eval.normal, false);
   }
   else {
-    eval.normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+    /* Use precomputed face normal from load_surface_geometry - don't recompute! */
+    eval.normal = geometry.normals[0];
     eval.dNdu = zero_float3();
     eval.dNdv = zero_float3();
   }
 
   if (!is_zero(eval.normal)) {
     eval.normal = safe_normalize(eval.normal);
-
-    /* For refraction, preserve geometric normal orientation to avoid flipping
-     * interfaces in underwater caustics. Only flip if explicitly contradicting
-     * the closure's configured normal (params.normal).
-     * For reflection, align with incoming ray to ensure same-side scattering. */
-    if (params.is_refraction) {
-      /* Refraction: only flip if closure normal exists and points opposite */
-      if (params.has_normal && dot(eval.normal, params.normal) < 0.0f) {
-        eval.normal = -eval.normal;
-        eval.dNdu = -eval.dNdu;
-        eval.dNdv = -eval.dNdv;
-      }
-    }
-    else {
-      /* Reflection: flip if pointing toward receiver (same-side requirement) */
-      const bool flip_to_params = params.has_normal && dot(eval.normal, params.normal) < 0.0f;
-      const bool flip_to_receiver = !params.has_normal && dot(eval.normal, eval.dir_ds) > 0.0f;
-      if (flip_to_params || flip_to_receiver) {
-        eval.normal = -eval.normal;
-        eval.dNdu = -eval.dNdu;
-        eval.dNdv = -eval.dNdv;
-      }
-    }
+    /* Use geometric normals as-is from mesh. No flipping based on BSDF or ray direction.
+     * The entering/exiting determination in compute_specular() uses dot(normal, ray) which
+     * works correctly with the actual geometric normals from the mesh. */
   }
 
   float cos_theta_i = 0.0f, cos_theta_t = 0.0f, eta = 1.0f;
@@ -1122,6 +1100,22 @@ bool load_surface_geometry(KernelGlobals kg,
     if (is_zero(face_normal)) {
       return false;
     }
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG DEBUG load_surface_geometry: Computing face normal for object %d, prim %d\n", object, prim);
+    printf("  Vertex positions:\n");
+    printf("    v0: (%.6f, %.6f, %.6f)\n", geometry.verts[0].x, geometry.verts[0].y, geometry.verts[0].z);
+    printf("    v1: (%.6f, %.6f, %.6f)\n", geometry.verts[1].x, geometry.verts[1].y, geometry.verts[1].z);
+    printf("    v2: (%.6f, %.6f, %.6f)\n", geometry.verts[2].x, geometry.verts[2].y, geometry.verts[2].z);
+    printf("  Edge vectors:\n");
+    printf("    dPdu (v1-v0): (%.6f, %.6f, %.6f)\n", geometry.dPdu.x, geometry.dPdu.y, geometry.dPdu.z);
+    printf("    dPdv (v2-v0): (%.6f, %.6f, %.6f)\n", geometry.dPdv.x, geometry.dPdv.y, geometry.dPdv.z);
+    printf("  Computed face normal cross(dPdu, dPdv): (%.6f, %.6f, %.6f)\n",
+           face_normal.x, face_normal.y, face_normal.z);
+    printf("  Original vertex normals from mesh:\n");
+    printf("    n0: (%.6f, %.6f, %.6f)\n", geometry.normals[0].x, geometry.normals[0].y, geometry.normals[0].z);
+    printf("    n1: (%.6f, %.6f, %.6f)\n", geometry.normals[1].x, geometry.normals[1].y, geometry.normals[1].z);
+    printf("    n2: (%.6f, %.6f, %.6f)\n", geometry.normals[2].x, geometry.normals[2].y, geometry.normals[2].z);
+#endif
     geometry.normals[0] = face_normal;
     geometry.normals[1] = face_normal;
     geometry.normals[2] = face_normal;
