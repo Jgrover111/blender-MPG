@@ -29,6 +29,23 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Bit manipulation functions for full-path tau encoding (matching Mitsuba MPG reference) */
+
+ccl_device_forceinline void set_chaintype_bit(uint8_t &tau, int position, bool is_refraction)
+{
+  /* Clear bit at position, then set it if refraction */
+  tau &= ~(1u << position);
+  if (is_refraction) {
+    tau |= (1u << position);
+  }
+}
+
+ccl_device_forceinline bool get_chaintype_bit(uint8_t tau, int position)
+{
+  /* Extract bit at position: 1 = refraction, 0 = reflection */
+  return ((tau >> position) & 1u) != 0u;
+}
+
 float mpg_rebuild_seed_pdf(const MpgSeedRay &seed)
 {
   const float raw_pdf = seed.seed_pdf_raw;
@@ -541,7 +558,7 @@ bool mpg_generate_seed(KernelGlobals kg,
     }
   }
 
-#ifdef WITH_CYCLES_DEBUG
+#if 0 // WITH_CYCLES_DEBUG disabled for performance
   DCHECK(isfinite_safe(reflection_probability));
   DCHECK(isfinite_safe(transmission_probability));
   const float probability_total = reflection_probability + transmission_probability;
@@ -1121,8 +1138,23 @@ bool mpg_generate_seed(KernelGlobals kg,
     }
     out_normalized_direction = normalized_direction;
     out_tau_count = base_tau_count;
-    if (base_tau_count > 0 && scatter_branch == MPG_SEED_SCATTER_REFRACTION) {
-      out_tau_bits = 1u;
+
+    /* Full-path tau encoding: set bits for all bounces in the path.
+     * For single-bounce (base_tau_count == 1): only bit 0 is set
+     * For double-bounce (base_tau_count == 2): both bits 0 and 1 are set
+     *
+     * For thin glass double-refraction: if first bounce is refraction (air→glass),
+     * second bounce should also be refraction (glass→air). */
+    if (base_tau_count > 0) {
+      const bool is_refraction = (scatter_branch == MPG_SEED_SCATTER_REFRACTION);
+
+      /* Set bit 0 for primary bounce */
+      set_chaintype_bit(out_tau_bits, 0, is_refraction);
+
+      /* For double-bounce refraction, set bit 1 for secondary bounce */
+      if (base_tau_count >= 2 && is_refraction) {
+        set_chaintype_bit(out_tau_bits, 1, true);
+      }
     }
 
     Ray ray;

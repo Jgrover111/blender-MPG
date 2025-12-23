@@ -74,6 +74,24 @@ struct SpecularEval {
 
 float3 surface_point_from_barycentric(const SpecularSurfaceGeometry &geometry, const float u, const float v);
 float3 surface_normal_from_barycentric(const SpecularSurfaceGeometry &geometry, const float u, const float v);
+float3 combine_vertex_normals(const SpecularSurfaceGeometry &geometry, const float u, const float v);
+
+/* Bit manipulation functions for full-path tau encoding (matching Mitsuba MPG reference) */
+
+ccl_device_forceinline void set_chaintype_bit(uint8_t &tau, int position, bool is_refraction)
+{
+  /* Clear bit at position, then set it if refraction */
+  tau &= ~(1u << position);
+  if (is_refraction) {
+    tau |= (1u << position);
+  }
+}
+
+ccl_device_forceinline bool get_chaintype_bit(uint8_t tau, int position)
+{
+  /* Extract bit at position: 1 = refraction, 0 = reflection */
+  return ((tau >> position) & 1u) != 0u;
+}
 
 float3 compute_distant_visibility_endpoint(const LightSample &light_sample, const float3 &origin)
 {
@@ -103,25 +121,31 @@ bool build_primary_shading_data(const ShaderData &receiver_sd,
   out_sd.prim = seed.prim;
   out_sd.object = seed.object;
 
-  float3 geom_normal = cross(geometry.dPdu, geometry.dPdv);
+  /* Use mesh normals directly without flipping based on ray direction.
+   * For flat shading, use geometry.normals[0] (preserves mesh normal from load_surface_geometry).
+   * For smooth shading, interpolate vertex normals.
+   * This ensures thin glass surfaces maintain their opposing normals. */
+  float3 geom_normal;
+  if (seed.use_smooth_normals) {
+    geom_normal = combine_vertex_normals(geometry, u, v);
+  }
+  else {
+    geom_normal = geometry.normals[0];
+  }
+
   if (!is_zero(geom_normal)) {
     geom_normal = safe_normalize(geom_normal);
   }
   else {
-    geom_normal = surface_normal_from_barycentric(geometry, u, v);
-    if (!is_zero(geom_normal)) {
-      geom_normal = safe_normalize(geom_normal);
-    }
+    /* Fallback to geometric normal only if mesh normal is degenerate */
+    geom_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
   }
+
   if (is_zero(geom_normal)) {
     return false;
   }
 
-  const float3 receiver_to_primary = out_sd.P - receiver_sd.P;
-  if (!is_zero(receiver_to_primary) && dot(geom_normal, receiver_to_primary) < 0.0f) {
-    geom_normal = -geom_normal;
-  }
-
+  /* Do NOT flip normal based on ray direction - use mesh normal as-is */
   out_sd.Ng = geom_normal;
   out_sd.N = geom_normal;
   return true;
@@ -515,6 +539,13 @@ void evaluate_specular(const ShadingPoint &D,
   else {
     /* Use precomputed face normal from load_surface_geometry - don't recompute! */
     eval.normal = geometry.normals[0];
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG DEBUG evaluate_specular: Using flat shading normal\n");
+    printf("  geometry.normals[0]: (%.6f, %.6f, %.6f)\n",
+           geometry.normals[0].x, geometry.normals[0].y, geometry.normals[0].z);
+    printf("  eval.normal set to: (%.6f, %.6f, %.6f)\n",
+           eval.normal.x, eval.normal.y, eval.normal.z);
+#endif
     eval.dNdu = zero_float3();
     eval.dNdv = zero_float3();
   }
@@ -584,6 +615,7 @@ bool specular_parameters_from_surface(KernelGlobals kg,
                                       const ShaderData &sd,
                                       const SpecularSurfaceGeometry &geometry,
                                       const MpgSeedRay &seed,
+                                      const int bounce_index,
                                       const float u,
                                       const float v,
                                       SpecularParameters &params)
@@ -689,18 +721,37 @@ bool specular_parameters_from_surface(KernelGlobals kg,
   const bool light_dir_degenerate = (seed.light_sample.t == FLT_MAX) ? is_zero(seed.light_sample.D) :
                                                                             !(light_distance > 0.0f);
 
-  const bool tau_hint_valid = (seed.tau_count > 0);
+  const bool tau_hint_valid = (seed.tau_count > bounce_index);
   bool force_transmission = false;
   bool force_reflection = false;
+#ifdef WITH_CYCLES_DEBUG
+  printf("MPG DEBUG specular_parameters: Selection criteria\n");
+  printf("  bounce_index: %d\n", bounce_index);
+  printf("  seed.scatter: %d (0=none, 1=refraction, 2=reflection)\n", (int)seed.scatter);
+  printf("  tau_hint_valid: %s\n", tau_hint_valid ? "TRUE" : "FALSE");
   if (tau_hint_valid) {
-    force_transmission = (seed.tau_bits & 1u) != 0u;
+    printf("  tau_bits: 0x%x, tau_count: %d\n", seed.tau_bits, seed.tau_count);
+    printf("  tau bit at position %d: %d (1=transmission, 0=reflection)\n", bounce_index, (int)get_chaintype_bit(seed.tau_bits, bounce_index));
+  }
+#endif
+  if (tau_hint_valid) {
+    force_transmission = get_chaintype_bit(seed.tau_bits, bounce_index);
     force_reflection = !force_transmission;
+#ifdef WITH_CYCLES_DEBUG
+    printf("  -> TAU HINT: %s\n", force_transmission ? "FORCE TRANSMISSION" : "FORCE REFLECTION");
+#endif
   }
   else if (seed.scatter == MPG_SEED_SCATTER_REFRACTION) {
     force_transmission = true;
+#ifdef WITH_CYCLES_DEBUG
+    printf("  -> SEED SCATTER: FORCE TRANSMISSION\n");
+#endif
   }
   else if (seed.scatter == MPG_SEED_SCATTER_REFLECTION) {
     force_reflection = true;
+#ifdef WITH_CYCLES_DEBUG
+    printf("  -> SEED SCATTER: FORCE REFLECTION\n");
+#endif
   }
 
   bool prefer_reflection_from_geometry = false;
@@ -712,13 +763,28 @@ bool specular_parameters_from_surface(KernelGlobals kg,
     /* Compare directions in the shading-normal frame (hemisphere_normal) to detect interface crossings. */
     const float dot_in = dot(hemisphere_normal, -ray_dir);
     const float dot_light = dot(hemisphere_normal, light_dir);
+#ifdef WITH_CYCLES_DEBUG
+    printf("MPG DEBUG specular_parameters: hemisphere test\n");
+    printf("  hemisphere_normal: (%.6f, %.6f, %.6f)\n",
+           hemisphere_normal.x, hemisphere_normal.y, hemisphere_normal.z);
+    printf("  ray_dir: (%.6f, %.6f, %.6f)\n", ray_dir.x, ray_dir.y, ray_dir.z);
+    printf("  light_dir: (%.6f, %.6f, %.6f)\n", light_dir.x, light_dir.y, light_dir.z);
+    printf("  dot_in = dot(normal, -ray_dir): %.6f\n", dot_in);
+    printf("  dot_light = dot(normal, light_dir): %.6f\n", dot_light);
+#endif
     if ((dot_in < 0.0f && dot_light > 0.0f) || (dot_in > 0.0f && dot_light < 0.0f)) {
+#ifdef WITH_CYCLES_DEBUG
+      printf("  -> FORCING TRANSMISSION (opposite hemispheres)\n");
+#endif
       force_transmission = true;
       force_reflection = false;
     }
     else if ((dot_in > 0.0f && dot_light > 0.0f) || (dot_in < 0.0f && dot_light < 0.0f)) {
       /* When both rays occupy the same half-space the Mitsuba reference prefers
        * the reflective branch even if the seed requested refraction. */
+#ifdef WITH_CYCLES_DEBUG
+      printf("  -> PREFERRING REFLECTION (same hemisphere)\n");
+#endif
       prefer_reflection_from_geometry = true;
     }
   }
@@ -1096,29 +1162,38 @@ bool load_surface_geometry(KernelGlobals kg,
   geometry.dPdv = geometry.verts[2] - geometry.verts[0];
 
   if (!seed.use_smooth_normals) {
-    const float3 face_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
-    if (is_zero(face_normal)) {
-      return false;
+    /* For flat shading, use the mesh normals as-is without recomputing from geometry.
+     * This preserves explicitly set normals (e.g., from Blender's Solidify modifier)
+     * which are essential for thin glass where top/bottom faces have opposite normals.
+     * Fallback to geometric normal only if mesh normals are degenerate. */
+    const float3 mesh_normal = safe_normalize(geometry.normals[0]);
+    if (is_zero(mesh_normal)) {
+      /* Only compute from geometry if mesh normal is invalid */
+      const float3 face_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+      if (is_zero(face_normal)) {
+        return false;
+      }
+#ifdef WITH_CYCLES_DEBUG
+      printf("MPG DEBUG load_surface_geometry: Mesh normal degenerate, using computed face normal for object %d, prim %d\n", object, prim);
+      printf("  Computed face normal: (%.6f, %.6f, %.6f)\n",
+             face_normal.x, face_normal.y, face_normal.z);
+#endif
+      geometry.normals[0] = face_normal;
+      geometry.normals[1] = face_normal;
+      geometry.normals[2] = face_normal;
     }
 #ifdef WITH_CYCLES_DEBUG
-    printf("MPG DEBUG load_surface_geometry: Computing face normal for object %d, prim %d\n", object, prim);
-    printf("  Vertex positions:\n");
-    printf("    v0: (%.6f, %.6f, %.6f)\n", geometry.verts[0].x, geometry.verts[0].y, geometry.verts[0].z);
-    printf("    v1: (%.6f, %.6f, %.6f)\n", geometry.verts[1].x, geometry.verts[1].y, geometry.verts[1].z);
-    printf("    v2: (%.6f, %.6f, %.6f)\n", geometry.verts[2].x, geometry.verts[2].y, geometry.verts[2].z);
-    printf("  Edge vectors:\n");
-    printf("    dPdu (v1-v0): (%.6f, %.6f, %.6f)\n", geometry.dPdu.x, geometry.dPdu.y, geometry.dPdu.z);
-    printf("    dPdv (v2-v0): (%.6f, %.6f, %.6f)\n", geometry.dPdv.x, geometry.dPdv.y, geometry.dPdv.z);
-    printf("  Computed face normal cross(dPdu, dPdv): (%.6f, %.6f, %.6f)\n",
-           face_normal.x, face_normal.y, face_normal.z);
-    printf("  Original vertex normals from mesh:\n");
-    printf("    n0: (%.6f, %.6f, %.6f)\n", geometry.normals[0].x, geometry.normals[0].y, geometry.normals[0].z);
-    printf("    n1: (%.6f, %.6f, %.6f)\n", geometry.normals[1].x, geometry.normals[1].y, geometry.normals[1].z);
-    printf("    n2: (%.6f, %.6f, %.6f)\n", geometry.normals[2].x, geometry.normals[2].y, geometry.normals[2].z);
+    else {
+      printf("MPG DEBUG load_surface_geometry: Using mesh normals for flat shading, object %d, prim %d\n", object, prim);
+      printf("  Mesh normals:\n");
+      printf("    n0: (%.6f, %.6f, %.6f)\n", geometry.normals[0].x, geometry.normals[0].y, geometry.normals[0].z);
+      printf("    n1: (%.6f, %.6f, %.6f)\n", geometry.normals[1].x, geometry.normals[1].y, geometry.normals[1].z);
+      printf("    n2: (%.6f, %.6f, %.6f)\n", geometry.normals[2].x, geometry.normals[2].y, geometry.normals[2].z);
+      const float3 face_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+      printf("  (Geometric face normal would be: (%.6f, %.6f, %.6f))\n",
+             face_normal.x, face_normal.y, face_normal.z);
+    }
 #endif
-    geometry.normals[0] = face_normal;
-    geometry.normals[1] = face_normal;
-    geometry.normals[2] = face_normal;
   }
   return true;
 }
@@ -1444,11 +1519,31 @@ bool trace_secondary_seed(KernelGlobals kg,
                           MpgSeedRay &secondary_seed)
 {
   const float3 primary_point = surface_point_from_barycentric(primary_geometry, primary_u, primary_v);
-  float3 primary_normal = surface_normal_from_barycentric(primary_geometry, primary_u, primary_v);
+
+  /* Get primary normal respecting flat vs smooth shading.
+   * Use mesh normals directly without flipping - entering/exiting is determined by
+   * dot(normal, ray) in compute_specular(), which works correctly with actual mesh normals. */
+  float3 primary_normal;
+  if (seed.use_smooth_normals) {
+    primary_normal = combine_vertex_normals(primary_geometry, primary_u, primary_v);
+  }
+  else {
+    primary_normal = primary_geometry.normals[0];
+  }
+
+  if (!is_zero(primary_normal)) {
+    primary_normal = safe_normalize(primary_normal);
+  }
+  else {
+    /* Fallback to geometric normal only if mesh normal is degenerate */
+    primary_normal = safe_normalize(cross(primary_geometry.dPdu, primary_geometry.dPdv));
+  }
+
   if (is_zero(primary_normal)) {
     return false;
   }
 
+  /* Compute geometric normal for offset (used later for ray offsetting, not for refraction) */
   const float3 offset_ng_raw = cross(primary_geometry.dPdu, primary_geometry.dPdv);
   bool use_offset_ng = !is_zero(offset_ng_raw);
   float3 offset_ng = use_offset_ng ? safe_normalize(offset_ng_raw) : zero_float3();
@@ -1466,15 +1561,9 @@ bool trace_secondary_seed(KernelGlobals kg,
   }
   dir_ds /= distance_ds;
 
-  if (dot(primary_normal, -dir_ds) < 0.0f) {
-    primary_normal = -primary_normal;
-  }
-
-  float3 specular_normal = use_offset_ng ? offset_ng : primary_normal;
-  if (use_offset_ng && dot(specular_normal, -dir_ds) < 0.0f) {
-    specular_normal = -specular_normal;
-    offset_ng = specular_normal;
-  }
+  /* Use primary normal as-is for refraction calculation - no flipping based on ray direction.
+   * The entering/exiting determination happens in compute_specular() using dot(normal, ray). */
+  float3 specular_normal = primary_normal;
 
 #ifdef WITH_CYCLES_DEBUG
   printf("----------------------------------------\n");
@@ -1618,11 +1707,11 @@ bool trace_secondary_seed(KernelGlobals kg,
   secondary_seed.prim = isect.prim;
   secondary_seed.bary_u = isect.u;
   secondary_seed.bary_v = isect.v;
-  if (secondary_seed.tau_count > 0) {
-    const uint8_t remaining_tau_count = secondary_seed.tau_count;
-    secondary_seed.tau_bits = static_cast<uint8_t>(secondary_seed.tau_bits >> 1);
-    secondary_seed.tau_count = (remaining_tau_count > 0) ? static_cast<uint8_t>(remaining_tau_count - 1) : 0;
-  }
+
+  /* With full-path encoding, tau_bits encodes all bounces positionally:
+   * - Bit 0 = primary bounce type
+   * - Bit 1 = secondary bounce type
+   * No shifting or modification needed - bounce_index parameter selects which bit to query. */
 
   bool has_smooth_normals = secondary_seed.use_smooth_normals;
   smooth_normals_at_hit(kg, ray, isect, has_smooth_normals);
@@ -1773,7 +1862,7 @@ bool compute_double_bounce_jacobian(KernelGlobals kg,
     DoubleBounceEval offset_eval;
     SpecularParameters offset_primary_params;
     if (!specular_parameters_from_surface(
-            kg, sd, primary_geometry, primary_seed, offset_u1, offset_v1, offset_primary_params))
+            kg, sd, primary_geometry, primary_seed, 0, offset_u1, offset_v1, offset_primary_params))
     {
       return false;
     }
@@ -1788,6 +1877,7 @@ bool compute_double_bounce_jacobian(KernelGlobals kg,
                                           offset_primary_sd,
                                           secondary_geometry,
                                           secondary_seed,
+                                          1,
                                           offset_u2,
                                           offset_v2,
                                           offset_secondary_params))
@@ -2019,7 +2109,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   project_barycentrics(u, v);
 
   SpecularParameters params;
-  if (!specular_parameters_from_surface(kg, sd, geometry, seed, u, v, params)) {
+  if (!specular_parameters_from_surface(kg, sd, geometry, seed, 0, u, v, params)) {
     failure_code = MPG_FAILURE_NO_SPECULAR;
     return false;
   }
@@ -2141,7 +2231,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     project_barycentrics(new_u, new_v);
 
     SpecularParameters new_params;
-    if (!specular_parameters_from_surface(kg, sd, geometry, seed, new_u, new_v, new_params)) {
+    if (!specular_parameters_from_surface(kg, sd, geometry, seed, 0, new_u, new_v, new_params)) {
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
       continue;
@@ -2403,7 +2493,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   project_barycentrics(primary_u, primary_v);
 
   SpecularParameters primary_params;
-  if (!specular_parameters_from_surface(kg, sd, primary_geometry, seed, primary_u, primary_v, primary_params)) {
+  if (!specular_parameters_from_surface(kg, sd, primary_geometry, seed, 0, primary_u, primary_v, primary_params)) {
 #ifdef WITH_CYCLES_DEBUG
     printf("MPG FAILURE: specular_parameters_from_surface failed for primary (line 2268)\n");
 #endif
@@ -2473,7 +2563,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
   SpecularParameters secondary_params;
   if (!specular_parameters_from_surface(
-          kg, primary_sd, secondary_geometry, secondary_seed, secondary_u, secondary_v, secondary_params))
+          kg, primary_sd, secondary_geometry, secondary_seed, 1, secondary_u, secondary_v, secondary_params))
   {
 #ifdef WITH_CYCLES_DEBUG
     printf("MPG FAILURE: specular_parameters_from_surface failed for secondary (line 2333)\n");
@@ -2567,7 +2657,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 
     SpecularParameters new_primary_params;
     if (!specular_parameters_from_surface(
-            kg, sd, primary_geometry, seed, new_primary_u, new_primary_v, new_primary_params))
+            kg, sd, primary_geometry, seed, 0, new_primary_u, new_primary_v, new_primary_params))
     {
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
@@ -2586,6 +2676,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                           new_primary_sd,
                                           secondary_geometry,
                                           secondary_seed,
+                                          1,
                                           new_secondary_u,
                                           new_secondary_v,
                                           new_secondary_params))
@@ -2654,7 +2745,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     return false;
   }
 
-  if (!specular_parameters_from_surface(kg, sd, primary_geometry, seed, primary_u, primary_v, primary_params)) {
+  if (!specular_parameters_from_surface(kg, sd, primary_geometry, seed, 0, primary_u, primary_v, primary_params)) {
 #ifdef WITH_CYCLES_DEBUG
     printf("MPG FAILURE: specular_parameters_from_surface (post-Newton, primary) (line 2518)\n");
 #endif
@@ -2674,6 +2765,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                                         primary_sd,
                                         secondary_geometry,
                                         secondary_seed,
+                                        1,
                                         secondary_u,
                                         secondary_v,
                                         secondary_params))
