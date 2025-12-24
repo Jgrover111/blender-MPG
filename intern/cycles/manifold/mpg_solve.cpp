@@ -292,7 +292,8 @@ Spectrum evaluate_specular_weight(KernelGlobals kg,
     float relative_eta = eta;
     if (params.is_refraction) {
       const float dot_incident_normal = dot(normal, dir_ds);
-      const bool entering = dot_incident_normal <= 0.0f;
+      /* Consistent with compute_specular: grazing incidence treated as entering */
+      const bool entering = (dot_incident_normal <= 1e-7f);
       relative_eta = entering ? (1.0f / eta) : eta;
       if (!has_cos_t) {
         const float sin2_theta_i = fmaxf(0.0f, 1.0f - cos_theta_i * cos_theta_i);
@@ -417,8 +418,10 @@ float3 compute_specular(const float3 &dir_ds,
   }
 #endif
 
-  /* Determine exiting vs entering from dot product with geometric normal. */
-  const bool exiting = dot(refraction_normal, dir_ds) > 0.0f;
+  /* Determine exiting vs entering from dot product with geometric normal.
+   * For grazing incidence (dot ≈ 0), treat as entering (conservative choice). */
+  const float dot_n_ray = dot(refraction_normal, dir_ds);
+  const bool exiting = (dot_n_ray > 1e-7f);
 
   /* Orient normal to ensure it points toward the medium the ray came from.
    * This ensures cos_theta_i = -dot(dir_ds, oriented_normal) > 0.
@@ -1195,6 +1198,16 @@ bool load_surface_geometry(KernelGlobals kg,
       const float3 face_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
       printf("  (Geometric face normal would be: (%.6f, %.6f, %.6f))\n",
              face_normal.x, face_normal.y, face_normal.z);
+
+      /* Validate mesh normal consistency with geometric normal.
+       * For thin glass, opposite faces SHOULD have opposite normals, so we don't flip.
+       * Just warn if they're nearly perpendicular (suspicious). */
+      if (!is_zero(face_normal)) {
+        const float consistency = dot(mesh_normal, face_normal);
+        if (fabsf(consistency) < 0.1f) {
+          printf("  WARNING: Mesh normal nearly perpendicular to geometric normal (dot=%.6f)\n", consistency);
+        }
+      }
     }
 #endif
   }
@@ -1888,14 +1901,11 @@ bool compute_double_bounce_jacobian(KernelGlobals kg,
       return false;
     }
 
-    /* For directional lights, need to update the adjusted light sample position
-     * for each iteration since the secondary vertex moves with offset_u2/offset_v2 */
+    /* For directional lights, the light direction is FIXED regardless of vertex position.
+     * Do NOT update light sample position when secondary vertex moves - this would create
+     * artificial derivatives in the Jacobian. The direction should remain constant. */
     LightSample iteration_light_sample = adjusted_light_sample;
-    if (is_directional && (du2 != 0.0f || dv2 != 0.0f)) {
-      const float3 offset_secondary_point = surface_point_from_barycentric(
-          secondary_geometry, offset_u2, offset_v2);
-      iteration_light_sample.P = offset_secondary_point;
-    }
+    /* Removed incorrect position update for directional lights - direction should be fixed */
 
     if (!evaluate_double_bounce(receiver,
                                 primary_geometry,
@@ -2117,6 +2127,23 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     return false;
   }
 
+  /* Check for glossy (rough) speculars which are not yet supported.
+   * Current implementation only supports perfect speculars (alpha_x=alpha_y=0).
+   * For glossy surfaces, offset normal sampling from microfacet distribution is needed. */
+  if (params.has_microfacet) {
+    const float alpha_x = fmaxf(params.microfacet.alpha_x, 0.0f);
+    const float alpha_y = fmaxf(params.microfacet.alpha_y, 0.0f);
+    const bool is_glossy = (alpha_x > 1e-6f || alpha_y > 1e-6f);
+    if (is_glossy) {
+#ifdef WITH_CYCLES_DEBUG
+      printf("MPG DEBUG: Rejecting glossy specular (alpha_x=%.6f, alpha_y=%.6f)\n", alpha_x, alpha_y);
+      printf("  Current implementation only supports perfect speculars (roughness=0)\n");
+#endif
+      failure_code = MPG_FAILURE_NO_SPECULAR;
+      return false;
+    }
+  }
+
   const ShadingPoint shading_point = shading_point_from_shader_data(sd);
 
   SpecularEval eval;
@@ -2193,8 +2220,13 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
    * TODO: Implement microfacet-based offset sampling for glossy surfaces */
   const float2 offset_2d = make_float2(0.0f, 0.0f);  /* Zero offset for perfect specular */
 
-  float residual_2d_u = dot(tangent_u, h) - offset_2d.x;
-  float residual_2d_v = dot(tangent_v, h) - offset_2d.y;
+  /* Project half-vector onto tangent plane to get 2D constraint.
+   * This removes any normal component that might arise from numerical error. */
+  const float h_normal_component = dot(eval.normal, h);
+  const float3 h_tangent = h - eval.normal * h_normal_component;
+
+  float residual_2d_u = dot(tangent_u, h_tangent) - offset_2d.x;
+  float residual_2d_v = dot(tangent_v, h_tangent) - offset_2d.y;
   float residual_norm = sqrtf(residual_2d_u * residual_2d_u + residual_2d_v * residual_2d_v);
 
   if (!isfinite_safe(residual_norm)) {
@@ -2296,9 +2328,13 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     /* Use zero offset for perfect specular (matches Mitsuba for roughness=0) */
     const float2 new_offset_2d = make_float2(0.0f, 0.0f);
 
+    /* Project half-vector onto tangent plane before computing constraint */
+    const float new_h_normal_component = dot(new_eval.normal, new_h);
+    const float3 new_h_tangent = new_h - new_eval.normal * new_h_normal_component;
+
     /* Apply Mitsuba's constraint: C = H - N */
-    const float new_residual_2d_u = dot(new_tangent_u, new_h) - new_offset_2d.x;
-    const float new_residual_2d_v = dot(new_tangent_v, new_h) - new_offset_2d.y;
+    const float new_residual_2d_u = dot(new_tangent_u, new_h_tangent) - new_offset_2d.x;
+    const float new_residual_2d_v = dot(new_tangent_v, new_h_tangent) - new_offset_2d.y;
     const float new_residual_norm = sqrtf(new_residual_2d_u * new_residual_2d_u +
                                           new_residual_2d_v * new_residual_2d_v);
 
@@ -2430,10 +2466,15 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
    * - The geometric factor: cos(θ) / r²
    * where θ is the angle at the specular surface and r is the distance from receiver.
    *
-   * Note: MPG reference does NOT check minimum distance. Small distances produce large
-   * Jacobians, which is geometrically correct. Removed distance_sq < 1e-4f check to match. */
+   * Balance numerical stability with geometric accuracy. Very small distances produce
+   * extremely large Jacobians that can cause overflow. Use conservative threshold. */
   const float distance_sq = eval.distance_ds * eval.distance_ds;
-  const float geometric_factor = cos_theta / fmaxf(distance_sq, 1e-20f);
+  const float min_distance_sq = 1e-8f;  /* Max Jacobian contribution: ~1e8 */
+  if (distance_sq < min_distance_sq) {
+    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+    return false;
+  }
+  const float geometric_factor = cos_theta / distance_sq;
   const float jacobian = fabsf(determinant) * geometric_factor;
 
   /* Check for numerical issues in Jacobian computation */
@@ -2507,6 +2548,16 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     return false;
   }
 
+  /* Check for glossy speculars - not supported yet (same as single-bounce) */
+  if (primary_params.has_microfacet) {
+    const float alpha_x = fmaxf(primary_params.microfacet.alpha_x, 0.0f);
+    const float alpha_y = fmaxf(primary_params.microfacet.alpha_y, 0.0f);
+    if (alpha_x > 1e-6f || alpha_y > 1e-6f) {
+      failure_code = MPG_FAILURE_NO_SPECULAR;
+      return false;
+    }
+  }
+
   MpgSeedRay secondary_seed;
   if (!trace_secondary_seed(
           kg, sd, primary_geometry, primary_u, primary_v, seed, primary_params, secondary_seed))
@@ -2576,6 +2627,16 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 #endif
     failure_code = MPG_FAILURE_NO_SPECULAR;
     return false;
+  }
+
+  /* Check for glossy speculars in secondary vertex */
+  if (secondary_params.has_microfacet) {
+    const float alpha_x = fmaxf(secondary_params.microfacet.alpha_x, 0.0f);
+    const float alpha_y = fmaxf(secondary_params.microfacet.alpha_y, 0.0f);
+    if (alpha_x > 1e-6f || alpha_y > 1e-6f) {
+      failure_code = MPG_FAILURE_NO_SPECULAR;
+      return false;
+    }
   }
 
   ShadingPoint receiver = shading_point_from_shader_data(sd);
@@ -2839,9 +2900,11 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
-  /* Compute Jacobian for primary bounce including geometric term. */
+  /* Compute Jacobian for primary bounce including geometric term.
+   * Use same threshold as single-bounce for consistency. */
   const float distance_primary_sq = eval.primary.distance_ds * eval.primary.distance_ds;
-  if (distance_primary_sq < 1e-4f) {
+  const float min_distance_sq = 1e-8f;  /* Max Jacobian contribution: ~1e8 */
+  if (distance_primary_sq < min_distance_sq) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
@@ -2885,9 +2948,10 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
-  /* Compute Jacobian for secondary bounce including geometric term. */
+  /* Compute Jacobian for secondary bounce including geometric term.
+   * Use same threshold as primary and single-bounce for consistency. */
   const float distance_secondary_sq = eval.secondary.distance_ds * eval.secondary.distance_ds;
-  if (distance_secondary_sq < 1e-4f) {
+  if (distance_secondary_sq < min_distance_sq) {
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
   }
