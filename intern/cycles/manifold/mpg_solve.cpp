@@ -575,10 +575,13 @@ void evaluate_specular(const ShadingPoint &D,
   const float3 wo = eval.dir_sl;    /* Outgoing direction away from surface (X→L) */
 
   /* Mitsuba uses base material IOR for half-vector, not the relative IOR from Snell's law.
-   * Invert eta when ray comes from inside surface (dot(wi, normal) < 0). */
+   * Determine entering/exiting using same logic as compute_specular() and solver. */
   float h_eta = params.is_refraction ? params.base_eta : 1.0f;
-  if (params.is_refraction && dot(wi, eval.normal) < 0.0f) {
-    h_eta = 1.0f / fmaxf(h_eta, 1e-6f);
+  if (params.is_refraction) {
+    const bool exiting = dot(eval.normal, eval.dir_ds) > 0.0f;
+    if (!exiting) {
+      h_eta = 1.0f / fmaxf(h_eta, 1e-6f);
+    }
   }
 
   /* Generalized half-vector: h = normalize(wi + eta * wo), negated when eta != 1 */
@@ -2114,10 +2117,6 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     return false;
   }
 
-  float trust_radius = 2.0f;
-  float prev_residual = FLT_MAX;
-  int increase_counter = 0;
-
   const ShadingPoint shading_point = shading_point_from_shader_data(sd);
 
   SpecularEval eval;
@@ -2145,8 +2144,17 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
   const float3 wi = -eval.dir_ds;
   const float3 wo = eval.dir_sl;
   float h_eta = params.is_refraction ? params.base_eta : 1.0f;
-  if (params.is_refraction && dot(wi, eval.normal) < 0.0f) {
-    h_eta = 1.0f / fmaxf(h_eta, 1e-6f);
+  if (params.is_refraction) {
+    /* Determine entering/exiting using the same logic as compute_specular().
+     * dir_ds points FROM receiver TO specular point (light propagation direction).
+     * If dot(normal, dir_ds) > 0, we're exiting the material.
+     * For the half-vector, Mitsuba uses base IOR when exiting, 1/IOR when entering. */
+    const bool exiting = dot(eval.normal, eval.dir_ds) > 0.0f;
+    if (!exiting) {
+      /* Entering: use inverse IOR for half-vector */
+      h_eta = 1.0f / fmaxf(h_eta, 1e-6f);
+    }
+    /* Exiting: keep h_eta = base_eta (already set above) */
   }
 
   /* Mitsuba's half-vector normalization: h = normalize(wi + eta * wo).
@@ -2256,8 +2264,12 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     const float3 new_wi = -new_eval.dir_ds;
     const float3 new_wo = new_eval.dir_sl;
     float new_h_eta = new_params.is_refraction ? new_params.base_eta : 1.0f;
-    if (new_params.is_refraction && dot(new_wi, new_eval.normal) < 0.0f) {
-      new_h_eta = 1.0f / fmaxf(new_h_eta, 1e-6f);
+    if (new_params.is_refraction) {
+      /* Use same entering/exiting logic as initial half-vector computation */
+      const bool exiting = dot(new_eval.normal, new_eval.dir_ds) > 0.0f;
+      if (!exiting) {
+        new_h_eta = 1.0f / fmaxf(new_h_eta, 1e-6f);
+      }
     }
 
     /* Normalize half-vector (matching Mitsuba's approach - see earlier comment) */
