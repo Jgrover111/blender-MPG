@@ -2295,28 +2295,22 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
       return false;
     }
 
-    /* Step acceptance: check if residual improved */
-    if (new_residual_norm < residual_norm) {
-      /* Accept step */
-      u = new_u;
-      v = new_v;
-      eval = new_eval;
-      params = new_params;
-      tangent_u = new_tangent_u;  /* Update for next Jacobian computation */
-      tangent_v = new_tangent_v;
-      h = new_h;
-      h_eta = new_h_eta;
-      residual_2d_u = new_residual_2d_u;
-      residual_2d_v = new_residual_2d_v;
-      residual_norm = new_residual_norm;
-      beta = fminf(beta * 2.0f, 1.0f);  /* Expand beta, cap at 1.0 (Mitsuba) */
-      needs_step_update = true;  /* Recompute Jacobian next iteration */
-    }
-    else {
-      /* Reject step */
-      beta *= 0.5f;  /* Shrink beta */
-      needs_step_update = false;  /* Reuse Jacobian with smaller beta */
-    }
+    /* Step acceptance: Mitsuba approach - accept if reprojection succeeded.
+     * Mitsuba accepts any geometrically valid step, trusting Newton's method
+     * to converge even through non-monotonic residuals. */
+    u = new_u;
+    v = new_v;
+    eval = new_eval;
+    params = new_params;
+    tangent_u = new_tangent_u;
+    tangent_v = new_tangent_v;
+    h = new_h;
+    h_eta = new_h_eta;
+    residual_2d_u = new_residual_2d_u;
+    residual_2d_v = new_residual_2d_v;
+    residual_norm = new_residual_norm;
+    beta = fminf(beta * 2.0f, 1.0f);
+    needs_step_update = true;
   }
 
   /* Now using Mitsuba's half-vector constraint formulation directly.
@@ -2497,7 +2491,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 #ifdef WITH_CYCLES_DEBUG
     printf("MPG FAILURE: specular_parameters_from_surface failed for primary (line 2268)\n");
 #endif
-    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+    failure_code = MPG_FAILURE_NO_SPECULAR;
     return false;
   }
 
@@ -2568,7 +2562,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 #ifdef WITH_CYCLES_DEBUG
     printf("MPG FAILURE: specular_parameters_from_surface failed for secondary (line 2333)\n");
 #endif
-    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+    failure_code = MPG_FAILURE_NO_SPECULAR;
     return false;
   }
 
@@ -2610,9 +2604,9 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   float delta[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
   for (int iter = 0; iter < options.max_iters; ++iter) {
-    /* Double-bounce already uses correct 2D projection. Use 0.05 threshold
-     * to match single-bounce (directional constraint convergence range). */
-    if (residual_norm < 0.05f) {
+    /* Double-bounce uses same 1e-4 threshold as single-bounce (Mitsuba standard).
+     * Both use half-vector constraint formulation converging to 1e-4. */
+    if (residual_norm < 1e-4f) {
       break;
     }
 
@@ -2716,31 +2710,25 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
       return false;
     }
 
-    /* Step acceptance: check if residual improved */
-    if (new_norm < residual_norm) {
-      /* Accept step */
-      primary_u = new_primary_u;
-      primary_v = new_primary_v;
-      secondary_u = new_secondary_u;
-      secondary_v = new_secondary_v;
-      eval = new_eval;
-      primary_params = new_primary_params;
-      secondary_params = new_secondary_params;
-      primary_sd = new_primary_sd;
-      residual_norm = new_norm;
-      beta = fminf(beta * 2.0f, 1.0f);  /* Expand beta, cap at 1.0 (Mitsuba) */
-      needs_step_update = true;  /* Recompute Jacobian next iteration */
-    }
-    else {
-      /* Reject step */
-      beta *= 0.5f;  /* Shrink beta */
-      needs_step_update = false;  /* Reuse Jacobian with smaller beta */
-    }
+    /* Step acceptance: Mitsuba approach - accept if reprojection succeeded.
+     * Mitsuba accepts any geometrically valid step, trusting Newton's method
+     * to converge even through non-monotonic residuals. */
+    primary_u = new_primary_u;
+    primary_v = new_primary_v;
+    secondary_u = new_secondary_u;
+    secondary_v = new_secondary_v;
+    eval = new_eval;
+    primary_params = new_primary_params;
+    secondary_params = new_secondary_params;
+    primary_sd = new_primary_sd;
+    residual_norm = new_norm;
+    beta = fminf(beta * 2.0f, 1.0f);
+    needs_step_update = true;
   }
 
-  /* Accept solutions with residual <= 0.05 (matching single-bounce threshold).
+  /* Accept solutions with residual <= 1e-4 (matching single-bounce and Mitsuba).
    * The double-bounce solver uses 2D projected residuals (4D total for 2 vertices). */
-  if (!isfinite_safe(residual_norm) || residual_norm > 0.05f) {
+  if (!isfinite_safe(residual_norm) || residual_norm > 1e-4f) {
     failure_code = MPG_FAILURE_NEWTON_DIVERGED;
     return false;
   }
@@ -2749,7 +2737,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 #ifdef WITH_CYCLES_DEBUG
     printf("MPG FAILURE: specular_parameters_from_surface (post-Newton, primary) (line 2518)\n");
 #endif
-    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+    failure_code = MPG_FAILURE_NO_SPECULAR;
     return false;
   }
 
@@ -2773,7 +2761,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
 #ifdef WITH_CYCLES_DEBUG
     printf("MPG FAILURE: specular_parameters_from_surface (post-Newton, secondary) (line 2528)\n");
 #endif
-    failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
+    failure_code = MPG_FAILURE_NO_SPECULAR;
     return false;
   }
 
