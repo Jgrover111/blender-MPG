@@ -455,52 +455,9 @@ bool mpg_generate_seed(KernelGlobals kg,
   }
   const float hemisphere_epsilon = 1.0e-5f;
 
-  bool prefer_transmission = false;
-  bool prefer_transmission_from_guide = false;
-  bool prefer_transmission_decided = false;
-
-  if (guided_axis_valid && transmission_hemisphere_valid) {
-    const float dot_axis_transmission = dot(guided_axis, transmission_hemisphere_normal);
-    if (fabsf(dot_axis_transmission) > hemisphere_epsilon) {
-      prefer_transmission = (dot_axis_transmission > 0.0f);
-      prefer_transmission_from_guide = true;
-      prefer_transmission_decided = true;
-    }
-  }
-
-  if (!prefer_transmission_from_guide) {
-    if (seed_lobe == SeedLobe::Transmission) {
-      prefer_transmission = true;
-      prefer_transmission_decided = true;
-    }
-    else if (seed_lobe == SeedLobe::Dual) {
-      bool decided = false;
-      if (guided_axis_valid && transmission_hemisphere_valid) {
-        const float ref_dot_trans = dot(guided_axis, transmission_hemisphere_normal);
-        const float ref_dot_refl = dot(guided_axis, reflection_normal);
-        if (fabsf(ref_dot_trans) > hemisphere_epsilon || fabsf(ref_dot_refl) > hemisphere_epsilon) {
-          prefer_transmission = fabsf(ref_dot_trans) > fabsf(ref_dot_refl);
-          decided = true;
-        }
-      }
-      if (!decided) {
-        /* Fall back to the view direction when the guide does not provide a stable mean yet. */
-        const float3 reference_dir = (!is_zero(guide.mean_dir)) ? guide.mean_dir : sd.wi;
-        const bool reference_valid = !is_zero(reference_dir);
-        if (reference_valid) {
-          const float3 reference = safe_normalize(reference_dir);
-          if (!is_zero(reference)) {
-            const float ref_dot_trans = dot(reference, transmission_hemisphere_normal);
-            const float ref_dot_refl = dot(reference, reflection_normal);
-            prefer_transmission = fabsf(ref_dot_trans) > fabsf(ref_dot_refl);
-            decided = true;
-          }
-        }
-      }
-      prefer_transmission_decided |= decided;
-    }
-  }
-
+  /* Compute reflection vs transmission probability following Mitsuba reference.
+   * For dual-lobe materials (glass), use Fresnel equations to determine probability.
+   * This is simpler and more physically accurate than complex heuristics. */
   float reflection_probability = 0.5f;
   float transmission_probability = 0.5f;
 
@@ -508,33 +465,24 @@ bool mpg_generate_seed(KernelGlobals kg,
     reflection_probability = 0.0f;
     transmission_probability = 1.0f;
   }
-  else if (seed_lobe == SeedLobe::Dual) {
-    if (prefer_transmission_from_guide) {
-      reflection_probability = prefer_transmission ? 0.0f : 1.0f;
-      transmission_probability = 1.0f - reflection_probability;
-    }
-    else {
-      float fresnel_reflection = 1.0f;
-      if (mpg_compute_dielectric_reflection_probability(
-              kg, sd, bsdf, shading_normal, fresnel_reflection))
-      {
-        reflection_probability = fresnel_reflection;
-        transmission_probability = 1.0f - reflection_probability;
-      }
-      else {
-        if (prefer_transmission_decided) {
-          const float preferred_reflection = prefer_transmission ? 0.25f : 0.75f;
-          reflection_probability = preferred_reflection;
-          transmission_probability = 1.0f - preferred_reflection;
-        }
-      }
-    }
-  }
-  else {
+  else if (seed_lobe == SeedLobe::Reflection) {
     reflection_probability = 1.0f;
     transmission_probability = 0.0f;
   }
+  else if (seed_lobe == SeedLobe::Dual) {
+    /* Use Fresnel equations to compute reflection probability, matching Mitsuba reference.
+     * This provides physically-based probability based on incident angle and IOR. */
+    float fresnel_reflection = 0.5f;
+    if (mpg_compute_dielectric_reflection_probability(
+            kg, sd, bsdf, shading_normal, fresnel_reflection))
+    {
+      reflection_probability = fresnel_reflection;
+      transmission_probability = 1.0f - fresnel_reflection;
+    }
+    /* If Fresnel computation fails, use 50/50 split as fallback */
+  }
 
+  /* Normalize probabilities to ensure they sum to 1.0 */
   reflection_probability = fminf(fmaxf(reflection_probability, 0.0f), 1.0f);
   transmission_probability = fminf(fmaxf(transmission_probability, 0.0f), 1.0f);
   float probability_sum = reflection_probability + transmission_probability;
@@ -546,17 +494,10 @@ bool mpg_generate_seed(KernelGlobals kg,
   reflection_probability /= probability_sum;
   transmission_probability /= probability_sum;
 
-  if (seed_lobe == SeedLobe::Dual && !prefer_transmission_from_guide) {
-    const float diff = transmission_probability - reflection_probability;
-    if (diff > 1.0e-5f) {
-      prefer_transmission = true;
-      prefer_transmission_decided = true;
-    }
-    else if (diff < -1.0e-5f) {
-      prefer_transmission = false;
-      prefer_transmission_decided = true;
-    }
-  }
+  /* Determine preferred scattering mode based on computed probabilities.
+   * Used later for directional sampling guidance. */
+  bool prefer_transmission = (transmission_probability > reflection_probability);
+  bool prefer_transmission_decided = (fabsf(transmission_probability - reflection_probability) > 1.0e-5f);
 
 #if 0 // WITH_CYCLES_DEBUG disabled for performance
   DCHECK(isfinite_safe(reflection_probability));
