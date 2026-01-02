@@ -26,9 +26,12 @@ struct MpgOptions {
   int max_iters = 20;
   float gate_w = 0.35f;
   float gate_kappa = 40.0f;
-  float angular_jitter = 0.02f;
+  /* Angular jitter removed - Mitsuba reference uses uniform sampling without cone restrictions.
+   * Cone-based sampling is replaced with uniform sphere/hemisphere sampling to match reference. */
   bool relax_gate = false;
-  int max_seed_repeat_trials = 8;
+  /* Increased from 8 to match Mitsuba's more generous retry budget.
+   * Mitsuba allows up to 1e6 trials, we use 64 as a practical compromise. */
+  int max_seed_repeat_trials = 64;
 };
 
 struct MpgResult {

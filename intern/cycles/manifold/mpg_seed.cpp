@@ -720,8 +720,9 @@ bool mpg_generate_seed(KernelGlobals kg,
   seed.bounce_pdf_raw = selected_bounce_pdf;
   seed.bounce_pdf = fmaxf(selected_bounce_pdf, 1.0e-16f);
 
-  const float min_cone_angle = 0.00872664626f; /* ~0.5 degrees. */
-  float jitter = fmaxf(options.angular_jitter, min_cone_angle);
+  /* Match Mitsuba reference: use uniform hemisphere/sphere sampling without tight cone restrictions.
+   * The reference implementation doesn't use angular jitter or tight cones - it samples uniformly
+   * and relies on the guide distribution (ChainDistribution) for directional bias. */
   float3 seed_direction = zero_float3();
   bool seed_valid = false;
   Intersection isect = {};
@@ -743,9 +744,12 @@ bool mpg_generate_seed(KernelGlobals kg,
   uint8_t accepted_tau_bits = 0;
   uint8_t accepted_tau_count = 0;
 
-  const int uniform_attempt_budget = bootstrap_seed ? 32 : (use_uniform_fallback ? 32 : 16);
+  /* Increase attempt budgets to match Mitsuba's more generous sampling strategy.
+   * Mitsuba allows up to 1e6 trials; we use 256 as a practical compromise for performance.
+   * This gives seeds much better chance of finding specular surfaces. */
+  const int uniform_attempt_budget = bootstrap_seed ? 256 : (use_uniform_fallback ? 256 : 128);
   const int guided_attempt_budget = use_uniform_sphere_sampling ? 0 : uniform_attempt_budget;
-  const int fallback_attempt_budget = use_uniform_sphere_sampling ? uniform_attempt_budget : 32;
+  const int fallback_attempt_budget = use_uniform_sphere_sampling ? uniform_attempt_budget : 256;
   int total_attempt_budget = guided_attempt_budget + fallback_attempt_budget;
   if (total_attempt_budget <= 0) {
     total_attempt_budget = 1;
@@ -759,9 +763,8 @@ bool mpg_generate_seed(KernelGlobals kg,
       mpg_seed_branch_probability(guided_attempt_budget, fallback_attempt_budget, MPG_SEED_BRANCH_GUIDED);
   const float fallback_branch_probability =
       mpg_seed_branch_probability(guided_attempt_budget, fallback_attempt_budget, MPG_SEED_BRANCH_FALLBACK);
-  const float jitter_one_minus_cos = one_minus_cos(jitter);
-  const float fallback_one_minus_cos = one_minus_cos(0.6f * M_PI_F);
 
+  /* Hemisphere axes for uniform sampling (Mitsuba reference approach) */
   float3 reflection_hemisphere_axis = reflection_normal;
   bool reflection_hemisphere_axis_valid = reflection_hemisphere_valid;
   if (reflection_hemisphere_axis_valid) {
@@ -775,36 +778,6 @@ bool mpg_generate_seed(KernelGlobals kg,
     transmission_hemisphere_axis = safe_normalize(transmission_hemisphere_axis);
     transmission_hemisphere_axis_valid = !is_zero(transmission_hemisphere_axis);
   }
-
-  const auto cone_acceptance = [&](const float3 &axis_dir,
-                                   const bool axis_valid,
-                                   const bool hemisphere_valid,
-                                   const float3 &hemisphere_axis,
-                                   const float one_minus_cos_angle) {
-    if (!axis_valid || !hemisphere_valid) {
-      return 1.0f;
-    }
-    return mpg_uniform_cone_hemisphere_acceptance(axis_dir, one_minus_cos_angle, hemisphere_axis);
-  };
-
-  const float reflection_guided_acceptance = cone_acceptance(
-      axis_reflection, axis_reflection_valid, reflection_hemisphere_axis_valid, reflection_hemisphere_axis, jitter_one_minus_cos);
-  const float transmission_guided_acceptance = cone_acceptance(
-      axis_transmission, axis_transmission_valid, transmission_hemisphere_axis_valid, transmission_hemisphere_axis, jitter_one_minus_cos);
-  const float reflection_fallback_acceptance = cone_acceptance(
-      axis_reflection, axis_reflection_valid, reflection_hemisphere_axis_valid, reflection_hemisphere_axis, fallback_one_minus_cos);
-  const float transmission_fallback_acceptance = cone_acceptance(
-      axis_transmission, axis_transmission_valid, transmission_hemisphere_axis_valid, transmission_hemisphere_axis, fallback_one_minus_cos);
-  const float reflection_uniform_acceptance = cone_acceptance(fallback_uniform_reflection_axis,
-                                                              fallback_uniform_reflection_axis_valid,
-                                                              reflection_hemisphere_axis_valid,
-                                                              reflection_hemisphere_axis,
-                                                              1.0f);
-  const float transmission_uniform_acceptance = cone_acceptance(fallback_uniform_transmission_axis,
-                                                                fallback_uniform_transmission_axis_valid,
-                                                                transmission_hemisphere_axis_valid,
-                                                                transmission_hemisphere_axis,
-                                                                1.0f);
 
   const uint8_t base_tau_count = (selected_bounce_count > 0) ? static_cast<uint8_t>(selected_bounce_count) : 0;
   const float uniqueness_threshold = 1.0e-4f;
@@ -961,84 +934,23 @@ bool mpg_generate_seed(KernelGlobals kg,
       scatter_pdf = 1.0f;
     }
 
+    /* Match Mitsuba reference: use uniform hemisphere sampling instead of tight cones.
+     * The reference doesn't use cone-based directional constraints - it samples uniformly
+     * over the appropriate hemisphere and relies on the learned distribution for bias. */
     const bool branch_is_transmission = (scatter_branch == MPG_SEED_SCATTER_REFRACTION);
-    const float3 branch_axis = branch_is_transmission ? axis_transmission : axis_reflection;
-    const bool branch_axis_valid = branch_is_transmission ? axis_transmission_valid : axis_reflection_valid;
-    const float3 branch_fallback_axis = branch_is_transmission ?
-                                            fallback_uniform_transmission_axis :
-                                            fallback_uniform_reflection_axis;
-    const bool branch_fallback_axis_valid = branch_is_transmission ?
-                                                fallback_uniform_transmission_axis_valid :
-                                                fallback_uniform_reflection_axis_valid;
-    const bool branch_uses_uniform_sphere = bootstrap_seed || !branch_axis_valid;
-
     const bool branch_hemisphere_valid = branch_is_transmission ? transmission_hemisphere_axis_valid :
                                                              reflection_hemisphere_axis_valid;
     const float3 branch_hemisphere_axis = branch_is_transmission ? transmission_hemisphere_axis :
                                                                   reflection_hemisphere_axis;
 
-    if (branch == SeedTrialBranch::Guided) {
-      const float branch_acceptance = branch_is_transmission ? transmission_guided_acceptance :
-                                                               reflection_guided_acceptance;
-      if (!sample_conditioned_cone(branch_axis,
-                                   branch_axis_valid,
-                                   jitter_one_minus_cos,
-                                   branch_acceptance,
-                                   branch_hemisphere_valid,
-                                   branch_hemisphere_axis,
-                                   rand_dir,
-                                   sample_index,
-                                   candidate_direction,
-                                   direction_pdf))
-      {
-        direction_pdf = 0.0f;
-        candidate_direction = zero_float3();
-        return;
-      }
+    if (branch_hemisphere_valid) {
+      /* Sample uniformly over hemisphere aligned with the scattering normal */
+      sample_uniform_hemisphere(branch_hemisphere_axis, rand_dir, &candidate_direction, &direction_pdf);
     }
     else {
-      if (!branch_uses_uniform_sphere) {
-        const float branch_acceptance = branch_is_transmission ? transmission_fallback_acceptance :
-                                                                 reflection_fallback_acceptance;
-        if (!sample_conditioned_cone(branch_axis,
-                                     branch_axis_valid,
-                                     fallback_one_minus_cos,
-                                     branch_acceptance,
-                                     branch_hemisphere_valid,
-                                     branch_hemisphere_axis,
-                                     rand_dir,
-                                     sample_index,
-                                     candidate_direction,
-                                     direction_pdf))
-        {
-          direction_pdf = 0.0f;
-          candidate_direction = zero_float3();
-          return;
-        }
-      }
-      else if (branch_fallback_axis_valid) {
-        const float branch_acceptance = branch_is_transmission ? transmission_uniform_acceptance :
-                                                                 reflection_uniform_acceptance;
-        if (!sample_conditioned_cone(branch_fallback_axis,
-                                     true,
-                                     1.0f,
-                                     branch_acceptance,
-                                     branch_hemisphere_valid,
-                                     branch_hemisphere_axis,
-                                     rand_dir,
-                                     sample_index,
-                                     candidate_direction,
-                                     direction_pdf))
-        {
-          direction_pdf = 0.0f;
-          candidate_direction = zero_float3();
-          return;
-        }
-      }
-      else {
-        candidate_direction = sample_uniform_sphere(rand_dir);
-        direction_pdf = M_1_4PI_F;
-      }
+      /* No valid hemisphere - sample full sphere uniformly */
+      candidate_direction = sample_uniform_sphere(rand_dir);
+      direction_pdf = M_1_4PI_F;  /* 1/(4π) for uniform sphere */
     }
   };
 
