@@ -70,6 +70,7 @@ struct SpecularEval {
   float eta = 1.0f;
   bool tir = false;
   bool refractive = false;
+  LightSample light_sample = {};  /* Stored for analytical Jacobian computation */
 };
 
 float3 surface_point_from_barycentric(const SpecularSurfaceGeometry &geometry, const float u, const float v);
@@ -526,6 +527,7 @@ void evaluate_specular(const ShadingPoint &D,
                                            make_float3(0.0f, 0.0f, 1.0f);
 
   compute_light_sample_direction(seed.light_sample, eval.point, eval.dir_sl, eval.distance_sl);
+  eval.light_sample = seed.light_sample;  /* Store for analytical Jacobian computation */
 
   /* Use the precomputed normals from load_surface_geometry.
    * For smooth shading: interpolate vertex normals
@@ -1811,6 +1813,201 @@ bool evaluate_double_bounce(const ShadingPoint &receiver,
   return true;
 }
 
+bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
+                                               const SpecularSurfaceGeometry &primary_geometry,
+                                               const SpecularSurfaceGeometry &secondary_geometry,
+                                               const DoubleBounceEval &eval,
+                                               const float u1,
+                                               const float v1,
+                                               const float u2,
+                                               const float v2,
+                                               float J[4][4])
+{
+  /* Analytical Jacobian for double-bounce manifold constraints.
+   *
+   * The constraint residual is C = [C1, C2, C3, C4]^T where:
+   * - C1, C2: Primary vertex half-vector constraint projected onto tangent frame
+   * - C3, C4: Secondary vertex half-vector constraint projected onto tangent frame
+   *
+   * The Jacobian is a 4x4 matrix:
+   * J = [dC1/du1  dC1/dv1  dC1/du2  dC1/dv2]
+   *     [dC2/du1  dC2/dv1  dC2/du2  dC2/dv2]
+   *     [dC3/du1  dC3/dv1  dC3/du2  dC3/dv2]
+   *     [dC4/du1  dC4/dv1  dC4/du2  dC4/dv2]
+   *
+   * Block structure:
+   * - J[0:2, 0:2]: Primary constraint w.r.t. primary params (diagonal block)
+   * - J[0:2, 2:4]: Primary constraint w.r.t. secondary params (coupling block)
+   * - J[2:4, 0:2]: Secondary constraint w.r.t. primary params (coupling block)
+   * - J[2:4, 2:4]: Secondary constraint w.r.t. secondary params (diagonal block)
+   */
+
+  /* === Build tangent frames for both vertices === */
+  float3 primary_tangent_u, primary_tangent_v;
+  if (!build_tangent_basis(eval.primary.dXdu, eval.primary.dXdv, primary_tangent_u, primary_tangent_v)) {
+    return false;
+  }
+
+  float3 secondary_tangent_u, secondary_tangent_v;
+  if (!build_tangent_basis(eval.secondary.dXdu, eval.secondary.dXdv, secondary_tangent_u, secondary_tangent_v)) {
+    return false;
+  }
+
+  /* === Compute half-vectors for both vertices === */
+  const float3 primary_wi = -eval.primary.dir_ds;
+  const float3 primary_wo = eval.primary.dir_sl;
+  const float primary_h_eta = eval.primary.refractive ? eval.primary.eta : 1.0f;
+
+  float3 primary_g = primary_wi + primary_h_eta * primary_wo;
+  if (eval.primary.refractive) {
+    primary_g = -primary_g;
+  }
+  const float primary_g_len = len(primary_g);
+  if (!(primary_g_len > 1e-8f)) {
+    return false;
+  }
+  const float3 primary_h = primary_g / primary_g_len;
+
+  const float3 secondary_wi = -eval.secondary.dir_ds;
+  const float3 secondary_wo = eval.secondary.dir_sl;
+  const float secondary_h_eta = eval.secondary.refractive ? eval.secondary.eta : 1.0f;
+
+  float3 secondary_g = secondary_wi + secondary_h_eta * secondary_wo;
+  if (eval.secondary.refractive) {
+    secondary_g = -secondary_g;
+  }
+  const float secondary_g_len = len(secondary_g);
+  if (!(secondary_g_len > 1e-8f)) {
+    return false;
+  }
+  const float3 secondary_h = secondary_g / secondary_g_len;
+
+  /* === DIAGONAL BLOCK 1: J[0:2, 0:2] - Primary constraint w.r.t. primary params === */
+  /*
+   * For the primary vertex:
+   * - wi direction: from receiver to primary vertex (fixed receiver, moving primary)
+   * - wo direction: from primary vertex to secondary vertex (moving primary, moving secondary)
+   *
+   * When u1, v1 change:
+   * - Primary vertex position changes
+   * - wi changes (derivative_normalized)
+   * - wo changes (depends on how primary moves relative to secondary)
+   */
+  const float3 d_primary_wi_du1 = derivative_normalized(eval.primary.point - receiver.position, primary_geometry.dPdu);
+  const float3 d_primary_wi_dv1 = derivative_normalized(eval.primary.point - receiver.position, primary_geometry.dPdv);
+
+  /* For wo: direction from primary to secondary vertex. When primary moves, this changes. */
+  const float3 d_primary_wo_du1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdu);
+  const float3 d_primary_wo_dv1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdv);
+
+  /* Compute dg/du1 and dg/dv1 for primary vertex */
+  float3 d_primary_g_du1 = d_primary_wi_du1 + primary_h_eta * d_primary_wo_du1;
+  float3 d_primary_g_dv1 = d_primary_wi_dv1 + primary_h_eta * d_primary_wo_dv1;
+
+  if (eval.primary.refractive) {
+    d_primary_g_du1 = -d_primary_g_du1;
+    d_primary_g_dv1 = -d_primary_g_dv1;
+  }
+
+  /* Derivative of normalized half-vector: dh/dx = (dg/dx / ||g||) - h * dot(h, dg/dx) */
+  const float3 d_primary_h_du1 = (d_primary_g_du1 / primary_g_len) - primary_h * dot(primary_h, d_primary_g_du1);
+  const float3 d_primary_h_dv1 = (d_primary_g_dv1 / primary_g_len) - primary_h * dot(primary_h, d_primary_g_dv1);
+
+  /* Project onto tangent frame */
+  J[0][0] = dot(primary_tangent_u, d_primary_h_du1);  // dC1/du1
+  J[0][1] = dot(primary_tangent_u, d_primary_h_dv1);  // dC1/dv1
+  J[1][0] = dot(primary_tangent_v, d_primary_h_du1);  // dC2/du1
+  J[1][1] = dot(primary_tangent_v, d_primary_h_dv1);  // dC2/dv1
+
+  /* === COUPLING BLOCK 1: J[0:2, 2:4] - Primary constraint w.r.t. secondary params === */
+  /*
+   * When u2, v2 change:
+   * - Secondary vertex position changes
+   * - Primary wi stays the same (receiver to primary is independent)
+   * - Primary wo changes (primary to secondary direction changes)
+   */
+  const float3 d_primary_wo_du2 = derivative_normalized(eval.secondary.point - eval.primary.point, secondary_geometry.dPdu);
+  const float3 d_primary_wo_dv2 = derivative_normalized(eval.secondary.point - eval.primary.point, secondary_geometry.dPdv);
+
+  float3 d_primary_g_du2 = primary_h_eta * d_primary_wo_du2;  // wi doesn't change
+  float3 d_primary_g_dv2 = primary_h_eta * d_primary_wo_dv2;
+
+  if (eval.primary.refractive) {
+    d_primary_g_du2 = -d_primary_g_du2;
+    d_primary_g_dv2 = -d_primary_g_dv2;
+  }
+
+  const float3 d_primary_h_du2 = (d_primary_g_du2 / primary_g_len) - primary_h * dot(primary_h, d_primary_g_du2);
+  const float3 d_primary_h_dv2 = (d_primary_g_dv2 / primary_g_len) - primary_h * dot(primary_h, d_primary_g_dv2);
+
+  J[0][2] = dot(primary_tangent_u, d_primary_h_du2);  // dC1/du2
+  J[0][3] = dot(primary_tangent_u, d_primary_h_dv2);  // dC1/dv2
+  J[1][2] = dot(primary_tangent_v, d_primary_h_du2);  // dC2/du2
+  J[1][3] = dot(primary_tangent_v, d_primary_h_dv2);  // dC2/dv2
+
+  /* === COUPLING BLOCK 2: J[2:4, 0:2] - Secondary constraint w.r.t. primary params === */
+  /*
+   * When u1, v1 change:
+   * - Primary vertex position changes
+   * - Secondary wi changes (primary to secondary direction changes)
+   * - Secondary wo stays the same (secondary to light is independent of primary)
+   */
+  const float3 d_secondary_wi_du1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdu);
+  const float3 d_secondary_wi_dv1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdv);
+
+  float3 d_secondary_g_du1 = d_secondary_wi_du1;  // wo doesn't change
+  float3 d_secondary_g_dv1 = d_secondary_wi_dv1;
+
+  if (eval.secondary.refractive) {
+    d_secondary_g_du1 = -d_secondary_g_du1;
+    d_secondary_g_dv1 = -d_secondary_g_dv1;
+  }
+
+  const float3 d_secondary_h_du1 = (d_secondary_g_du1 / secondary_g_len) - secondary_h * dot(secondary_h, d_secondary_g_du1);
+  const float3 d_secondary_h_dv1 = (d_secondary_g_dv1 / secondary_g_len) - secondary_h * dot(secondary_h, d_secondary_g_dv1);
+
+  J[2][0] = dot(secondary_tangent_u, d_secondary_h_du1);  // dC3/du1
+  J[2][1] = dot(secondary_tangent_u, d_secondary_h_dv1);  // dC3/dv1
+  J[3][0] = dot(secondary_tangent_v, d_secondary_h_du1);  // dC4/du1
+  J[3][1] = dot(secondary_tangent_v, d_secondary_h_dv1);  // dC4/dv1
+
+  /* === DIAGONAL BLOCK 2: J[2:4, 2:4] - Secondary constraint w.r.t. secondary params === */
+  /*
+   * When u2, v2 change:
+   * - Secondary vertex position changes
+   * - Secondary wi changes (primary to secondary direction changes)
+   * - Secondary wo changes (secondary to light direction changes)
+   */
+  const float3 d_secondary_wi_du2 = derivative_normalized(eval.secondary.point - eval.primary.point, secondary_geometry.dPdu);
+  const float3 d_secondary_wi_dv2 = derivative_normalized(eval.secondary.point - eval.primary.point, secondary_geometry.dPdv);
+
+  /* For wo: compute light direction derivative (handles both finite and directional lights) */
+  MpgSeedRay temp_seed;
+  temp_seed.light_sample = eval.secondary.light_sample;
+  const float3 d_secondary_wo_du2 = compute_light_sample_direction_derivative(
+      temp_seed.light_sample, eval.secondary.point, secondary_geometry.dPdu);
+  const float3 d_secondary_wo_dv2 = compute_light_sample_direction_derivative(
+      temp_seed.light_sample, eval.secondary.point, secondary_geometry.dPdv);
+
+  float3 d_secondary_g_du2 = d_secondary_wi_du2 + secondary_h_eta * d_secondary_wo_du2;
+  float3 d_secondary_g_dv2 = d_secondary_wi_dv2 + secondary_h_eta * d_secondary_wo_dv2;
+
+  if (eval.secondary.refractive) {
+    d_secondary_g_du2 = -d_secondary_g_du2;
+    d_secondary_g_dv2 = -d_secondary_g_dv2;
+  }
+
+  const float3 d_secondary_h_du2 = (d_secondary_g_du2 / secondary_g_len) - secondary_h * dot(secondary_h, d_secondary_g_du2);
+  const float3 d_secondary_h_dv2 = (d_secondary_g_dv2 / secondary_g_len) - secondary_h * dot(secondary_h, d_secondary_g_dv2);
+
+  J[2][2] = dot(secondary_tangent_u, d_secondary_h_du2);  // dC3/du2
+  J[2][3] = dot(secondary_tangent_u, d_secondary_h_dv2);  // dC3/dv2
+  J[3][2] = dot(secondary_tangent_v, d_secondary_h_du2);  // dC4/du2
+  J[3][3] = dot(secondary_tangent_v, d_secondary_h_dv2);  // dC4/dv2
+
+  return true;
+}
+
 bool compute_double_bounce_jacobian(KernelGlobals kg,
                                     const ShaderData &sd,
                                     const MpgSeedRay &primary_seed,
@@ -1828,109 +2025,70 @@ bool compute_double_bounce_jacobian(KernelGlobals kg,
                                     const float base_residual[4],
                                     float J[4][4])
 {
-  /* For double-bounce with directional lights, we need to use the secondary vertex position
-   * as a finite light source for Jacobian computation. Compute the secondary point from
-   * current barycentric coordinates. */
-  const float3 secondary_point = surface_point_from_barycentric(secondary_geometry, u2, v2);
+  (void)kg;
+  (void)sd;
+  (void)primary_seed;
+  (void)secondary_seed;
+  (void)light_sample;
+  (void)primary_use_smooth_normals;
+  (void)secondary_use_smooth_normals;
+  (void)base_residual;
 
-  LightSample adjusted_light_sample = light_sample;
-  const bool is_directional = (light_sample.t == FLT_MAX) ||
-                             (light_sample.type == LIGHT_DISTANT) ||
-                             (light_sample.type == LIGHT_BACKGROUND);
-
-  if (is_directional) {
-    /* For the secondary bounce, treat the light as coming from the secondary vertex
-     * instead of from infinity. This matches Mitsuba's approach of creating a fake
-     * vertex at finite distance for directional lights. */
-    adjusted_light_sample.P = secondary_point;
-    adjusted_light_sample.t = 1.0f;  /* Arbitrary small distance, direction matters more */
-    adjusted_light_sample.type = LIGHT_POINT;
-    /* D stays the same - light direction from secondary vertex toward light */
+  /* Use analytical Jacobian instead of finite differences.
+   * The eval structure is recomputed here, but this is necessary to have
+   * all the geometric information needed for the analytical derivatives. */
+  DoubleBounceEval eval;
+  SpecularParameters primary_params;
+  if (!specular_parameters_from_surface(
+          kg, sd, primary_geometry, primary_seed, 0, u1, v1, primary_params))
+  {
+    return false;
   }
 
-  const float epsilon = 1.0e-4f;
-
-  for (int column = 0; column < 4; ++column) {
-    float du1 = 0.0f, dv1 = 0.0f, du2 = 0.0f, dv2 = 0.0f;
-    switch (column) {
-      case 0:
-        du1 = epsilon;
-        break;
-      case 1:
-        dv1 = epsilon;
-        break;
-      case 2:
-        du2 = epsilon;
-        break;
-      case 3:
-        dv2 = epsilon;
-        break;
-    }
-
-    float offset_u1 = u1 + du1;
-    float offset_v1 = v1 + dv1;
-    float offset_u2 = u2 + du2;
-    float offset_v2 = v2 + dv2;
-
-    project_barycentrics(offset_u1, offset_v1);
-    project_barycentrics(offset_u2, offset_v2);
-
-    DoubleBounceEval offset_eval;
-    SpecularParameters offset_primary_params;
-    if (!specular_parameters_from_surface(
-            kg, sd, primary_geometry, primary_seed, 0, offset_u1, offset_v1, offset_primary_params))
-    {
-      return false;
-    }
-
-    ShaderData offset_primary_sd;
-    if (!build_primary_shading_data(sd, primary_geometry, primary_seed, offset_u1, offset_v1, offset_primary_sd)) {
-      return false;
-    }
-
-    SpecularParameters offset_secondary_params;
-    if (!specular_parameters_from_surface(kg,
-                                          offset_primary_sd,
-                                          secondary_geometry,
-                                          secondary_seed,
-                                          1,
-                                          offset_u2,
-                                          offset_v2,
-                                          offset_secondary_params))
-    {
-      return false;
-    }
-
-    /* For directional lights, the light direction is FIXED regardless of vertex position.
-     * Do NOT update light sample position when secondary vertex moves - this would create
-     * artificial derivatives in the Jacobian. The direction should remain constant. */
-    LightSample iteration_light_sample = adjusted_light_sample;
-    /* Removed incorrect position update for directional lights - direction should be fixed */
-
-    if (!evaluate_double_bounce(receiver,
-                                primary_geometry,
-                                offset_primary_params,
-                                secondary_geometry,
-                                offset_secondary_params,
-                                iteration_light_sample,
-                                offset_u1,
-                                offset_v1,
-                                offset_u2,
-                                offset_v2,
-                                primary_use_smooth_normals,
-                                secondary_use_smooth_normals,
-                                offset_eval))
-    {
-      return false;
-    }
-
-    for (int row = 0; row < 4; ++row) {
-      const float diff = offset_eval.residual[row] - base_residual[row];
-      J[row][column] = diff / epsilon;
-    }
+  ShaderData primary_sd;
+  if (!build_primary_shading_data(sd, primary_geometry, primary_seed, u1, v1, primary_sd)) {
+    return false;
   }
 
-  return true;
+  SpecularParameters secondary_params;
+  if (!specular_parameters_from_surface(kg,
+                                        primary_sd,
+                                        secondary_geometry,
+                                        secondary_seed,
+                                        1,
+                                        u2,
+                                        v2,
+                                        secondary_params))
+  {
+    return false;
+  }
+
+  if (!evaluate_double_bounce(receiver,
+                              primary_geometry,
+                              primary_params,
+                              secondary_geometry,
+                              secondary_params,
+                              light_sample,
+                              u1,
+                              v1,
+                              u2,
+                              v2,
+                              primary_use_smooth_normals,
+                              secondary_use_smooth_normals,
+                              eval))
+  {
+    return false;
+  }
+
+  return compute_double_bounce_jacobian_analytical(receiver,
+                                                   primary_geometry,
+                                                   secondary_geometry,
+                                                   eval,
+                                                   u1,
+                                                   v1,
+                                                   u2,
+                                                   v2,
+                                                   J);
 }
 
 bool solve_linear_system_4x4(const float J[4][4], const float rhs[4], float delta[4])
