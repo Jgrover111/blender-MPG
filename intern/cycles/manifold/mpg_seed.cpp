@@ -397,7 +397,7 @@ bool mpg_generate_seed(KernelGlobals kg,
     if (CLOSURE_IS_GLASS(closure.type)) {
       return SeedLobe::Dual;
     }
-    return SeedLobe::Dual;
+    return SeedLobe::Reflection;
   };
 
   const SeedLobe seed_lobe = classify_seed_lobe(bsdf);
