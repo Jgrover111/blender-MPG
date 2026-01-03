@@ -1170,48 +1170,33 @@ bool load_surface_geometry(KernelGlobals kg,
   geometry.dPdv = geometry.verts[2] - geometry.verts[0];
 
   if (!seed.use_smooth_normals) {
-    /* For flat shading, use the mesh normals as-is without recomputing from geometry.
-     * This preserves explicitly set normals (e.g., from Blender's Solidify modifier)
-     * which are essential for thin glass where top/bottom faces have opposite normals.
-     * Fallback to geometric normal only if mesh normals are degenerate. */
+    /* For flat shading, ALWAYS use the geometric face normal computed from triangle vertices.
+     * Mesh vertex normals can be incorrect (e.g., smoothed, beveled, or from modifiers),
+     * causing refraction to use wrong angles. The geometric normal is always correct for
+     * flat faces and ensures proper entering/exiting determination for glass. */
+    const float3 face_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+    if (is_zero(face_normal)) {
+      return false;
+    }
+#ifdef WITH_CYCLES_DEBUG
     const float3 mesh_normal = safe_normalize(geometry.normals[0]);
-    if (is_zero(mesh_normal)) {
-      /* Only compute from geometry if mesh normal is invalid */
-      const float3 face_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
-      if (is_zero(face_normal)) {
-        return false;
-      }
-#ifdef WITH_CYCLES_DEBUG
-      printf("MPG DEBUG load_surface_geometry: Mesh normal degenerate, using computed face normal for object %d, prim %d\n", object, prim);
-      printf("  Computed face normal: (%.6f, %.6f, %.6f)\n",
-             face_normal.x, face_normal.y, face_normal.z);
-#endif
-      geometry.normals[0] = face_normal;
-      geometry.normals[1] = face_normal;
-      geometry.normals[2] = face_normal;
-    }
-#ifdef WITH_CYCLES_DEBUG
-    else {
-      printf("MPG DEBUG load_surface_geometry: Using mesh normals for flat shading, object %d, prim %d\n", object, prim);
-      printf("  Mesh normals:\n");
-      printf("    n0: (%.6f, %.6f, %.6f)\n", geometry.normals[0].x, geometry.normals[0].y, geometry.normals[0].z);
-      printf("    n1: (%.6f, %.6f, %.6f)\n", geometry.normals[1].x, geometry.normals[1].y, geometry.normals[1].z);
-      printf("    n2: (%.6f, %.6f, %.6f)\n", geometry.normals[2].x, geometry.normals[2].y, geometry.normals[2].z);
-      const float3 face_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
-      printf("  (Geometric face normal would be: (%.6f, %.6f, %.6f))\n",
-             face_normal.x, face_normal.y, face_normal.z);
-
-      /* Validate mesh normal consistency with geometric normal.
-       * For thin glass, opposite faces SHOULD have opposite normals, so we don't flip.
-       * Just warn if they're nearly perpendicular (suspicious). */
-      if (!is_zero(face_normal)) {
-        const float consistency = dot(mesh_normal, face_normal);
-        if (fabsf(consistency) < 0.1f) {
-          printf("  WARNING: Mesh normal nearly perpendicular to geometric normal (dot=%.6f)\n", consistency);
-        }
+    printf("MPG DEBUG load_surface_geometry: Flat shading for object %d, prim %d\n", object, prim);
+    printf("  Mesh normals (IGNORED):\n");
+    printf("    n0: (%.6f, %.6f, %.6f)\n", geometry.normals[0].x, geometry.normals[0].y, geometry.normals[0].z);
+    printf("    n1: (%.6f, %.6f, %.6f)\n", geometry.normals[1].x, geometry.normals[1].y, geometry.normals[1].z);
+    printf("    n2: (%.6f, %.6f, %.6f)\n", geometry.normals[2].x, geometry.normals[2].y, geometry.normals[2].z);
+    printf("  Using geometric face normal: (%.6f, %.6f, %.6f)\n",
+           face_normal.x, face_normal.y, face_normal.z);
+    if (!is_zero(mesh_normal)) {
+      const float consistency = dot(mesh_normal, face_normal);
+      if (fabsf(consistency) < 0.9f) {
+        printf("  NOTE: Mesh normal differs from geometric normal (dot=%.6f)\n", consistency);
       }
     }
 #endif
+    geometry.normals[0] = face_normal;
+    geometry.normals[1] = face_normal;
+    geometry.normals[2] = face_normal;
   }
   return true;
 }
