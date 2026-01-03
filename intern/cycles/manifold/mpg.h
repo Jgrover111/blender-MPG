@@ -28,7 +28,9 @@ struct MpgOptions {
   float gate_kappa = 40.0f;
   /* Angular jitter removed - Mitsuba reference uses uniform sampling without cone restrictions.
    * Cone-based sampling is replaced with uniform sphere/hemisphere sampling to match reference. */
-  bool relax_gate = false;
+  /* Enable relax_gate by default to allow bootstrap sampling when guide isn't ready yet.
+   * This prevents failure code 302 (guide not ready) from blocking MPG entirely. */
+  bool relax_gate = true;
   /* Increased from 8 to match Mitsuba's more generous retry budget.
    * Mitsuba allows up to 1e6 trials, we use 64 as a practical compromise. */
   int max_seed_repeat_trials = 64;
