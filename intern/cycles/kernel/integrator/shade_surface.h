@@ -1063,14 +1063,14 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                          render_buffer);
   }
 
-  /* Allow MPG to run even without path guiding data when gate is disabled.
-   * When gate is disabled, path guiding features are not required (bootstrap mode).
+  /* Allow MPG to run even without path guiding data when gate is disabled or relax_gate enabled.
+   * When gate is disabled or relax_gate is true, path guiding features are not required (bootstrap mode).
    *
    * NOTE: MPG surface type filtering (diffuse vs specular) is handled by BSDF type check
    * in mpg_try_connect(), which rejects CLOSURE_IS_BSDF_SINGULAR. No object flags needed. */
   const bool mpg_can_run = manifold_guiding_enabled && manifold_guiding_ready &&
-                           (guiding_features_enabled || !gate_active_local) &&
-                           (summary_available || !gate_active_local);
+                           (guiding_features_enabled || !gate_active_local || relax_gate) &&
+                           (summary_available || !gate_active_local || relax_gate);
 
   if (manifold_guiding_enabled) {
     if (!manifold_guiding_ready) {
