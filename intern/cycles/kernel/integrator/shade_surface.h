@@ -1014,6 +1014,12 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     manifold_guiding_ready = true;
   }
 
+  /* When relax_gate is enabled, allow MPG to run even if guide isn't ready yet.
+   * This enables bootstrap mode with uniform sampling when guide has insufficient data. */
+  if (relax_gate) {
+    manifold_guiding_ready = true;
+  }
+
   manifold_options.relax_gate = relax_gate;
 
   if (manifold_guiding_enabled) {
