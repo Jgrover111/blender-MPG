@@ -923,7 +923,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   ccl_attr_maybe_unused const bool surface_guiding_active = false;
 #    endif
 
-  bool relax_gate = false;
+  bool relax_gate = manifold_options.relax_gate;
   bool relax_gate_summary = false;
   bool bootstrap_gate = false;
   bool summary_available = false;

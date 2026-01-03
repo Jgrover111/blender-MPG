@@ -26,9 +26,9 @@ struct MpgOptions {
   int max_iters = 20;
   float gate_w = 0.35f;
   float gate_kappa = 40.0f;
-  float angular_jitter = 0.02f;
-  bool relax_gate = false;
-  int max_seed_repeat_trials = 8;
+//  float angular_jitter = 0.02f;
+  bool relax_gate = true;
+  int max_seed_repeat_trials = 64;
 };
 
 struct MpgResult {
