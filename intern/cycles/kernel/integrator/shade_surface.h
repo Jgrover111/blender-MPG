@@ -911,6 +911,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   manifold_options.gate_w = kernel_data.integrator.manifold_gate_weight;
   manifold_options.gate_kappa = kernel_data.integrator.manifold_gate_kappa;
   manifold_options.max_seed_repeat_trials = kernel_data.integrator.manifold_seed_trials;
+  /* relax_gate will be updated later based on guide state, but start with struct default */
   ccl_attr_maybe_unused const bool manifold_guiding_enabled =
       (kernel_data.integrator.manifold_guiding_enable != 0);
 #    if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
@@ -923,7 +924,8 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   ccl_attr_maybe_unused const bool surface_guiding_active = false;
 #    endif
 
-  bool relax_gate = false;
+  /* Initialize relax_gate from MpgOptions struct default (true), then update based on guide state */
+  bool relax_gate = manifold_options.relax_gate;
   bool relax_gate_summary = false;
   bool bootstrap_gate = false;
   bool summary_available = false;
