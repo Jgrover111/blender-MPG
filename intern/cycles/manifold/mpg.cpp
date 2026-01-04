@@ -161,7 +161,15 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
-  if (CLOSURE_IS_BSDF_SINGULAR(bsdf.type) && !CLOSURE_IS_RAY_PORTAL(bsdf.type)) {
+  /* MPG must be invoked from diffuse/glossy surfaces, not from specular surfaces like glass or mirrors.
+   * The Mitsuba reference runs MPG from "caustic receivers" which are non-specular surfaces.
+   *
+   * Reject singular BSDFs (transparent, ray portal) and glass BSDFs.
+   * Glass BSDFs are specular and should not be starting points for MPG seed generation. */
+  const bool is_glass = CLOSURE_IS_GLASS(bsdf.type);
+  const bool is_singular = CLOSURE_IS_BSDF_SINGULAR(bsdf.type);
+
+  if ((is_singular && !CLOSURE_IS_RAY_PORTAL(bsdf.type)) || is_glass) {
     result.failure_code = MPG_FAILURE_UNSUPPORTED;
     return result;
   }
