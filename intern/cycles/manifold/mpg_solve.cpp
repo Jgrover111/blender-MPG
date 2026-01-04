@@ -2843,6 +2843,17 @@ if constexpr (MPG_DEBUG) {
     return false;
   }
 
+if constexpr (MPG_DEBUG) {
+  printf("----------------------------------------\n");
+  printf("NEWTON DOUBLE-BOUNCE: Starting iterations\n");
+  printf("  Initial residual_norm: %.9e\n", residual_norm);
+  printf("  Convergence threshold: 1e-4\n");
+  printf("  Max iterations: %d\n", options.max_iters);
+  printf("  Primary u,v: (%.6f, %.6f)\n", primary_u, primary_v);
+  printf("  Secondary u,v: (%.6f, %.6f)\n", secondary_u, secondary_v);
+  printf("----------------------------------------\n");
+}
+
   /* Mitsuba-style damped Newton: reuse Jacobian when step is rejected */
   float beta = 1.0f;  /* Step size damping factor */
   bool needs_step_update = true;
@@ -2969,11 +2980,29 @@ if constexpr (MPG_DEBUG) {
     residual_norm = new_norm;
     beta = fminf(beta * 2.0f, 1.0f);
     needs_step_update = true;
+
+if constexpr (MPG_DEBUG) {
+    if ((iter + 1) % 5 == 0 || iter == 0 || residual_norm < 1e-4f) {
+      printf("  Iter %2d: residual=%.9e, beta=%.4f\n", iter + 1, residual_norm, beta);
+    }
+}
   }
 
   /* Accept solutions with residual <= 1e-4 (matching single-bounce and Mitsuba).
    * The double-bounce solver uses 2D projected residuals (4D total for 2 vertices). */
   if (!isfinite_safe(residual_norm) || residual_norm > 1e-4f) {
+if constexpr (MPG_DEBUG) {
+    printf("========================================\n");
+    printf("MPG DOUBLE-BOUNCE: NEWTON FAILED TO CONVERGE\n");
+    printf("========================================\n");
+    printf("  Final residual_norm: %.9e (threshold: 1e-4)\n", residual_norm);
+    printf("  residual_norm > 1e-4: %d\n", residual_norm > 1e-4f);
+    printf("  isfinite: %d\n", isfinite_safe(residual_norm));
+    printf("  Max iterations reached: 30\n");
+    printf("  Primary u,v: (%.6f, %.6f)\n", primary_u, primary_v);
+    printf("  Secondary u,v: (%.6f, %.6f)\n", secondary_u, secondary_v);
+    printf("========================================\n\n");
+}
     failure_code = MPG_FAILURE_NEWTON_DIVERGED;
     return false;
   }
