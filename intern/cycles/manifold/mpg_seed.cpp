@@ -29,6 +29,9 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Debug printing toggle - set to true to enable detailed MPG debug output */
+static constexpr bool MPG_DEBUG = true;
+
 /* Bit manipulation functions for full-path tau encoding (matching Mitsuba MPG reference) */
 
 ccl_device_forceinline void set_chaintype_bit(uint8_t &tau, int position, bool is_refraction)
@@ -1042,6 +1045,7 @@ bool mpg_generate_seed(KernelGlobals kg,
 
     bool has_smooth_normals = false;
     if (!has_specular_bsdf_at_hit(kg, ray, candidate_isect, has_smooth_normals)) {
+if constexpr (MPG_DEBUG) {
       /* Debug: Print what surface we hit and why it was rejected */
       ShaderData debug_sd = {};
       shader_setup_from_ray(kg, &debug_sd, &ray, const_cast<Intersection *>(&candidate_isect));
@@ -1072,13 +1076,14 @@ bool mpg_generate_seed(KernelGlobals kg,
                  mf->alpha_x, mf->alpha_y, mf->ior);
         }
       }
-
+}
       last_failure = MPG_FAILURE_NO_SPECULAR;
       return false;
     }
 
     out_isect = candidate_isect;
     if (record_accept) {
+if constexpr (MPG_DEBUG) {
       /* Debug: Print successful seed acceptance */
       ShaderData debug_sd = {};
       shader_setup_from_ray(kg, &debug_sd, &ray, const_cast<Intersection *>(&candidate_isect));
@@ -1088,7 +1093,7 @@ bool mpg_generate_seed(KernelGlobals kg,
       printf("  Hit position: (%.6f, %.6f, %.6f)\n", debug_sd.P.x, debug_sd.P.y, debug_sd.P.z);
       printf("  Hit object: %d, scatter: %d, smooth_normals: %d\n",
              candidate_isect.object, (int)scatter_branch, has_smooth_normals);
-
+}
       seed_direction = normalized_direction;
       accepted_seed_pdf = candidate_pdf;
       accepted_branch_pdf = candidate_branch_pdf;
