@@ -876,7 +876,9 @@ if constexpr (MPG_DEBUG) {
     const bool is_micro = CLOSURE_IS_BSDF_MICROFACET(closure->type);
     const bool is_singular = CLOSURE_IS_BSDF_SINGULAR(closure->type);
 
-    if (!(is_micro || is_singular)) {
+    /* Glass BSDFs are specular and compatible with MPG.
+     * CLOSURE_IS_BSDF_SINGULAR only includes transparent/portal, not glass. */
+    if (!(is_micro || is_singular || is_glass)) {
       found_non_specular_bsdf = true;
       non_specular_closure_type = (int)closure->type;
       continue;

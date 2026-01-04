@@ -319,7 +319,11 @@ static inline bool has_specular_bsdf_at_hit(KernelGlobals kg,
     }
     const bool is_micro    = CLOSURE_IS_BSDF_MICROFACET(c->type);
     const bool is_singular = CLOSURE_IS_BSDF_SINGULAR(c->type);
-    if (is_singular) {
+    const bool is_glass    = CLOSURE_IS_GLASS(c->type);
+
+    /* Glass BSDFs are specular surfaces that MPG can use as intermediate vertices.
+     * CLOSURE_IS_BSDF_SINGULAR only includes transparent/portal, not glass. */
+    if (is_singular || is_glass) {
       return true;
     }
     if (is_micro) {
