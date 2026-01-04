@@ -2902,8 +2902,23 @@ if constexpr (MPG_DEBUG) {
     float new_secondary_u = secondary_u - beta * delta[2];
     float new_secondary_v = secondary_v - beta * delta[3];
 
+if constexpr (MPG_DEBUG) {
+    if ((iter + 1) % 5 == 0 || iter == 0) {
+      printf("    Step %2d: delta=(%.4f,%.4f,%.4f,%.4f) → prim(%.4f,%.4f) sec(%.4f,%.4f)\n",
+             iter + 1, delta[0], delta[1], delta[2], delta[3],
+             new_primary_u, new_primary_v, new_secondary_u, new_secondary_v);
+    }
+}
+
     project_barycentrics(new_primary_u, new_primary_v);
     project_barycentrics(new_secondary_u, new_secondary_v);
+
+if constexpr (MPG_DEBUG) {
+    if ((iter + 1) % 5 == 0 || iter == 0) {
+      printf("    After projection: prim(%.4f,%.4f) sec(%.4f,%.4f)\n",
+             new_primary_u, new_primary_v, new_secondary_u, new_secondary_v);
+    }
+}
 
     SpecularParameters new_primary_params;
     if (!specular_parameters_from_surface(
@@ -2995,7 +3010,8 @@ if constexpr (MPG_DEBUG) {
 
 if constexpr (MPG_DEBUG) {
     if ((iter + 1) % 5 == 0 || iter == 0 || residual_norm < 1e-4f) {
-      printf("  Iter %2d: residual=%.9e, beta=%.4f\n", iter + 1, residual_norm, beta);
+      printf("  Iter %2d: residual=%.9e, prim(%.4f,%.4f) sec(%.4f,%.4f)\n",
+             iter + 1, residual_norm, primary_u, primary_v, secondary_u, secondary_v);
     }
 }
   }
