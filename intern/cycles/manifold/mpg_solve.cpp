@@ -876,9 +876,17 @@ if constexpr (MPG_DEBUG) {
     const bool is_micro = CLOSURE_IS_BSDF_MICROFACET(closure->type);
     const bool is_singular = CLOSURE_IS_BSDF_SINGULAR(closure->type);
 
+if constexpr (MPG_DEBUG) {
+    printf("MPG DEBUG specular_parameters: Closure %d\n", i);
+    printf("  Type: %d, is_bsdf=1, is_glass=%d, is_micro=%d, is_singular=%d, is_trans=%d\n",
+           (int)closure->type, is_glass, is_micro, is_singular, is_trans);
+}
     /* Glass BSDFs are specular and compatible with MPG.
      * CLOSURE_IS_BSDF_SINGULAR only includes transparent/portal, not glass. */
     if (!(is_micro || is_singular || is_glass)) {
+if constexpr (MPG_DEBUG) {
+      printf("  -> REJECTED: Not specular (not micro, singular, or glass)\n");
+}
       found_non_specular_bsdf = true;
       non_specular_closure_type = (int)closure->type;
       continue;
@@ -889,6 +897,10 @@ if constexpr (MPG_DEBUG) {
       const float ax = fmaxf(mf->alpha_x, 0.0f);
       const float ay = fmaxf(mf->alpha_y, 0.0f);
       const bool delta_like = (ax <= 1.0e-6f) && (ay <= 1.0e-6f);
+if constexpr (MPG_DEBUG) {
+      printf("  Microfacet: alpha_x=%.9f, alpha_y=%.9f, ior=%.6f, delta_like=%d\n",
+             ax, ay, mf->ior, delta_like);
+}
       if (delta_like) {
         if (!(is_trans || is_glass)) {
           have_singular_reflection = true;
@@ -903,11 +915,21 @@ if constexpr (MPG_DEBUG) {
         reports_transmission = fabsf(mf->ior) > 1.0f + 1.0e-6f;
       }
 
+if constexpr (MPG_DEBUG) {
+      printf("  reports_reflection=%d, reports_transmission=%d\n",
+             reports_reflection, reports_transmission);
+}
       if (reports_transmission) {
         refraction_microfacet = mf;
+if constexpr (MPG_DEBUG) {
+        printf("  -> Set refraction_microfacet\n");
+}
       }
       if (reports_reflection) {
         reflection_microfacet = mf;
+if constexpr (MPG_DEBUG) {
+        printf("  -> Set reflection_microfacet\n");
+}
       }
     }
     if (is_singular) {
