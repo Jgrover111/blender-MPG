@@ -2909,6 +2909,9 @@ if constexpr (MPG_DEBUG) {
     if (!specular_parameters_from_surface(
             kg, sd, primary_geometry, seed, 0, new_primary_u, new_primary_v, new_primary_params))
     {
+if constexpr (MPG_DEBUG) {
+      printf("  Iter %2d: REJECT #1 - primary params extraction failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
+}
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
       continue;
@@ -2916,6 +2919,9 @@ if constexpr (MPG_DEBUG) {
 
     ShaderData new_primary_sd;
     if (!build_primary_shading_data(sd, primary_geometry, seed, new_primary_u, new_primary_v, new_primary_sd)) {
+if constexpr (MPG_DEBUG) {
+      printf("  Iter %2d: REJECT #2 - primary shading data build failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
+}
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
       continue;
@@ -2931,6 +2937,9 @@ if constexpr (MPG_DEBUG) {
                                           new_secondary_v,
                                           new_secondary_params))
     {
+if constexpr (MPG_DEBUG) {
+      printf("  Iter %2d: REJECT #3 - secondary params extraction failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
+}
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
       continue;
@@ -2951,6 +2960,9 @@ if constexpr (MPG_DEBUG) {
                                 secondary_seed.use_smooth_normals,
                                 new_eval))
     {
+if constexpr (MPG_DEBUG) {
+      printf("  Iter %2d: REJECT #4 - evaluate_double_bounce failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
+}
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
       continue;
