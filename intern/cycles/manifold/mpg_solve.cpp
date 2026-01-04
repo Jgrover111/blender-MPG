@@ -3282,6 +3282,27 @@ if constexpr (MPG_DEBUG) {
   result.prim = primary_vertex.prim;
 
   failure_code = MPG_FAILURE_NONE;
+
+if constexpr (MPG_DEBUG) {
+  printf("========================================\n");
+  printf("MPG DOUBLE-BOUNCE SOLVER: SUCCESS!\n");
+  printf("========================================\n");
+  printf("SOLUTION SUMMARY:\n");
+  printf("  Primary vertex: (%.6f, %.6f, %.6f)\n",
+         primary_vertex.position.x, primary_vertex.position.y, primary_vertex.position.z);
+  printf("  Secondary vertex: (%.6f, %.6f, %.6f)\n",
+         secondary_vertex.position.x, secondary_vertex.position.y, secondary_vertex.position.z);
+  printf("  Primary refraction: %d, Secondary refraction: %d\n",
+         primary_params.is_refraction, secondary_params.is_refraction);
+  printf("  Visibility: %.6f\n", result.visibility);
+  printf("  Specular throughput: (%.6f, %.6f, %.6f)\n",
+         result.specular_throughput.x, result.specular_throughput.y, result.specular_throughput.z);
+  printf("  Jacobian total: %.9e\n", result.jacobian_total);
+  printf("  Outgoing direction (wi): (%.6f, %.6f, %.6f)\n",
+         result.wi.x, result.wi.y, result.wi.z);
+  printf("========================================\n\n");
+}
+
   return true;
 }
 

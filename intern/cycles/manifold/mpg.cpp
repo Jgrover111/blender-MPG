@@ -28,6 +28,9 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Debug printing toggle - set to true to enable detailed MPG debug output */
+static constexpr bool MPG_DEBUG = true;
+
 namespace {
 
 constexpr int MPG_BOOTSTRAP_RNG_OFFSET = 128;
@@ -641,6 +644,28 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     }
   }
 #endif
+
+if constexpr (MPG_DEBUG) {
+  printf("████████████████████████████████████████\n");
+  printf("MPG_TRY_CONNECT: RETURNING SUCCESS TO INTEGRATOR\n");
+  printf("████████████████████████████████████████\n");
+  printf("  result.success = %d\n", result.success);
+  printf("  result.failure_code = %d (0=none)\n", (int)result.failure_code);
+  printf("  result.visibility = %.6f\n", result.visibility);
+  printf("  result.spec_weight = (%.6f, %.6f, %.6f)\n",
+         result.spec_weight.x, result.spec_weight.y, result.spec_weight.z);
+  printf("  result.jacobian_total = %.9e\n", result.jacobian_total);
+  printf("  result.pdf (technique) = %.9e\n", result.pdf);
+  printf("  result.seed_pdf = %.9e\n", result.seed_pdf);
+  printf("  result.light_pdf = %.9e\n", result.light_pdf);
+  printf("  result.nee_pdf = %.9e\n", result.nee_pdf);
+  printf("  result.wi = (%.6f, %.6f, %.6f)\n", result.wi.x, result.wi.y, result.wi.z);
+  printf("  result.bounce_count = %d\n", result.bounce_count);
+  const bool spec_weight_nonzero = !is_zero(result.spec_weight);
+  const bool wi_valid = !is_zero(result.wi);
+  printf("  spec_weight_nonzero = %d, wi_valid = %d\n", spec_weight_nonzero, wi_valid);
+  printf("████████████████████████████████████████\n\n");
+}
 
   return result;
 }
