@@ -397,7 +397,11 @@ bool mpg_generate_seed(KernelGlobals kg,
     if (CLOSURE_IS_GLASS(closure.type)) {
       return SeedLobe::Dual;
     }
-    return SeedLobe::Reflection;
+    /* For non-specular BSDFs (diffuse, glossy), return Dual to explore both
+     * reflection and refraction paths through specular surfaces in the scene.
+     * MPG is about finding specular surfaces from diffuse starting points,
+     * so we shouldn't constrain the search based on the starting BSDF type. */
+    return SeedLobe::Dual;
   };
 
   const SeedLobe seed_lobe = classify_seed_lobe(bsdf);
