@@ -29,6 +29,12 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Debug printing toggles - set categories to true to enable specific debug output */
+struct MPG_DEBUG {
+  /* Seed generation and acceptance/rejection */
+  static constexpr bool SEED = false;
+};
+
 /* Bit manipulation functions for full-path tau encoding (matching Mitsuba MPG reference) */
 
 ccl_device_forceinline void set_chaintype_bit(uint8_t &tau, int position, bool is_refraction)
@@ -319,7 +325,11 @@ static inline bool has_specular_bsdf_at_hit(KernelGlobals kg,
     }
     const bool is_micro    = CLOSURE_IS_BSDF_MICROFACET(c->type);
     const bool is_singular = CLOSURE_IS_BSDF_SINGULAR(c->type);
-    if (is_singular) {
+    const bool is_glass    = CLOSURE_IS_GLASS(c->type);
+
+    /* Glass BSDFs are specular surfaces that MPG can use as intermediate vertices.
+     * CLOSURE_IS_BSDF_SINGULAR only includes transparent/portal, not glass. */
+    if (is_singular || is_glass) {
       return true;
     }
     if (is_micro) {
@@ -397,7 +407,11 @@ bool mpg_generate_seed(KernelGlobals kg,
     if (CLOSURE_IS_GLASS(closure.type)) {
       return SeedLobe::Dual;
     }
-    return SeedLobe::Reflection;
+    /* For non-specular BSDFs (diffuse, glossy), return Dual to explore both
+     * reflection and refraction paths through specular surfaces in the scene.
+     * MPG is about finding specular surfaces from diffuse starting points,
+     * so we shouldn't constrain the search based on the starting BSDF type. */
+    return SeedLobe::Dual;
   };
 
   const SeedLobe seed_lobe = classify_seed_lobe(bsdf);
@@ -1034,12 +1048,55 @@ bool mpg_generate_seed(KernelGlobals kg,
 
     bool has_smooth_normals = false;
     if (!has_specular_bsdf_at_hit(kg, ray, candidate_isect, has_smooth_normals)) {
+if constexpr (MPG_DEBUG::SEED) {
+      /* Debug: Print what surface we hit and why it was rejected */
+      ShaderData debug_sd = {};
+      shader_setup_from_ray(kg, &debug_sd, &ray, const_cast<Intersection *>(&candidate_isect));
+      const ConstIntegratorState integrator_state = nullptr;
+      surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
+          kg, integrator_state, &debug_sd, nullptr, PATH_RAY_CAMERA, true);
+
+      printf("MPG SEED REJECTION: Hit non-specular surface\n");
+      printf("  Ray origin: (%.6f, %.6f, %.6f)\n", ray.P.x, ray.P.y, ray.P.z);
+      printf("  Ray direction: (%.6f, %.6f, %.6f)\n", ray.D.x, ray.D.y, ray.D.z);
+      printf("  Hit position: (%.6f, %.6f, %.6f)\n", debug_sd.P.x, debug_sd.P.y, debug_sd.P.z);
+      printf("  Hit object: %d, prim: %d\n", candidate_isect.object, candidate_isect.prim);
+      printf("  Number of closures: %d\n", debug_sd.num_closure);
+
+      for (int i = 0; i < debug_sd.num_closure; ++i) {
+        const ShaderClosure *c = &debug_sd.closure[i];
+        const bool is_bsdf = CLOSURE_IS_BSDF(c->type);
+        const bool is_glass = CLOSURE_IS_GLASS(c->type);
+        const bool is_singular = CLOSURE_IS_BSDF_SINGULAR(c->type);
+        const bool is_micro = CLOSURE_IS_BSDF_MICROFACET(c->type);
+
+        printf("  Closure %d: type=%d, is_bsdf=%d, is_glass=%d, is_singular=%d, is_micro=%d\n",
+               i, (int)c->type, is_bsdf, is_glass, is_singular, is_micro);
+
+        if (is_micro) {
+          const MicrofacetBsdf *mf = reinterpret_cast<const MicrofacetBsdf *>(c);
+          printf("    Microfacet: alpha_x=%.6f, alpha_y=%.6f, ior=%.6f\n",
+                 mf->alpha_x, mf->alpha_y, mf->ior);
+        }
+      }
+}
       last_failure = MPG_FAILURE_NO_SPECULAR;
       return false;
     }
 
     out_isect = candidate_isect;
     if (record_accept) {
+if constexpr (MPG_DEBUG::SEED) {
+      /* Debug: Print successful seed acceptance */
+      ShaderData debug_sd = {};
+      shader_setup_from_ray(kg, &debug_sd, &ray, const_cast<Intersection *>(&candidate_isect));
+      printf("MPG SEED ACCEPTED: Found specular surface\n");
+      printf("  Ray origin: (%.6f, %.6f, %.6f)\n", ray.P.x, ray.P.y, ray.P.z);
+      printf("  Ray direction: (%.6f, %.6f, %.6f)\n", ray.D.x, ray.D.y, ray.D.z);
+      printf("  Hit position: (%.6f, %.6f, %.6f)\n", debug_sd.P.x, debug_sd.P.y, debug_sd.P.z);
+      printf("  Hit object: %d, scatter: %d, smooth_normals: %d\n",
+             candidate_isect.object, (int)scatter_branch, has_smooth_normals);
+}
       seed_direction = normalized_direction;
       accepted_seed_pdf = candidate_pdf;
       accepted_branch_pdf = candidate_branch_pdf;

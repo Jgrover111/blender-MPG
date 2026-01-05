@@ -28,6 +28,12 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Debug printing toggles - set categories to true to enable specific debug output */
+struct MPG_DEBUG {
+  /* Final success handoff to integrator */
+  static constexpr bool SUCCESS = false;
+};
+
 namespace {
 
 constexpr int MPG_BOOTSTRAP_RNG_OFFSET = 128;
@@ -161,7 +167,15 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
-  if (CLOSURE_IS_BSDF_SINGULAR(bsdf.type) && !CLOSURE_IS_RAY_PORTAL(bsdf.type)) {
+  /* MPG must be invoked from diffuse/glossy surfaces, not from specular surfaces like glass or mirrors.
+   * The Mitsuba reference runs MPG from "caustic receivers" which are non-specular surfaces.
+   *
+   * Reject singular BSDFs (transparent, ray portal) and glass BSDFs.
+   * Glass BSDFs are specular and should not be starting points for MPG seed generation. */
+  const bool is_glass = CLOSURE_IS_GLASS(bsdf.type);
+  const bool is_singular = CLOSURE_IS_BSDF_SINGULAR(bsdf.type);
+
+  if ((is_singular && !CLOSURE_IS_RAY_PORTAL(bsdf.type)) || is_glass) {
     result.failure_code = MPG_FAILURE_UNSUPPORTED;
     return result;
   }
@@ -633,6 +647,28 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     }
   }
 #endif
+
+if constexpr (MPG_DEBUG::SUCCESS) {
+  printf("████████████████████████████████████████\n");
+  printf("MPG_TRY_CONNECT: RETURNING SUCCESS TO INTEGRATOR\n");
+  printf("████████████████████████████████████████\n");
+  printf("  result.success = %d\n", result.success);
+  printf("  result.failure_code = %d (0=none)\n", (int)result.failure_code);
+  printf("  result.visibility = %.6f\n", result.visibility);
+  printf("  result.spec_weight = (%.6f, %.6f, %.6f)\n",
+         result.spec_weight.x, result.spec_weight.y, result.spec_weight.z);
+  printf("  result.jacobian_total = %.9e\n", result.jacobian_total);
+  printf("  result.pdf (technique) = %.9e\n", result.pdf);
+  printf("  result.seed_pdf = %.9e\n", result.seed_pdf);
+  printf("  result.light_pdf = %.9e\n", result.light_pdf);
+  printf("  result.nee_pdf = %.9e\n", result.nee_pdf);
+  printf("  result.wi = (%.6f, %.6f, %.6f)\n", result.wi.x, result.wi.y, result.wi.z);
+  printf("  result.bounce_count = %d\n", result.bounce_count);
+  const bool spec_weight_nonzero = !is_zero(result.spec_weight);
+  const bool wi_valid = !is_zero(result.wi);
+  printf("  spec_weight_nonzero = %d, wi_valid = %d\n", spec_weight_nonzero, wi_valid);
+  printf("████████████████████████████████████████\n\n");
+}
 
   return result;
 }
