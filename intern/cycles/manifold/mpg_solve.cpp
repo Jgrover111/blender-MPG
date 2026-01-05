@@ -582,19 +582,13 @@ if constexpr (MPG_DEBUG) {
   const float3 wi = -eval.dir_ds;  /* Incident direction away from surface (X→C) */
   const float3 wo = eval.dir_sl;    /* Outgoing direction away from surface (X→L) */
 
-  /* Mitsuba uses base material IOR for half-vector, not the relative IOR from Snell's law.
-   * Determine entering/exiting using same logic as compute_specular() and solver. */
-  float h_eta = params.is_refraction ? params.base_eta : 1.0f;
-  if (params.is_refraction) {
-    const bool exiting = dot(eval.normal, eval.dir_ds) > 0.0f;
-    if (!exiting) {
-      h_eta = 1.0f / fmaxf(h_eta, 1e-6f);
-    }
-  }
+  /* Use the same eta that was computed by compute_specular() to ensure consistency
+   * between the residual and Jacobian. This eta is the relative IOR used in Snell's law. */
+  const float h_eta = eval.refractive ? eval.eta : 1.0f;
 
-  /* Generalized half-vector: h = normalize(wi + eta * wo), negated when eta != 1 */
+  /* Generalized half-vector: h = normalize(wi + eta * wo), negated for refraction */
   float3 h = wi + h_eta * wo;
-  if (h_eta != 1.0f) {
+  if (eval.refractive) {
     h = -h;
   }
   const float h_len = len(h);
