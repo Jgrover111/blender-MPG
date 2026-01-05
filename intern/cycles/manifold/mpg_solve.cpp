@@ -2423,13 +2423,18 @@ if constexpr (MPG_DEBUG::PARAMS) {
     /* Determine entering/exiting using the same logic as compute_specular().
      * dir_ds points FROM receiver TO specular point (light propagation direction).
      * If dot(normal, dir_ds) > 0, we're exiting the material.
-     * For the half-vector, Mitsuba uses base IOR when exiting, 1/IOR when entering. */
+     *
+     * CRITICAL: Half-vector eta is INVERSE of Snell's law eta!
+     * - Snell's law: entering = 1/IOR, exiting = IOR
+     * - Half-vector: entering = IOR, exiting = 1/IOR
+     *
+     * Therefore, invert the logic compared to compute_specular. */
     const bool exiting = dot(eval.normal, eval.dir_ds) > 0.0f;
-    if (!exiting) {
-      /* Entering: use inverse IOR for half-vector */
+    if (exiting) {
+      /* Exiting: use inverse IOR for half-vector (opposite of Snell's law) */
       h_eta = 1.0f / fmaxf(h_eta, 1e-6f);
     }
-    /* Exiting: keep h_eta = base_eta (already set above) */
+    /* Entering: keep h_eta = base_eta (opposite of Snell's law) */
   }
 
   /* Generalized half-vector: h = normalize(wi + eta * wo), negated for refraction.
