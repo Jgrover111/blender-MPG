@@ -40,13 +40,13 @@ struct MPG_DEBUG {
   static constexpr bool PARAMS = false;
 
   /* Newton solver high-level progress (start, convergence, final status) */
-  static constexpr bool NEWTON = true;
+  static constexpr bool NEWTON = false;
 
   /* Newton solver detailed steps (delta values, projection, rejection paths) */
-  static constexpr bool NEWTON_DETAIL = true;
+  static constexpr bool NEWTON_DETAIL = false;
 
   /* Detailed failure reasons from evaluate_double_bounce */
-  static constexpr bool EVAL_FAIL = true;
+  static constexpr bool EVAL_FAIL = false;
 
   /* Final success handoff to integrator */
   static constexpr bool SUCCESS = false;
@@ -1780,6 +1780,11 @@ if constexpr (MPG_DEBUG::PARAMS) {
   bool has_smooth_normals = secondary_seed.use_smooth_normals;
   smooth_normals_at_hit(kg, ray, isect, has_smooth_normals);
   secondary_seed.use_smooth_normals = has_smooth_normals;
+
+  /* Mitsuba approach: Accept all ray-traced secondary vertices without pre-validation.
+   * Let the Newton solver naturally reject infeasible seeds through convergence failure.
+   * This matches the reference implementation which traces rays iteratively for multi-bounce
+   * paths and relies on Newton's constraint evaluation to filter invalid configurations. */
   return true;
 }
 
@@ -2029,8 +2034,13 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
   /*
    * When u1, v1 change:
    * - Primary vertex position changes
-   * - Secondary wi changes (primary to secondary direction changes)
+   * - Secondary wi = normalize(primary - secondary) changes
    * - Secondary wo stays the same (secondary to light is independent of primary)
+   *
+   * Mathematical note: wi_secondary = normalize(primary - secondary).
+   * When primary moves by +dPdu, the vector (primary - secondary) changes by +dPdu.
+   * derivative_normalized(secondary - primary, -dPdu) = derivative_normalized(primary - secondary, +dPdu)
+   * due to sign cancellation: normalize(-(v + dv)) = -normalize(v + dv), and the negations cancel.
    */
   const float3 d_secondary_wi_du1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdu);
   const float3 d_secondary_wi_dv1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdv);
@@ -2413,22 +2423,27 @@ if constexpr (MPG_DEBUG::PARAMS) {
     /* Determine entering/exiting using the same logic as compute_specular().
      * dir_ds points FROM receiver TO specular point (light propagation direction).
      * If dot(normal, dir_ds) > 0, we're exiting the material.
-     * For the half-vector, Mitsuba uses base IOR when exiting, 1/IOR when entering. */
+     *
+     * CRITICAL: Half-vector eta is INVERSE of Snell's law eta!
+     * - Snell's law: entering = 1/IOR, exiting = IOR
+     * - Half-vector: entering = IOR, exiting = 1/IOR
+     *
+     * Therefore, invert the logic compared to compute_specular. */
     const bool exiting = dot(eval.normal, eval.dir_ds) > 0.0f;
-    if (!exiting) {
-      /* Entering: use inverse IOR for half-vector */
+    if (exiting) {
+      /* Exiting: use inverse IOR for half-vector (opposite of Snell's law) */
       h_eta = 1.0f / fmaxf(h_eta, 1e-6f);
     }
-    /* Exiting: keep h_eta = base_eta (already set above) */
+    /* Entering: keep h_eta = base_eta (opposite of Snell's law) */
   }
 
-  /* Mitsuba's half-vector normalization: h = normalize(wi + eta * wo).
+  /* Generalized half-vector: h = normalize(wi + eta * wo), negated for refraction.
    * Mitsuba normalizes without checking length threshold, trusting that
    * geometrically invalid configurations will fail naturally in the Newton solver.
    * We check for zero-length to avoid NaN, but use a minimal tolerance that only
    * catches truly degenerate cases (matching Mitsuba's approach). */
   float3 h = wi + h_eta * wo;
-  if (h_eta != 1.0f) {
+  if (params.is_refraction) {
     h = -h;
   }
   const float h_len = len(h);
@@ -2535,16 +2550,17 @@ if constexpr (MPG_DEBUG::PARAMS) {
     const float3 new_wo = new_eval.dir_sl;
     float new_h_eta = new_params.is_refraction ? new_params.base_eta : 1.0f;
     if (new_params.is_refraction) {
-      /* Use same entering/exiting logic as initial half-vector computation */
+      /* Use same entering/exiting logic as initial half-vector computation.
+       * Half-vector eta is INVERSE of Snell's law - see lines 2421-2438. */
       const bool exiting = dot(new_eval.normal, new_eval.dir_ds) > 0.0f;
-      if (!exiting) {
+      if (exiting) {
         new_h_eta = 1.0f / fmaxf(new_h_eta, 1e-6f);
       }
     }
 
-    /* Normalize half-vector (matching Mitsuba's approach - see earlier comment) */
+    /* Generalized half-vector: h = normalize(wi + eta * wo), negated for refraction */
     float3 new_h = new_wi + new_h_eta * new_wo;
-    if (new_h_eta != 1.0f) {
+    if (new_params.is_refraction) {
       new_h = -new_h;
     }
     const float new_h_len = len(new_h);
@@ -2960,6 +2976,18 @@ if constexpr (MPG_DEBUG::NEWTON) {
         failure_code = MPG_FAILURE_JACOBIAN_ZERO;
         return false;
       }
+
+if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
+      if (iter == 0) {
+        printf("    Jacobian matrix J:\n");
+        printf("      [%8.4f %8.4f %8.4f %8.4f]\n", J[0][0], J[0][1], J[0][2], J[0][3]);
+        printf("      [%8.4f %8.4f %8.4f %8.4f]\n", J[1][0], J[1][1], J[1][2], J[1][3]);
+        printf("      [%8.4f %8.4f %8.4f %8.4f]\n", J[2][0], J[2][1], J[2][2], J[2][3]);
+        printf("      [%8.4f %8.4f %8.4f %8.4f]\n", J[3][0], J[3][1], J[3][2], J[3][3]);
+        printf("    Residual: [%8.4f %8.4f %8.4f %8.4f]\n",
+               eval.residual[0], eval.residual[1], eval.residual[2], eval.residual[3]);
+      }
+}
     }
 
     /* Apply step with current beta scaling (Mitsuba approach) */
