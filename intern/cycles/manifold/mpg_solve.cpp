@@ -2432,13 +2432,13 @@ if constexpr (MPG_DEBUG::PARAMS) {
     /* Exiting: keep h_eta = base_eta (already set above) */
   }
 
-  /* Mitsuba's half-vector normalization: h = normalize(wi + eta * wo).
+  /* Generalized half-vector: h = normalize(wi + eta * wo), negated for refraction.
    * Mitsuba normalizes without checking length threshold, trusting that
    * geometrically invalid configurations will fail naturally in the Newton solver.
    * We check for zero-length to avoid NaN, but use a minimal tolerance that only
    * catches truly degenerate cases (matching Mitsuba's approach). */
   float3 h = wi + h_eta * wo;
-  if (h_eta != 1.0f) {
+  if (params.is_refraction) {
     h = -h;
   }
   const float h_len = len(h);
@@ -2552,9 +2552,9 @@ if constexpr (MPG_DEBUG::PARAMS) {
       }
     }
 
-    /* Normalize half-vector (matching Mitsuba's approach - see earlier comment) */
+    /* Generalized half-vector: h = normalize(wi + eta * wo), negated for refraction */
     float3 new_h = new_wi + new_h_eta * new_wo;
-    if (new_h_eta != 1.0f) {
+    if (new_params.is_refraction) {
       new_h = -new_h;
     }
     const float new_h_len = len(new_h);
