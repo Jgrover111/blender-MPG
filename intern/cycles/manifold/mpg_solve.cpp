@@ -2887,9 +2887,10 @@ if constexpr (MPG_DEBUG::PARAMS) {
 
   /* Reject seeds with initial residual too high (too far from specular manifold).
    * Seeds with high initial residual often cause Newton to step into regions with TIR
-   * or other constraints, leading to convergence failure. Threshold 0.5 ensures we
-   * start reasonably close to a valid solution (within 50% of constraint satisfaction). */
-  constexpr float MAX_INITIAL_RESIDUAL = 0.5f;
+   * or other constraints, leading to convergence failure. The threshold 2.0 allows
+   * half-vectors up to ~60° from surface normal, giving Newton room to converge while
+   * rejecting completely degenerate seeds. */
+  constexpr float MAX_INITIAL_RESIDUAL = 2.0f;
   if (residual_norm > MAX_INITIAL_RESIDUAL) {
 if constexpr (MPG_DEBUG::NEWTON) {
     printf("NEWTON DOUBLE-BOUNCE: REJECTING SEED\n");
