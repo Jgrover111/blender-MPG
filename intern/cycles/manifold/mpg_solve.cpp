@@ -603,9 +603,15 @@ if constexpr (MPG_DEBUG::PARAMS) {
   const float3 wi = -eval.dir_ds;  /* Incident direction away from surface (X→C) */
   const float3 wo = eval.dir_sl;    /* Outgoing direction away from surface (X→L) */
 
-  /* Use the same eta that was computed by compute_specular() to ensure consistency
-   * between the residual and Jacobian. This eta is the relative IOR used in Snell's law. */
-  const float h_eta = eval.refractive ? eval.eta : 1.0f;
+  /* Half-vector eta convention is opposite of Snell's law eta!
+   * - Snell's law (compute_specular): eta = n_from / n_to
+   *   - Entering glass: eta = 1/1.5 = 0.6667
+   *   - Exiting glass: eta = 1.5/1 = 1.5
+   * - Half-vector (Mitsuba): eta = n_to / n_from
+   *   - Entering glass: eta = 1.5/1 = 1.5
+   *   - Exiting glass: eta = 1/1.5 = 0.6667
+   * Therefore we use the reciprocal of eval.eta for the half-vector. */
+  const float h_eta = eval.refractive ? (1.0f / eval.eta) : 1.0f;
 
   /* Generalized half-vector: h = normalize(wi + eta * wo), negated for refraction */
   float3 h = wi + h_eta * wo;
@@ -1928,7 +1934,8 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
   /* === Compute half-vectors for both vertices === */
   const float3 primary_wi = -eval.primary.dir_ds;
   const float3 primary_wo = eval.primary.dir_sl;
-  const float primary_h_eta = eval.primary.refractive ? eval.primary.eta : 1.0f;
+  /* Use reciprocal of Snell's law eta for half-vector (see evaluate_specular) */
+  const float primary_h_eta = eval.primary.refractive ? (1.0f / eval.primary.eta) : 1.0f;
 
   float3 primary_g = primary_wi + primary_h_eta * primary_wo;
   if (eval.primary.refractive) {
@@ -1942,7 +1949,8 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
 
   const float3 secondary_wi = -eval.secondary.dir_ds;
   const float3 secondary_wo = eval.secondary.dir_sl;
-  const float secondary_h_eta = eval.secondary.refractive ? eval.secondary.eta : 1.0f;
+  /* Use reciprocal of Snell's law eta for half-vector (see evaluate_specular) */
+  const float secondary_h_eta = eval.secondary.refractive ? (1.0f / eval.secondary.eta) : 1.0f;
 
   float3 secondary_g = secondary_wi + secondary_h_eta * secondary_wo;
   if (eval.secondary.refractive) {
