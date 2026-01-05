@@ -622,6 +622,14 @@ if constexpr (MPG_DEBUG::PARAMS) {
    * in evaluate_double_bounce() to form the 2D constraint per vertex.
    * This matches the Jacobian formulation from Mitsuba's MPG implementation. */
   eval.residual = h;
+
+if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
+  const float dot_h_n = dot(h, eval.normal);
+  printf("    Half-vector: h=(%.4f,%.4f,%.4f), dot(h,n)=%.4f, refract=%d, eta=%.4f\n",
+         h.x, h.y, h.z, dot_h_n, eval.refractive, h_eta);
+  printf("      wi=(%.4f,%.4f,%.4f), wo=(%.4f,%.4f,%.4f), n=(%.4f,%.4f,%.4f)\n",
+         wi.x, wi.y, wi.z, wo.x, wo.y, wo.z, eval.normal.x, eval.normal.y, eval.normal.z);
+}
 }
 
 static bool smooth_normals_at_hit(KernelGlobals kg,
@@ -1866,6 +1874,14 @@ if constexpr (MPG_DEBUG::EVAL_FAIL) {
   }
   eval.residual[2] = dot(eval.secondary.residual, tangent_u);
   eval.residual[3] = dot(eval.secondary.residual, tangent_v);
+
+if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
+  const float norm = sqrtf(eval.residual[0]*eval.residual[0] + eval.residual[1]*eval.residual[1] +
+                           eval.residual[2]*eval.residual[2] + eval.residual[3]*eval.residual[3]);
+  printf("    Residual after projection: C=(%.4f, %.4f, %.4f, %.4f), norm=%.4f\n",
+         eval.residual[0], eval.residual[1], eval.residual[2], eval.residual[3], norm);
+}
+
   return true;
 }
 
@@ -2882,22 +2898,6 @@ if constexpr (MPG_DEBUG::PARAMS) {
   residual_norm = sqrtf(residual_norm);
   if (!isfinite_safe(residual_norm)) {
     failure_code = MPG_FAILURE_NEWTON_DIVERGED;
-    return false;
-  }
-
-  /* Reject seeds with initial residual too high (too far from specular manifold).
-   * Seeds with high initial residual often cause Newton to step into regions with TIR
-   * or other constraints, leading to convergence failure. The threshold 2.0 allows
-   * half-vectors up to ~60° from surface normal, giving Newton room to converge while
-   * rejecting completely degenerate seeds. */
-  constexpr float MAX_INITIAL_RESIDUAL = 2.0f;
-  if (residual_norm > MAX_INITIAL_RESIDUAL) {
-if constexpr (MPG_DEBUG::NEWTON) {
-    printf("NEWTON DOUBLE-BOUNCE: REJECTING SEED\n");
-    printf("  Initial residual %.6f exceeds threshold %.6f\n", residual_norm, MAX_INITIAL_RESIDUAL);
-    printf("  Seed is too far from specular manifold\n");
-}
-    failure_code = MPG_FAILURE_SEED;
     return false;
   }
 
