@@ -1102,7 +1102,11 @@ if constexpr (MPG_DEBUG::SEED) {
       accepted_branch_pdf = candidate_branch_pdf;
       accepted_direction_pdf = candidate_direction_pdf;
       accepted_scatter_pdf = candidate_scatter_pdf;
-      seed.use_smooth_normals = has_smooth_normals && (scatter_branch != MPG_SEED_SCATTER_REFRACTION);
+      /* Force flat shading for ALL MPG paths to ensure tangent basis orthogonality.
+       * For smooth normals, the interpolated normal may not be orthogonal to the
+       * geometric tangent basis (dXdu, dXdv), causing Newton solver divergence.
+       * Mitsuba MPG uses geometric normals for manifold constraints. */
+      seed.use_smooth_normals = false;
       successful_branch = branch;
       successful_scatter_branch = scatter_branch;
       accepted_direction_normalized = normalized_direction;

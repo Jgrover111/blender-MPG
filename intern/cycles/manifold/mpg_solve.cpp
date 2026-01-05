@@ -1777,9 +1777,10 @@ if constexpr (MPG_DEBUG::PARAMS) {
    * - Bit 1 = secondary bounce type
    * No shifting or modification needed - bounce_index parameter selects which bit to query. */
 
-  bool has_smooth_normals = secondary_seed.use_smooth_normals;
-  smooth_normals_at_hit(kg, ray, isect, has_smooth_normals);
-  secondary_seed.use_smooth_normals = has_smooth_normals;
+  /* Force flat shading for ALL MPG vertices to ensure tangent basis orthogonality.
+   * Smooth normals (interpolated from vertices) are not guaranteed to be orthogonal
+   * to the geometric tangent basis, causing Newton solver divergence. */
+  secondary_seed.use_smooth_normals = false;
 
   /* Mitsuba approach: Accept all ray-traced secondary vertices without pre-validation.
    * Let the Newton solver naturally reject infeasible seeds through convergence failure.
