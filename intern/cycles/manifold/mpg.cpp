@@ -28,8 +28,11 @@
 
 CCL_NAMESPACE_BEGIN
 
-/* Debug printing toggle - set to true to enable detailed MPG debug output */
-static constexpr bool MPG_DEBUG = true;
+/* Debug printing toggles - set categories to true to enable specific debug output */
+struct MPG_DEBUG {
+  /* Final success handoff to integrator */
+  static constexpr bool SUCCESS = false;
+};
 
 namespace {
 
@@ -645,7 +648,7 @@ MpgResult mpg_try_connect(KernelGlobals kg,
   }
 #endif
 
-if constexpr (MPG_DEBUG) {
+if constexpr (MPG_DEBUG::SUCCESS) {
   printf("████████████████████████████████████████\n");
   printf("MPG_TRY_CONNECT: RETURNING SUCCESS TO INTEGRATOR\n");
   printf("████████████████████████████████████████\n");

@@ -29,8 +29,11 @@
 
 CCL_NAMESPACE_BEGIN
 
-/* Debug printing toggle - set to true to enable detailed MPG debug output */
-static constexpr bool MPG_DEBUG = true;
+/* Debug printing toggles - set categories to true to enable specific debug output */
+struct MPG_DEBUG {
+  /* Seed generation and acceptance/rejection */
+  static constexpr bool SEED = false;
+};
 
 /* Bit manipulation functions for full-path tau encoding (matching Mitsuba MPG reference) */
 
@@ -1045,7 +1048,7 @@ bool mpg_generate_seed(KernelGlobals kg,
 
     bool has_smooth_normals = false;
     if (!has_specular_bsdf_at_hit(kg, ray, candidate_isect, has_smooth_normals)) {
-if constexpr (MPG_DEBUG) {
+if constexpr (MPG_DEBUG::SEED) {
       /* Debug: Print what surface we hit and why it was rejected */
       ShaderData debug_sd = {};
       shader_setup_from_ray(kg, &debug_sd, &ray, const_cast<Intersection *>(&candidate_isect));
@@ -1083,7 +1086,7 @@ if constexpr (MPG_DEBUG) {
 
     out_isect = candidate_isect;
     if (record_accept) {
-if constexpr (MPG_DEBUG) {
+if constexpr (MPG_DEBUG::SEED) {
       /* Debug: Print successful seed acceptance */
       ShaderData debug_sd = {};
       shader_setup_from_ray(kg, &debug_sd, &ray, const_cast<Intersection *>(&candidate_isect));
