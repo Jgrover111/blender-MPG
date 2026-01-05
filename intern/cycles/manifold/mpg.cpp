@@ -34,8 +34,9 @@ struct MPG_DEBUG {
   static constexpr bool SUCCESS = false;
 };
 
-/* External reference to sample filter (defined in mpg_solve.cpp) */
-extern thread_local int g_current_sample;
+/* External reference to sample filter (defined in mpg_solve.cpp)
+ * Note: Remove thread_local keyword from extern declaration - it's only on the definition */
+extern int g_current_sample;
 
 namespace {
 
