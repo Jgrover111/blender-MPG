@@ -2031,9 +2031,14 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
    * - Primary vertex position changes
    * - Secondary wi changes (primary to secondary direction changes)
    * - Secondary wo stays the same (secondary to light is independent of primary)
+   *
+   * Note: wi = normalize(primary - secondary), so when primary moves by +dPdu,
+   * we need derivative_normalized(primary - secondary, +dPdu).
+   * Computing derivative_normalized(secondary - primary, -dPdu) gives the negated result,
+   * so we negate it to get the correct sign.
    */
-  const float3 d_secondary_wi_du1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdu);
-  const float3 d_secondary_wi_dv1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdv);
+  const float3 d_secondary_wi_du1 = -derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdu);
+  const float3 d_secondary_wi_dv1 = -derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdv);
 
   float3 d_secondary_g_du1 = d_secondary_wi_du1;  // wo doesn't change
   float3 d_secondary_g_dv1 = d_secondary_wi_dv1;
