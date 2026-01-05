@@ -2550,9 +2550,10 @@ if constexpr (MPG_DEBUG::PARAMS) {
     const float3 new_wo = new_eval.dir_sl;
     float new_h_eta = new_params.is_refraction ? new_params.base_eta : 1.0f;
     if (new_params.is_refraction) {
-      /* Use same entering/exiting logic as initial half-vector computation */
+      /* Use same entering/exiting logic as initial half-vector computation.
+       * Half-vector eta is INVERSE of Snell's law - see lines 2421-2438. */
       const bool exiting = dot(new_eval.normal, new_eval.dir_ds) > 0.0f;
-      if (!exiting) {
+      if (exiting) {
         new_h_eta = 1.0f / fmaxf(new_h_eta, 1e-6f);
       }
     }
