@@ -30,6 +30,11 @@ CCL_NAMESPACE_BEGIN
 
 /* Debug printing toggles - set categories to true to enable specific debug output */
 struct MPG_DEBUG {
+  /* Sample number filter: Only print debug output for this sample number.
+   * Set to -1 to print all samples, or a specific number (e.g., 999 for last sample).
+   * Example: SAMPLE_FILTER = 999 means only print on sample 999 (0-indexed). */
+  static constexpr int SAMPLE_FILTER = -1;  // -1 = all samples, or set to specific sample number
+
   /* Seed generation and acceptance/rejection */
   static constexpr bool SEED = false;
 
@@ -51,6 +56,14 @@ struct MPG_DEBUG {
   /* Final success handoff to integrator */
   static constexpr bool SUCCESS = false;
 };
+
+/* Thread-local storage for current sample number (set by mpg_try_connect) */
+static thread_local int g_current_sample = -1;
+
+/* Helper to check if debug printing is enabled for current sample */
+static inline bool debug_print_enabled() {
+  return (MPG_DEBUG::SAMPLE_FILTER == -1) || (g_current_sample == MPG_DEBUG::SAMPLE_FILTER);
+}
 
 namespace {
 struct SpecularSurfaceGeometry {
@@ -2927,14 +2940,16 @@ if constexpr (MPG_DEBUG::PARAMS) {
   }
 
 if constexpr (MPG_DEBUG::NEWTON) {
-  printf("----------------------------------------\n");
-  printf("NEWTON DOUBLE-BOUNCE: Starting iterations\n");
-  printf("  Initial residual_norm: %.9e\n", residual_norm);
-  printf("  Convergence threshold: 1e-4\n");
-  printf("  Max iterations: %d\n", options.max_iters);
-  printf("  Primary u,v: (%.6f, %.6f)\n", primary_u, primary_v);
-  printf("  Secondary u,v: (%.6f, %.6f)\n", secondary_u, secondary_v);
-  printf("----------------------------------------\n");
+  if (debug_print_enabled()) {
+    printf("----------------------------------------\n");
+    printf("NEWTON DOUBLE-BOUNCE: Starting iterations (sample %d)\n", g_current_sample);
+    printf("  Initial residual_norm: %.9e\n", residual_norm);
+    printf("  Convergence threshold: 1e-4\n");
+    printf("  Max iterations: %d\n", options.max_iters);
+    printf("  Primary u,v: (%.6f, %.6f)\n", primary_u, primary_v);
+    printf("  Secondary u,v: (%.6f, %.6f)\n", secondary_u, secondary_v);
+    printf("----------------------------------------\n");
+  }
 }
 
   /* Mitsuba-style damped Newton: reuse Jacobian when step is rejected */
