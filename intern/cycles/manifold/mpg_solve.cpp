@@ -2032,13 +2032,13 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
    * - Secondary wi = normalize(primary - secondary) changes
    * - Secondary wo stays the same (secondary to light is independent of primary)
    *
-   * Note: Mitsuba convention is wi = x_prev - x_cur, so wi_secondary = primary - secondary.
-   * When primary moves by +dPdu, we need derivative_normalized(primary - secondary, +dPdu).
-   * But derivative_normalized(secondary - primary, -dPdu) = -derivative_normalized(primary - secondary, +dPdu),
-   * so we negate to get the correct sign.
+   * Mathematical note: wi_secondary = normalize(primary - secondary).
+   * When primary moves by +dPdu, the vector (primary - secondary) changes by +dPdu.
+   * derivative_normalized(secondary - primary, -dPdu) = derivative_normalized(primary - secondary, +dPdu)
+   * due to sign cancellation: normalize(-(v + dv)) = -normalize(v + dv), and the negations cancel.
    */
-  const float3 d_secondary_wi_du1 = -derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdu);
-  const float3 d_secondary_wi_dv1 = -derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdv);
+  const float3 d_secondary_wi_du1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdu);
+  const float3 d_secondary_wi_dv1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdv);
 
   float3 d_secondary_g_du1 = d_secondary_wi_du1;  // wo doesn't change
   float3 d_secondary_g_dv1 = d_secondary_wi_dv1;
