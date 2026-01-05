@@ -602,8 +602,11 @@ if constexpr (MPG_DEBUG) {
     h /= h_len;
   }
 
-  /* For directional constraint compatibility, also store old residual */
-  eval.residual = eval.dir_sl - spec_dir;
+  /* Mitsuba half-vector constraint: C = [dot(h, tangent_u), dot(h, tangent_v)]
+   * The residual is the half-vector itself, which gets projected onto surface tangents
+   * in evaluate_double_bounce() to form the 2D constraint per vertex.
+   * This matches the Jacobian formulation from Mitsuba's MPG implementation. */
+  eval.residual = h;
 }
 
 static bool smooth_normals_at_hit(KernelGlobals kg,
