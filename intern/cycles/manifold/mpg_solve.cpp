@@ -63,6 +63,7 @@ struct SpecularSurfaceGeometry {
 struct SpecularParameters {
   bool is_refraction = false;
   float base_eta = 1.0f;
+  bool backfacing = false;  /* True if ray hits back face (exiting for closed objects) */
   bool has_microfacet = false;
   MicrofacetBsdf microfacet = {};
   FresnelDielectricTint fresnel_dielectric_tint = {};
@@ -443,10 +444,10 @@ if constexpr (MPG_DEBUG::PARAMS) {
   }
 }
 
-  /* Determine exiting vs entering from dot product with geometric normal.
-   * For grazing incidence (dot ≈ 0), treat as entering (conservative choice). */
-  const float dot_n_ray = dot(refraction_normal, dir_ds);
-  const bool exiting = (dot_n_ray > 1e-7f);
+  /* Use backfacing flag for robust entering/exiting determination.
+   * SD_BACKFACING means ray hit back face, which for closed objects means exiting.
+   * This is more reliable than dot(normal, ray) for thin geometry. */
+  const bool exiting = params.backfacing;
 
   /* Orient normal to ensure it points toward the medium the ray came from.
    * This ensures cos_theta_i = -dot(dir_ds, oriented_normal) > 0.
@@ -1190,6 +1191,9 @@ if constexpr (MPG_DEBUG::PARAMS) {
     params.normal = shading_normal;
     params.has_normal = true;
   }
+  /* Store backfacing flag for robust entering/exiting determination.
+   * SD_BACKFACING is set by shader_setup_from_ray based on dot(Ng, wi) < 0. */
+  params.backfacing = (spec_sd.flag & SD_BACKFACING) != 0;
   return true;
 }
 
@@ -2421,21 +2425,19 @@ if constexpr (MPG_DEBUG::PARAMS) {
   const float3 wo = eval.dir_sl;
   float h_eta = params.is_refraction ? params.base_eta : 1.0f;
   if (params.is_refraction) {
-    /* Determine entering/exiting using the same logic as compute_specular().
-     * dir_ds points FROM receiver TO specular point (light propagation direction).
-     * If dot(normal, dir_ds) > 0, we're exiting the material.
+    /* Use backfacing flag from params for entering/exiting determination.
+     * This matches compute_specular() and is robust for thin geometry.
      *
      * CRITICAL: Half-vector eta is INVERSE of Snell's law eta!
      * - Snell's law: entering = 1/IOR, exiting = IOR
      * - Half-vector: entering = IOR, exiting = 1/IOR
      *
-     * Therefore, invert the logic compared to compute_specular. */
-    const bool exiting = dot(eval.normal, eval.dir_ds) > 0.0f;
-    if (exiting) {
-      /* Exiting: use inverse IOR for half-vector (opposite of Snell's law) */
+     * Therefore, invert when exiting (backfacing). */
+    if (params.backfacing) {
+      /* Exiting (backfacing): use inverse IOR for half-vector */
       h_eta = 1.0f / fmaxf(h_eta, 1e-6f);
     }
-    /* Entering: keep h_eta = base_eta (opposite of Snell's law) */
+    /* Entering (!backfacing): keep h_eta = base_eta */
   }
 
   /* Generalized half-vector: h = normalize(wi + eta * wo), negated for refraction.
@@ -2551,10 +2553,8 @@ if constexpr (MPG_DEBUG::PARAMS) {
     const float3 new_wo = new_eval.dir_sl;
     float new_h_eta = new_params.is_refraction ? new_params.base_eta : 1.0f;
     if (new_params.is_refraction) {
-      /* Use same entering/exiting logic as initial half-vector computation.
-       * Half-vector eta is INVERSE of Snell's law - see lines 2421-2438. */
-      const bool exiting = dot(new_eval.normal, new_eval.dir_ds) > 0.0f;
-      if (exiting) {
+      /* Use backfacing flag for entering/exiting - see lines 2426-2441. */
+      if (new_params.backfacing) {
         new_h_eta = 1.0f / fmaxf(new_h_eta, 1e-6f);
       }
     }
