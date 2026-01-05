@@ -2031,14 +2031,9 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
    * - Primary vertex position changes
    * - Secondary wi changes (primary to secondary direction changes)
    * - Secondary wo stays the same (secondary to light is independent of primary)
-   *
-   * Note: wi = normalize(primary - secondary), so when primary moves by +dPdu,
-   * we need derivative_normalized(primary - secondary, +dPdu).
-   * Computing derivative_normalized(secondary - primary, -dPdu) gives the negated result,
-   * so we negate it to get the correct sign.
    */
-  const float3 d_secondary_wi_du1 = -derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdu);
-  const float3 d_secondary_wi_dv1 = -derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdv);
+  const float3 d_secondary_wi_du1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdu);
+  const float3 d_secondary_wi_dv1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdv);
 
   float3 d_secondary_g_du1 = d_secondary_wi_du1;  // wo doesn't change
   float3 d_secondary_g_dv1 = d_secondary_wi_dv1;
@@ -2965,6 +2960,18 @@ if constexpr (MPG_DEBUG::NEWTON) {
         failure_code = MPG_FAILURE_JACOBIAN_ZERO;
         return false;
       }
+
+if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
+      if (iter == 0) {
+        printf("    Jacobian matrix J:\n");
+        printf("      [%8.4f %8.4f %8.4f %8.4f]\n", J[0][0], J[0][1], J[0][2], J[0][3]);
+        printf("      [%8.4f %8.4f %8.4f %8.4f]\n", J[1][0], J[1][1], J[1][2], J[1][3]);
+        printf("      [%8.4f %8.4f %8.4f %8.4f]\n", J[2][0], J[2][1], J[2][2], J[2][3]);
+        printf("      [%8.4f %8.4f %8.4f %8.4f]\n", J[3][0], J[3][1], J[3][2], J[3][3]);
+        printf("    Residual: [%8.4f %8.4f %8.4f %8.4f]\n",
+               eval.residual[0], eval.residual[1], eval.residual[2], eval.residual[3]);
+      }
+}
     }
 
     /* Apply step with current beta scaling (Mitsuba approach) */
