@@ -1780,12 +1780,21 @@ bool evaluate_double_bounce(const ShadingPoint &receiver,
 
   evaluate_specular(receiver, primary_seed, primary_geometry, primary_params, u1, v1, eval.primary);
   if (!isfinite_safe(eval.primary.distance_ds) || !(eval.primary.distance_ds > 1e-4f)) {
+if constexpr (MPG_DEBUG) {
+    printf("  evaluate_double_bounce FAIL: Primary distance_ds invalid (%.6e)\n", eval.primary.distance_ds);
+}
     return false;
   }
   if (!isfinite_safe(eval.primary.distance_sl) || !(eval.primary.distance_sl > 1e-4f)) {
+if constexpr (MPG_DEBUG) {
+    printf("  evaluate_double_bounce FAIL: Primary distance_sl invalid (%.6e)\n", eval.primary.distance_sl);
+}
     return false;
   }
   if (eval.primary.tir) {
+if constexpr (MPG_DEBUG) {
+    printf("  evaluate_double_bounce FAIL: Primary TIR\n");
+}
     return false;
   }
 
@@ -1800,23 +1809,38 @@ bool evaluate_double_bounce(const ShadingPoint &receiver,
 
   evaluate_specular(intermediate_point, secondary_seed, secondary_geometry, secondary_params, u2, v2, eval.secondary);
   if (!isfinite_safe(eval.secondary.distance_ds) || !(eval.secondary.distance_ds > 1e-4f)) {
+if constexpr (MPG_DEBUG) {
+    printf("  evaluate_double_bounce FAIL: Secondary distance_ds invalid (%.6e)\n", eval.secondary.distance_ds);
+}
     return false;
   }
   if (!isfinite_safe(eval.secondary.distance_sl) || !(eval.secondary.distance_sl > 1e-4f)) {
+if constexpr (MPG_DEBUG) {
+    printf("  evaluate_double_bounce FAIL: Secondary distance_sl invalid (%.6e)\n", eval.secondary.distance_sl);
+}
     return false;
   }
   if (eval.secondary.tir) {
+if constexpr (MPG_DEBUG) {
+    printf("  evaluate_double_bounce FAIL: Secondary TIR\n");
+}
     return false;
   }
 
   float3 tangent_u, tangent_v;
   if (!build_tangent_basis(eval.primary.dXdu, eval.primary.dXdv, tangent_u, tangent_v)) {
+if constexpr (MPG_DEBUG) {
+    printf("  evaluate_double_bounce FAIL: Primary tangent basis failed\n");
+}
     return false;
   }
   eval.residual[0] = dot(eval.primary.residual, tangent_u);
   eval.residual[1] = dot(eval.primary.residual, tangent_v);
 
   if (!build_tangent_basis(eval.secondary.dXdu, eval.secondary.dXdv, tangent_u, tangent_v)) {
+if constexpr (MPG_DEBUG) {
+    printf("  evaluate_double_bounce FAIL: Secondary tangent basis failed\n");
+}
     return false;
   }
   eval.residual[2] = dot(eval.secondary.residual, tangent_u);
