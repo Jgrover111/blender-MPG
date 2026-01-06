@@ -79,6 +79,10 @@ struct ThreadKernelGlobalsCPU : public KernelGlobalsCPU {
   openpgl::cpp::SampleStorage *opgl_sample_data_storage = nullptr;
   openpgl::cpp::Field *opgl_guiding_field = nullptr;
 
+  /* MPG_FIX: expose the active surface distribution without transferring
+   * ownership so kernel code can always access the current surface sampler. */
+  openpgl::cpp::SurfaceSamplingDistribution *opgl_surface_sampling_distribution_ptr = nullptr;
+
   /* Local data structures owned by the thread. */
   unique_ptr<openpgl::cpp::PathSegmentStorage> opgl_path_segment_storage;
   unique_ptr<openpgl::cpp::SurfaceSamplingDistribution> opgl_surface_sampling_distribution;
@@ -97,7 +101,7 @@ using KernelGlobals = const ThreadKernelGlobalsCPU *;
 #define kernel_data (kg->data)
 #if defined(WITH_PATH_GUIDING)
 #  define guiding_guiding_field kg->opgl_guiding_field
-#  define guiding_ssd kg->opgl_surface_sampling_distribution
+#  define guiding_ssd kg->opgl_surface_sampling_distribution_ptr
 #  define guiding_vsd kg->opgl_volume_sampling_distribution
 #endif
 

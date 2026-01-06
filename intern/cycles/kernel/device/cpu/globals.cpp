@@ -28,6 +28,7 @@ ThreadKernelGlobalsCPU::ThreadKernelGlobalsCPU(const KernelGlobalsCPU &kernel_gl
 #if defined(WITH_PATH_GUIDING)
   opgl_path_segment_storage = make_unique<openpgl::cpp::PathSegmentStorage>();
 #endif
+
 }
 
 void ThreadKernelGlobalsCPU::start_profiling()

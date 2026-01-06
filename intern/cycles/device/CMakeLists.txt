@@ -4,6 +4,10 @@
 
 set(INC
   ..
+  ../integrator
+  ../kernel
+  ../manifold
+  ../scene
 )
 
 set(INC_SYS )
@@ -34,6 +38,16 @@ set(SRC_CPU
   cpu/kernel.h
   cpu/kernel_function.h
 )
+
+if(WITH_CYCLES_MANIFOLD)
+  list(APPEND SRC_CPU
+          ../manifold/mpg.cpp
+          ../manifold/mpg_pdf.cpp
+          ../manifold/mpg_pgl_summary.cpp
+          ../manifold/mpg_seed.cpp
+          ../manifold/mpg_solve.cpp
+  )
+endif()
 
 set(SRC_CUDA
   cuda/device.cpp

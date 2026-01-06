@@ -169,6 +169,28 @@ def with_path_guiding():
     return _cycles.with_path_guiding
 
 
+_manifold_path_guiding_support = None
+
+
+def _ensure_manifold_path_guiding_support():
+    global _manifold_path_guiding_support
+
+    if _manifold_path_guiding_support is None:
+        try:
+            import _cycles
+        except ImportError:
+            _manifold_path_guiding_support = False
+        else:
+            _manifold_path_guiding_support = getattr(
+                _cycles, "with_manifold_path_guiding", False)
+
+    return _manifold_path_guiding_support
+
+
+def with_manifold_path_guiding():
+    return _ensure_manifold_path_guiding_support()
+
+
 def system_info():
     import _cycles
     return _cycles.system_info()
@@ -263,6 +285,15 @@ def list_render_passes(scene, srl):
         yield ("Guiding Color", "RGB", 'COLOR')
         yield ("Guiding Probability", "X", 'VALUE')
         yield ("Guiding Average Roughness", "X", 'VALUE')
+
+        if with_manifold_path_guiding():
+            yield ("MPG Summary", "XYZ", 'VECTOR')
+            yield ("MPG Gate Flags", "XYZ", 'VECTOR')
+            yield ("MPG Attempt", "XYZ", 'VECTOR')
+            yield ("MPG PDF Factors", "XYZ", 'VECTOR')
+            yield ("MPG Competing PDFs", "XYZ", 'VECTOR')
+            yield ("MPG MIS", "XYZ", 'VECTOR')
+            yield ("MPG Contribution", "RGB", 'COLOR')
 
 
 def register_passes(engine, scene, view_layer):

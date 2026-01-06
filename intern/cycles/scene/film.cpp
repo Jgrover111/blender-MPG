@@ -207,6 +207,15 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
   kfilm->pass_guiding_color = PASS_UNUSED;
   kfilm->pass_guiding_probability = PASS_UNUSED;
   kfilm->pass_guiding_avg_roughness = PASS_UNUSED;
+#if defined(WITH_CYCLES_DEBUG) && defined(WITH_CYCLES_MANIFOLD)
+  kfilm->pass_manifold_summary = PASS_UNUSED;
+  kfilm->pass_manifold_gate = PASS_UNUSED;
+  kfilm->pass_manifold_attempt = PASS_UNUSED;
+  kfilm->pass_manifold_pdf_factors = PASS_UNUSED;
+  kfilm->pass_manifold_competing_pdfs = PASS_UNUSED;
+  kfilm->pass_manifold_mis = PASS_UNUSED;
+  kfilm->pass_manifold_contribution = PASS_UNUSED;
+#endif
 
   bool have_cryptomatte = false;
   bool have_aov_color = false;
@@ -417,6 +426,29 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
       case PASS_GUIDING_AVG_ROUGHNESS:
         kfilm->pass_guiding_avg_roughness = kfilm->pass_stride;
         break;
+#if defined(WITH_CYCLES_DEBUG) && defined(WITH_CYCLES_MANIFOLD)
+      case PASS_MANIFOLD_SUMMARY:
+        kfilm->pass_manifold_summary = kfilm->pass_stride;
+        break;
+      case PASS_MANIFOLD_GATE:
+        kfilm->pass_manifold_gate = kfilm->pass_stride;
+        break;
+      case PASS_MANIFOLD_ATTEMPT:
+        kfilm->pass_manifold_attempt = kfilm->pass_stride;
+        break;
+      case PASS_MANIFOLD_PDF_FACTORS:
+        kfilm->pass_manifold_pdf_factors = kfilm->pass_stride;
+        break;
+      case PASS_MANIFOLD_COMPETING_PDFS:
+        kfilm->pass_manifold_competing_pdfs = kfilm->pass_stride;
+        break;
+      case PASS_MANIFOLD_MIS:
+        kfilm->pass_manifold_mis = kfilm->pass_stride;
+        break;
+      case PASS_MANIFOLD_CONTRIBUTION:
+        kfilm->pass_manifold_contribution = kfilm->pass_stride;
+        break;
+#endif
       default:
         assert(false);
         break;

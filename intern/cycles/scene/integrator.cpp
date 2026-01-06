@@ -90,6 +90,15 @@ NODE_DEFINE(Integrator)
               GUIDING_DIRECTIONAL_SAMPLING_TYPE_RIS);
   SOCKET_FLOAT(guiding_roughness_threshold, "Guiding Roughness Threshold", 0.05f);
 
+#ifdef WITH_CYCLES_MANIFOLD
+  SOCKET_BOOLEAN(manifold_guiding_enable, "Manifold Path Guiding", false);
+  SOCKET_INT(manifold_max_bounces, "Manifold Max Bounces", 2);
+  SOCKET_INT(manifold_iters, "Manifold Solver Iterations", 20);
+  SOCKET_FLOAT(manifold_gate_weight, "Manifold Gate Weight", 0.35f);
+  SOCKET_FLOAT(manifold_gate_kappa, "Manifold Gate Sharpness", 40.0f);
+  SOCKET_INT(manifold_seed_trials, "Manifold Seed Trials", 8);
+#endif
+
   SOCKET_BOOLEAN(caustics_reflective, "Reflective Caustics", true);
   SOCKET_BOOLEAN(caustics_refractive, "Refractive Caustics", true);
   SOCKET_FLOAT(filter_glossy, "Filter Glossy", 0.0f);
@@ -270,6 +279,22 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   kintegrator->guiding_distribution_type = guiding_params.type;
   kintegrator->guiding_directional_sampling_type = guiding_params.sampling_type;
   kintegrator->guiding_roughness_threshold = guiding_params.roughness_threshold;
+
+#ifdef WITH_CYCLES_MANIFOLD
+  /* Limit the manifold solver to at most two specular bounces as supported by the CPU prototype. */
+  const int clamped_manifold_bounces = clamp(manifold_max_bounces, 1, 2);
+  const int clamped_manifold_iterations = max(manifold_iters, 1);
+  const float clamped_gate_weight = clamp(manifold_gate_weight, 0.0f, 1.0f);
+  const float clamped_gate_kappa = max(manifold_gate_kappa, 0.0f);
+  const int clamped_seed_trials = clamp(manifold_seed_trials, 0, 1024);
+  const bool manifold_active = manifold_guiding_enable && kintegrator->use_guiding;
+  kintegrator->manifold_guiding_enable = manifold_active;
+  kintegrator->manifold_max_bounces = clamped_manifold_bounces;
+  kintegrator->manifold_max_iterations = clamped_manifold_iterations;
+  kintegrator->manifold_gate_weight = clamped_gate_weight;
+  kintegrator->manifold_gate_kappa = clamped_gate_kappa;
+  kintegrator->manifold_seed_trials = clamped_seed_trials;
+#endif
 
   kintegrator->sample_clamp_direct = (sample_clamp_direct == 0.0f) ? FLT_MAX :
                                                                      sample_clamp_direct * 3.0f;

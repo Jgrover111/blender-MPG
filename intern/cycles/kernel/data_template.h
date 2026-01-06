@@ -147,6 +147,15 @@ KERNEL_STRUCT_MEMBER(film, int, use_approximate_shadow_catcher)
 KERNEL_STRUCT_MEMBER(film, int, pass_guiding_color)
 KERNEL_STRUCT_MEMBER(film, int, pass_guiding_probability)
 KERNEL_STRUCT_MEMBER(film, int, pass_guiding_avg_roughness)
+#if defined(WITH_CYCLES_DEBUG) && defined(WITH_CYCLES_MANIFOLD)
+KERNEL_STRUCT_MEMBER(film, int, pass_manifold_summary)
+KERNEL_STRUCT_MEMBER(film, int, pass_manifold_gate)
+KERNEL_STRUCT_MEMBER(film, int, pass_manifold_attempt)
+KERNEL_STRUCT_MEMBER(film, int, pass_manifold_pdf_factors)
+KERNEL_STRUCT_MEMBER(film, int, pass_manifold_competing_pdfs)
+KERNEL_STRUCT_MEMBER(film, int, pass_manifold_mis)
+KERNEL_STRUCT_MEMBER(film, int, pass_manifold_contribution)
+#endif
 KERNEL_STRUCT_END(KernelFilm)
 
 /* Integrator. */
@@ -226,6 +235,15 @@ KERNEL_STRUCT_MEMBER(integrator, int, use_surface_guiding)
 KERNEL_STRUCT_MEMBER(integrator, int, use_volume_guiding)
 KERNEL_STRUCT_MEMBER(integrator, int, use_guiding_direct_light)
 KERNEL_STRUCT_MEMBER(integrator, int, use_guiding_mis_weights)
+
+#ifdef WITH_CYCLES_MANIFOLD
+KERNEL_STRUCT_MEMBER(integrator, int, manifold_guiding_enable)
+KERNEL_STRUCT_MEMBER(integrator, int, manifold_max_bounces)
+KERNEL_STRUCT_MEMBER(integrator, int, manifold_max_iterations)
+KERNEL_STRUCT_MEMBER(integrator, float, manifold_gate_weight)
+KERNEL_STRUCT_MEMBER(integrator, float, manifold_gate_kappa)
+KERNEL_STRUCT_MEMBER(integrator, int, manifold_seed_trials)
+#endif
 
 /* Padding. */
 KERNEL_STRUCT_MEMBER(integrator, int, pad1)

@@ -6,6 +6,8 @@
 
 #include "kernel/types.h"
 
+#include "util/math.h"
+
 CCL_NAMESPACE_BEGIN
 
 struct GuidingParams {
@@ -32,6 +34,13 @@ struct GuidingParams {
              (roughness_threshold == other.roughness_threshold) &&
              (deterministic == other.deterministic));
   }
+};
+
+struct GuideSummary {
+  float3 mean_dir = zero_float3();
+  float peak_weight = 0.0f;
+  float kappa = 0.0f;
+  float rbar = 0.0f;
 };
 
 CCL_NAMESPACE_END

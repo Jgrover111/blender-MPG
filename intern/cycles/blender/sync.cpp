@@ -514,6 +514,15 @@ void BlenderSync::sync_integrator(BL::ViewLayer &b_view_layer,
     integrator->set_guiding_roughness_threshold(get_float(cscene, "guiding_roughness_threshold"));
   }
 
+#ifdef WITH_CYCLES_MANIFOLD
+  integrator->set_manifold_guiding_enable(get_boolean(cscene, "manifold_guiding_enable"));
+  integrator->set_manifold_max_bounces(get_int(cscene, "manifold_max_bounces"));
+  integrator->set_manifold_iters(get_int(cscene, "manifold_iters"));
+  integrator->set_manifold_gate_weight(get_float(cscene, "manifold_gate_weight"));
+  integrator->set_manifold_gate_kappa(get_float(cscene, "manifold_gate_kappa"));
+  integrator->set_manifold_seed_trials(get_int(cscene, "manifold_seed_trials"));
+#endif
+
   DenoiseParams denoise_params = get_denoise_params(
       b_scene, b_view_layer, background, denoise_device_info);
 
@@ -715,6 +724,15 @@ static bool get_known_pass_type(BL::RenderPass &b_pass, PassType &type, PassMode
   MAP_PASS("Guiding Color", PASS_GUIDING_COLOR, false);
   MAP_PASS("Guiding Probability", PASS_GUIDING_PROBABILITY, false);
   MAP_PASS("Guiding Average Roughness", PASS_GUIDING_AVG_ROUGHNESS, false);
+#if defined(WITH_CYCLES_DEBUG) && defined(WITH_CYCLES_MANIFOLD)
+  MAP_PASS("MPG Summary", PASS_MANIFOLD_SUMMARY, false);
+  MAP_PASS("MPG Gate Flags", PASS_MANIFOLD_GATE, false);
+  MAP_PASS("MPG Attempt", PASS_MANIFOLD_ATTEMPT, false);
+  MAP_PASS("MPG PDF Factors", PASS_MANIFOLD_PDF_FACTORS, false);
+  MAP_PASS("MPG Competing PDFs", PASS_MANIFOLD_COMPETING_PDFS, false);
+  MAP_PASS("MPG MIS", PASS_MANIFOLD_MIS, false);
+  MAP_PASS("MPG Contribution", PASS_MANIFOLD_CONTRIBUTION, false);
+#endif
 
   if (string_startswith(name, cryptomatte_prefix)) {
     type = PASS_CRYPTOMATTE;

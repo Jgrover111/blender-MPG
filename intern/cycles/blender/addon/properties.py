@@ -758,6 +758,53 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=0.05,
     )
 
+    if engine.with_manifold_path_guiding():
+        manifold_guiding_enable: BoolProperty(
+            name="Manifold Path Guiding",
+            description="Enable manifold path guiding for specular caustic connections",
+            default=False,
+        )
+        manifold_max_bounces: IntProperty(
+            name="Max Bounces",
+            description=(
+                "Maximum number of specular bounces traced by manifold path guiding. "
+                "Values above 2 are clamped by the solver"
+            ),
+            min=1,
+            max=2,
+            default=1,
+        )
+        manifold_iters: IntProperty(
+            name="Solver Iterations",
+            description="Maximum iterations for the manifold solver",
+            min=1, soft_max=32,
+            default=6,
+        )
+        manifold_gate_weight: FloatProperty(
+            name="Gate Weight",
+            description="Minimum OpenPGL peak weight required to attempt manifold path guiding",
+            min=0.0, max=1.0,
+            default=0.35,
+        )
+        manifold_gate_kappa: FloatProperty(
+            name="Gate Sharpness",
+            description="Minimum OpenPGL concentration required to attempt manifold path guiding",
+            min=0.0,
+            soft_max=256.0,
+            default=40.0,
+        )
+        manifold_seed_trials: IntProperty(
+            name="Seed Trials",
+            description=(
+                "Number of extra Bernoulli trials to estimate the probability of re-sampling "
+                "an equivalent manifold seed"
+            ),
+            min=0,
+            max=1024,
+            default=8,
+        )
+
+
     max_bounces: IntProperty(
         name="Max Bounces",
         description="Total maximum number of bounces",

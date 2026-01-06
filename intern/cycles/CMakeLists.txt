@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standalone or with Blender
+option(WITH_CYCLES_MANIFOLD "Build Cycles with manifold path guiding support (CPU only)" ON)
+
 if(NOT WITH_BLENDER)
   set(CYCLES_INSTALL_PATH ${CMAKE_INSTALL_PREFIX})
 else()
@@ -362,6 +364,10 @@ if(WITH_OPENCOLORIO)
     SYSTEM
     ${OPENCOLORIO_INCLUDE_DIRS}
   )
+endif()
+
+if(WITH_CYCLES_MANIFOLD)
+  add_definitions(-DWITH_CYCLES_MANIFOLD)
 endif()
 
 if(WITH_CYCLES_PATH_GUIDING)

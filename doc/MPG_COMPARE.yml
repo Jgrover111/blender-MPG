@@ -1,0 +1,23 @@
+pairs:
+  - ours: intern/cycles/manifold/mpg_seed.cpp::mpg_generate_seed
+    ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.cpp::GuidedManifoldSampler::sample_seed_path
+  - ours: intern/cycles/manifold/mpg_solve.cpp::mpg_solve_single_bounce
+    ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.h::Manifold_Walk::newton_solver
+  - ours: intern/cycles/manifold/mpg_solve.cpp::mpg_solve_double_bounce
+    ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.h::Manifold_Walk::newton_solver
+  - ours: intern/cycles/manifold/mpg_pdf.cpp::mpg_evaluate_pdf
+    ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.cpp::GuidedManifoldSampler::specular_manifold_sampling_impl
+  - ours: intern/cycles/manifold/mpg.cpp::mpg_try_connect
+    ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.cpp::ManifoldPathGuidingIntegrator::specular_manifold_sampling
+  - ours: intern/cycles/kernel/integrator/shade_surface.h::integrate_surface_direct_light (MPG block)
+    ref:  extern/mpg_ref/mitsuba/src/integrators/MPG/manifold_path_guiding.cpp::ManifoldPathGuidingIntegrator::sample
+checklist:
+  - When is the light pdf evaluated (before/after moving the light sample)?
+  - Exact formula for technique pdf: p_mpg = p_seed * p_light(spec_pt) * J (receiver solid angle).
+  - `mpg_try_connect` stores `result.light_pdf = p_light(spec_pt) * J`, matching the receiver-side technique pdf.
+  - Which pdfs are in the MIS denominator (p_bsdf, p_light(NEE), p_mpg) and are they all same measure?
+  - Where is the Jacobian applied (once, not twice)?
+  - Does the two-bounce solver populate both specular vertices and accumulate `J_S1 * J_S2`?
+  - Is visibility traced across all segments in multi-bounce chains?
+  - Are receiver labels singular or non-singular?
+  - Is visibility/shadow test & accumulation identical to NEE?

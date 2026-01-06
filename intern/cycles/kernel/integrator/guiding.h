@@ -472,6 +472,38 @@ ccl_device_forceinline void guiding_record_direct_light(KernelGlobals kg,
 #endif
 }
 
+ccl_device_forceinline void guiding_record_manifold_direct_light(KernelGlobals kg,
+                                                                 IntegratorState state,
+                                                                 const Spectrum contribution,
+                                                                 const float mis_weight)
+{
+#if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 1
+  if (!kernel_data.integrator.train_guiding) {
+    return;
+  }
+
+  assert((INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SHADOW_CATCHER_PASS) == 0);
+
+  if (state->guiding.path_segment) {
+    const Spectrum throughput = INTEGRATOR_STATE(state, path, throughput);
+    const Spectrum radiance = safe_divide_color(contribution, throughput);
+    const float3 radiance_rgb = spectrum_to_rgb(radiance);
+
+    if (mis_weight == 0.0f) {
+      openpgl::cpp::AddScatteredContribution(state->guiding.path_segment,
+                                             guiding_vec3f(radiance_rgb));
+    }
+    else if (std::isfinite(mis_weight)) {
+      openpgl::cpp::SetDirectContribution(state->guiding.path_segment,
+                                          guiding_vec3f(radiance_rgb / mis_weight));
+      openpgl::cpp::SetMiWeight(state->guiding.path_segment, mis_weight);
+    }
+  }
+#else
+  UNUSED_VARS(kg, state, contribution, mis_weight);
+#endif
+}
+
 /* Record Russian Roulette */
 /* Records the probability of continuing the path at the current path segment. */
 ccl_device_forceinline void guiding_record_continuation_probability(
@@ -546,18 +578,53 @@ ccl_device_forceinline void guiding_write_debug_passes(KernelGlobals kg,
 
 /* Guided BSDFs */
 
+ccl_device_forceinline bool guiding_surface_init_distribution(KernelGlobals kg,
+                                                              const float3 P,
+                                                              float rand)
+{
+#if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4 && !defined(__KERNEL_GPU__)
+  if (!kg->opgl_surface_sampling_distribution) {
+    return false;
+  }
+  return guiding_ssd->Init(guiding_guiding_field, guiding_point3f(P), rand);
+#else
+  UNUSED_VARS(kg, P, rand);
+  return false;
+#endif
+}
+
+ccl_device_forceinline void guiding_surface_apply_cosine_product(KernelGlobals kg, const float3 N)
+{
+#if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4 && !defined(__KERNEL_GPU__)
+  (void)kg;
+  guiding_ssd->ApplyCosineProduct(guiding_point3f(N));
+#else
+  UNUSED_VARS(kg, N);
+#endif
+}
+
+ccl_device_forceinline bool guiding_surface_prepare_distribution(KernelGlobals kg,
+                                                                 const float3 P,
+                                                                 const float3 N,
+                                                                 float rand)
+{
+#if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4 && !defined(__KERNEL_GPU__)
+  if (guiding_surface_init_distribution(kg, P, rand)) {
+    guiding_surface_apply_cosine_product(kg, N);
+    return true;
+  }
+#else
+  UNUSED_VARS(kg, P, N, rand);
+#endif
+  return false;
+}
+
 ccl_device_forceinline bool guiding_bsdf_init(KernelGlobals kg,
                                               const float3 P,
                                               const float3 N,
                                               ccl_private float &rand)
 {
-#if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
-  if (guiding_ssd->Init(guiding_guiding_field, guiding_point3f(P), rand)) {
-    guiding_ssd->ApplyCosineProduct(guiding_point3f(N));
-    return true;
-  }
-#endif
-  return false;
+  return guiding_surface_prepare_distribution(kg, P, N, rand);
 }
 
 ccl_device_forceinline float guiding_bsdf_sample(KernelGlobals kg,
