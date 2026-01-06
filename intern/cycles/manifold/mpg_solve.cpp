@@ -28,6 +28,12 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Thread-local storage for current sample number (set by mpg_try_connect) */
+static thread_local int g_current_sample = -1;
+
+/* Forward declaration for debug helper (defined after MPG_DEBUG struct) */
+static inline bool debug_print_enabled();
+
 /* Debug printing toggles - set categories to true to enable specific debug output */
 struct MPG_DEBUG {
   /* Sample number filter: Only print debug output for this sample number.
@@ -54,17 +60,14 @@ struct MPG_DEBUG {
   static inline bool SUCCESS() { return SUCCESS_BASE && debug_print_enabled(); }
 };
 
-/* Thread-local storage for current sample number (set by mpg_try_connect) */
-static thread_local int g_current_sample = -1;
+/* Helper to check if debug printing is enabled for current sample */
+static inline bool debug_print_enabled() {
+  return (MPG_DEBUG::SAMPLE_FILTER == -1) || (g_current_sample == MPG_DEBUG::SAMPLE_FILTER);
+}
 
 /* Setter for sample number (called from mpg.cpp to avoid thread_local extern issues) */
 void mpg_set_current_sample(int sample) {
   g_current_sample = sample;
-}
-
-/* Helper to check if debug printing is enabled for current sample */
-static inline bool debug_print_enabled() {
-  return (MPG_DEBUG::SAMPLE_FILTER == -1) || (g_current_sample == MPG_DEBUG::SAMPLE_FILTER);
 }
 
 namespace {
