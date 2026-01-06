@@ -44,7 +44,7 @@ struct MPG_DEBUG {
   /* Base flags - these are AND'ed with sample filter automatically via helper functions below */
   static constexpr bool SEED_BASE = false;
   static constexpr bool GEOMETRY_BASE = false;
-  static constexpr bool PARAMS_BASE = false;
+  static constexpr bool PARAMS_BASE = true;
   static constexpr bool NEWTON_BASE = true;
   static constexpr bool NEWTON_DETAIL_BASE = true;
   static constexpr bool EVAL_FAIL_BASE = true;
@@ -1115,7 +1115,21 @@ if (MPG_DEBUG::PARAMS()) {
     selected_refraction = false;
   }
   else if (microfacet == nullptr && refraction_microfacet != nullptr && reflection_microfacet != nullptr) {
-    if (prefer_reflection) {
+    /* If both microfacets point to the same closure, it's a glass BSDF that supports both
+     * reflection and transmission via Fresnel. Glass should ALWAYS use refraction mode with
+     * proper IOR in the half-vector constraint, regardless of which Fresnel lobe we sample. */
+    const bool is_glass_closure = (refraction_microfacet == reflection_microfacet);
+
+    if (is_glass_closure) {
+      /* Glass: Always use refraction mode with IOR. The prefer_reflection flag only affects
+       * which Fresnel lobe is sampled (reflected vs transmitted ray), not the constraint mode. */
+      microfacet = refraction_microfacet;
+      selected_refraction = true;
+if (MPG_DEBUG::PARAMS()) {
+      printf("  -> Glass closure detected: forcing refraction mode with IOR=%.6f\n", refraction_microfacet->ior);
+}
+    }
+    else if (prefer_reflection) {
       microfacet = reflection_microfacet;
       selected_refraction = false;
     }
