@@ -44,10 +44,10 @@ struct MPG_DEBUG {
   /* Base flags - these are AND'ed with sample filter automatically via helper functions below */
   static constexpr bool SEED_BASE = false;
   static constexpr bool GEOMETRY_BASE = false;
-  static constexpr bool PARAMS_BASE = true;
-  static constexpr bool NEWTON_BASE = true;
-  static constexpr bool NEWTON_DETAIL_BASE = true;
-  static constexpr bool EVAL_FAIL_BASE = true;
+  static constexpr bool PARAMS_BASE = false;
+  static constexpr bool NEWTON_BASE = false;
+  static constexpr bool NEWTON_DETAIL_BASE = false;
+  static constexpr bool EVAL_FAIL_BASE = false;
   static constexpr bool SUCCESS_BASE = false;
 
   /* Helper functions that combine flag with sample filter - use these in if statements */
