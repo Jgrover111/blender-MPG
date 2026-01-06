@@ -170,19 +170,47 @@ MpgResult mpg_try_connect(KernelGlobals kg,
     return result;
   }
 
-  /* MPG can be invoked from any BSDF type. The seed generation logic in mpg_seed.cpp
-   * handles different closure types appropriately:
-   * - Glass closures: Dual mode (can seed both reflection and transmission paths)
-   * - Transmission closures: Transmission only
-   * - Diffuse/glossy closures: Dual mode
+  /* MPG implements the Mitsuba reference "Manifold Path Guiding" (SIGGRAPH Asia 2023).
+   * The technique handles paths with structure: Non-specular → [Specular chain] → Non-specular
    *
-   * Only reject truly unsupported closures like transparent (which has no surface interaction).
-   * Ray portal is explicitly allowed as it has specialized handling. */
+   * MPG MUST be invoked from NON-SPECULAR surfaces only (diffuse, glossy with roughness).
+   * It should NOT be called from specular surfaces like glass, mirrors, or perfect refraction.
+   *
+   * The "non-specular separators" in the paper are the starting and ending surfaces that
+   * bound the specular chain. The specular surfaces themselves are found by the solver,
+   * not provided as the invocation point.
+   *
+   * Reject:
+   * - Transparent/portal (except ray portal with specialized handling)
+   * - Glass closures (specular, handled as intermediate vertices by solver)
+   * - Pure specular reflection/refraction (delta BSDFs)
+   *
+   * Reference: https://dl.acm.org/doi/abs/10.1145/3618360 */
   const bool is_singular = CLOSURE_IS_BSDF_SINGULAR(bsdf.type);
+  const bool is_glass = CLOSURE_IS_GLASS(bsdf.type);
 
   if (is_singular && !CLOSURE_IS_RAY_PORTAL(bsdf.type)) {
     result.failure_code = MPG_FAILURE_UNSUPPORTED;
     return result;
+  }
+
+  if (is_glass) {
+    /* Glass surfaces are specular - they should be found by the solver as intermediate
+     * vertices, not used as the starting "non-specular separator" for MPG. */
+    result.failure_code = MPG_FAILURE_UNSUPPORTED;
+    return result;
+  }
+
+  /* Also reject delta (perfectly specular) microfacet surfaces.
+   * These have alpha_x, alpha_y ≈ 0 and behave like perfect mirrors/refractors.
+   * Only roughened surfaces (glossy with alpha > 0) are valid non-specular separators. */
+  if (CLOSURE_IS_BSDF_MICROFACET(bsdf.type)) {
+    const MicrofacetBsdf *mf = reinterpret_cast<const MicrofacetBsdf *>(&bsdf);
+    const bool is_delta = (mf->alpha_x <= 1e-6f) && (mf->alpha_y <= 1e-6f);
+    if (is_delta) {
+      result.failure_code = MPG_FAILURE_UNSUPPORTED;
+      return result;
+    }
   }
 
   const bool gate_active = (opt.gate_w > 0.0f) || (opt.gate_kappa > 0.0f);
