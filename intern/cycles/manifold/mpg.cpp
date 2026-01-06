@@ -34,10 +34,6 @@ struct MPG_DEBUG {
   static constexpr bool SUCCESS = false;
 };
 
-/* External reference to sample filter (defined in mpg_solve.cpp)
- * Note: Remove thread_local keyword from extern declaration - it's only on the definition */
-extern int g_current_sample;
-
 namespace {
 
 constexpr int MPG_BOOTSTRAP_RNG_OFFSET = 128;
@@ -159,8 +155,8 @@ MpgResult mpg_try_connect(KernelGlobals kg,
                           const int bounce,
                           RNGState &rng_state)
 {
-  /* Set current sample number for debug filtering */
-  g_current_sample = rng_state.sample;
+  /* Set current sample number for debug filtering (uses setter to avoid thread_local extern issues) */
+  mpg_set_current_sample(rng_state.sample);
 
   MpgResult result{};
   result.failure_code = MPG_FAILURE_NONE;
