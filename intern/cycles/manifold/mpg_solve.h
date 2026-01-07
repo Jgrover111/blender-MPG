@@ -40,4 +40,7 @@ float mpg_compute_segment_visibility(KernelGlobals kg,
                                      int skip_light_object,
                                      int skip_light_prim);
 
+/* Debug helper: Set current sample number for filtered debug output */
+void mpg_set_current_sample(int sample);
+
 CCL_NAMESPACE_END

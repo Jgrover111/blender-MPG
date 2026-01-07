@@ -28,29 +28,47 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Thread-local storage for current sample number (set by mpg_try_connect) */
+static thread_local int g_current_sample = -1;
+
+/* Forward declaration for debug helper (defined after MPG_DEBUG struct) */
+static inline bool debug_print_enabled();
+
 /* Debug printing toggles - set categories to true to enable specific debug output */
 struct MPG_DEBUG {
-  /* Seed generation and acceptance/rejection */
-  static constexpr bool SEED = false;
+  /* Sample number filter: Only print debug output for this sample number.
+   * Set to -1 to print all samples, or a specific number (e.g., 127 for sample 127).
+   * Example: SAMPLE_FILTER = 127 means only print on sample 127 (0-indexed). */
+  static constexpr int SAMPLE_FILTER = 127;  // -1 = all samples, or set to specific sample number
 
-  /* Surface geometry loading (load_surface_geometry) */
-  static constexpr bool GEOMETRY = false;
+  /* Base flags - these are AND'ed with sample filter automatically via helper functions below */
+  static constexpr bool SEED_BASE = true;
+  static constexpr bool GEOMETRY_BASE = true;
+  static constexpr bool PARAMS_BASE = true;
+  static constexpr bool NEWTON_BASE = true;
+  static constexpr bool NEWTON_DETAIL_BASE = true;
+  static constexpr bool EVAL_FAIL_BASE = true;
+  static constexpr bool SUCCESS_BASE = true;
 
-  /* Parameter extraction and specular evaluation (specular_parameters, compute_specular, evaluate_specular) */
-  static constexpr bool PARAMS = false;
-
-  /* Newton solver high-level progress (start, convergence, final status) */
-  static constexpr bool NEWTON = false;
-
-  /* Newton solver detailed steps (delta values, projection, rejection paths) */
-  static constexpr bool NEWTON_DETAIL = false;
-
-  /* Detailed failure reasons from evaluate_double_bounce */
-  static constexpr bool EVAL_FAIL = false;
-
-  /* Final success handoff to integrator */
-  static constexpr bool SUCCESS = false;
+  /* Helper functions that combine flag with sample filter - use these in if statements */
+  static inline bool SEED() { return SEED_BASE && debug_print_enabled(); }
+  static inline bool GEOMETRY() { return GEOMETRY_BASE && debug_print_enabled(); }
+  static inline bool PARAMS() { return PARAMS_BASE && debug_print_enabled(); }
+  static inline bool NEWTON() { return NEWTON_BASE && debug_print_enabled(); }
+  static inline bool NEWTON_DETAIL() { return NEWTON_DETAIL_BASE && debug_print_enabled(); }
+  static inline bool EVAL_FAIL() { return EVAL_FAIL_BASE && debug_print_enabled(); }
+  static inline bool SUCCESS() { return SUCCESS_BASE && debug_print_enabled(); }
 };
+
+/* Helper to check if debug printing is enabled for current sample */
+static inline bool debug_print_enabled() {
+  return (MPG_DEBUG::SAMPLE_FILTER == -1) || (g_current_sample == MPG_DEBUG::SAMPLE_FILTER);
+}
+
+/* Setter for sample number (called from mpg.cpp to avoid thread_local extern issues) */
+void mpg_set_current_sample(int sample) {
+  g_current_sample = sample;
+}
 
 namespace {
 struct SpecularSurfaceGeometry {
@@ -63,6 +81,7 @@ struct SpecularSurfaceGeometry {
 struct SpecularParameters {
   bool is_refraction = false;
   float base_eta = 1.0f;
+  bool backfacing = false;  /* True if ray hits back face (exiting for closed objects) */
   bool has_microfacet = false;
   MicrofacetBsdf microfacet = {};
   FresnelDielectricTint fresnel_dielectric_tint = {};
@@ -434,7 +453,7 @@ float3 compute_specular(const float3 &dir_ds,
    * For refraction: dot(normal, ray) > 0 means exiting, < 0 means entering. */
   const float3 refraction_normal = normal;
 
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
   if (params.is_refraction) {
     printf("MPG DEBUG compute_specular: refraction direction determination\n");
     printf("  normal: (%.6f, %.6f, %.6f)\n", normal.x, normal.y, normal.z);
@@ -443,10 +462,10 @@ if constexpr (MPG_DEBUG::PARAMS) {
   }
 }
 
-  /* Determine exiting vs entering from dot product with geometric normal.
-   * For grazing incidence (dot ≈ 0), treat as entering (conservative choice). */
-  const float dot_n_ray = dot(refraction_normal, dir_ds);
-  const bool exiting = (dot_n_ray > 1e-7f);
+  /* Use backfacing flag for robust entering/exiting determination.
+   * SD_BACKFACING means ray hit back face, which for closed objects means exiting.
+   * This is more reliable than dot(normal, ray) for thin geometry. */
+  const bool exiting = params.backfacing;
 
   /* Orient normal to ensure it points toward the medium the ray came from.
    * This ensures cos_theta_i = -dot(dir_ds, oriented_normal) > 0.
@@ -568,7 +587,7 @@ void evaluate_specular(const ShadingPoint &D,
   else {
     /* Use precomputed face normal from load_surface_geometry - don't recompute! */
     eval.normal = geometry.normals[0];
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG DEBUG evaluate_specular: Using flat shading normal\n");
     printf("  geometry.normals[0]: (%.6f, %.6f, %.6f)\n",
            geometry.normals[0].x, geometry.normals[0].y, geometry.normals[0].z);
@@ -629,7 +648,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
    * This matches the Jacobian formulation from Mitsuba's MPG implementation. */
   eval.residual = h;
 
-if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
   const float dot_h_n = dot(h, eval.normal);
   printf("    Half-vector: h=(%.4f,%.4f,%.4f), dot(h,n)=%.4f, refract=%d, eta=%.4f\n",
          h.x, h.y, h.z, dot_h_n, eval.refractive, h_eta);
@@ -675,7 +694,7 @@ bool specular_parameters_from_surface(KernelGlobals kg,
    * For thin geometry (solidified planes), vertices can be very close together.
    * Only prevent exact zero for safe normalization. */
   if (!(distance > 1e-12f)) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG DEBUG specular_parameters: distance too small (%.12f)\n", distance);
 }
     return false;
@@ -717,7 +736,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
   const MicrofacetBsdf *refraction_microfacet = nullptr;
   const bool shader_reports_transmission = (spec_sd.flag & SD_BSDF_HAS_TRANSMISSION) != 0;
 
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
   /* Closure details will be shown at function end */
 }
 
@@ -767,7 +786,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
   const bool tau_hint_valid = (seed.tau_count > bounce_index);
   bool force_transmission = false;
   bool force_reflection = false;
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
   printf("MPG DEBUG specular_parameters: Selection criteria\n");
   printf("  bounce_index: %d\n", bounce_index);
   printf("  seed.scatter: %d (0=none, 1=refraction, 2=reflection)\n", (int)seed.scatter);
@@ -780,19 +799,19 @@ if constexpr (MPG_DEBUG::PARAMS) {
   if (tau_hint_valid) {
     force_transmission = get_chaintype_bit(seed.tau_bits, bounce_index);
     force_reflection = !force_transmission;
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("  -> TAU HINT: %s\n", force_transmission ? "FORCE TRANSMISSION" : "FORCE REFLECTION");
 }
   }
   else if (seed.scatter == MPG_SEED_SCATTER_REFRACTION) {
     force_transmission = true;
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("  -> SEED SCATTER: FORCE TRANSMISSION\n");
 }
   }
   else if (seed.scatter == MPG_SEED_SCATTER_REFLECTION) {
     force_reflection = true;
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("  -> SEED SCATTER: FORCE REFLECTION\n");
 }
   }
@@ -806,7 +825,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
     /* Compare directions in the shading-normal frame (hemisphere_normal) to detect interface crossings. */
     const float dot_in = dot(hemisphere_normal, -ray_dir);
     const float dot_light = dot(hemisphere_normal, light_dir);
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG DEBUG specular_parameters: hemisphere test\n");
     printf("  hemisphere_normal: (%.6f, %.6f, %.6f)\n",
            hemisphere_normal.x, hemisphere_normal.y, hemisphere_normal.z);
@@ -816,7 +835,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
     printf("  dot_light = dot(normal, light_dir): %.6f\n", dot_light);
 }
     if ((dot_in < 0.0f && dot_light > 0.0f) || (dot_in > 0.0f && dot_light < 0.0f)) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
       printf("  -> FORCING TRANSMISSION (opposite hemispheres)\n");
 }
       force_transmission = true;
@@ -825,7 +844,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
     else if ((dot_in > 0.0f && dot_light > 0.0f) || (dot_in < 0.0f && dot_light < 0.0f)) {
       /* When both rays occupy the same half-space the Mitsuba reference prefers
        * the reflective branch even if the seed requested refraction. */
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
       printf("  -> PREFERRING REFLECTION (same hemisphere)\n");
 }
       prefer_reflection_from_geometry = true;
@@ -871,7 +890,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
   }
 
   auto log_forced_scatter_mismatch = [&](const char *requested, const char *fallback) {
-    if constexpr (MPG_DEBUG::PARAMS) {
+    if (MPG_DEBUG::PARAMS()) {
       if (!has_forced_scatter) {
         return;
       }
@@ -908,7 +927,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
     const bool is_micro = CLOSURE_IS_BSDF_MICROFACET(closure->type);
     const bool is_singular = CLOSURE_IS_BSDF_SINGULAR(closure->type);
 
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG DEBUG specular_parameters: Closure %d\n", i);
     printf("  Type: %d, is_bsdf=1, is_glass=%d, is_micro=%d, is_singular=%d, is_trans=%d\n",
            (int)closure->type, is_glass, is_micro, is_singular, is_trans);
@@ -916,7 +935,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
     /* Glass BSDFs are specular and compatible with MPG.
      * CLOSURE_IS_BSDF_SINGULAR only includes transparent/portal, not glass. */
     if (!(is_micro || is_singular || is_glass)) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
       printf("  -> REJECTED: Not specular (not micro, singular, or glass)\n");
 }
       found_non_specular_bsdf = true;
@@ -929,7 +948,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
       const float ax = fmaxf(mf->alpha_x, 0.0f);
       const float ay = fmaxf(mf->alpha_y, 0.0f);
       const bool delta_like = (ax <= 1.0e-6f) && (ay <= 1.0e-6f);
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
       printf("  Microfacet: alpha_x=%.9f, alpha_y=%.9f, ior=%.6f, delta_like=%d\n",
              ax, ay, mf->ior, delta_like);
 }
@@ -947,19 +966,19 @@ if constexpr (MPG_DEBUG::PARAMS) {
         reports_transmission = fabsf(mf->ior) > 1.0f + 1.0e-6f;
       }
 
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
       printf("  reports_reflection=%d, reports_transmission=%d\n",
              reports_reflection, reports_transmission);
 }
       if (reports_transmission) {
         refraction_microfacet = mf;
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
         printf("  -> Set refraction_microfacet\n");
 }
       }
       if (reports_reflection) {
         reflection_microfacet = mf;
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
         printf("  -> Set reflection_microfacet\n");
 }
       }
@@ -1096,7 +1115,21 @@ if constexpr (MPG_DEBUG::PARAMS) {
     selected_refraction = false;
   }
   else if (microfacet == nullptr && refraction_microfacet != nullptr && reflection_microfacet != nullptr) {
-    if (prefer_reflection) {
+    /* If both microfacets point to the same closure, it's a glass BSDF that supports both
+     * reflection and transmission via Fresnel. Glass should ALWAYS use refraction mode with
+     * proper IOR in the half-vector constraint, regardless of which Fresnel lobe we sample. */
+    const bool is_glass_closure = (refraction_microfacet == reflection_microfacet);
+
+    if (is_glass_closure) {
+      /* Glass: Always use refraction mode with IOR. The prefer_reflection flag only affects
+       * which Fresnel lobe is sampled (reflected vs transmitted ray), not the constraint mode. */
+      microfacet = refraction_microfacet;
+      selected_refraction = true;
+if (MPG_DEBUG::PARAMS()) {
+      printf("  -> Glass closure detected: forcing refraction mode with IOR=%.6f\n", refraction_microfacet->ior);
+}
+    }
+    else if (prefer_reflection) {
       microfacet = reflection_microfacet;
       selected_refraction = false;
     }
@@ -1106,7 +1139,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
     }
   }
   if (microfacet == nullptr) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("----------------------------------------\n");
     printf("ERROR: No suitable BSDF for MPG!\n");
     printf("  Total closures evaluated: %d\n", spec_sd.num_closure);
@@ -1140,7 +1173,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
         params.base_eta = 1.0f;
       }
       else {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
         printf("MPG DEBUG specular_parameters: refraction eta invalid (%.6f), no reflection fallback\n", eta);
 }
         return false;
@@ -1190,6 +1223,9 @@ if constexpr (MPG_DEBUG::PARAMS) {
     params.normal = shading_normal;
     params.has_normal = true;
   }
+  /* Store backfacing flag for robust entering/exiting determination.
+   * SD_BACKFACING is set by shader_setup_from_ray based on dot(Ng, wi) < 0. */
+  params.backfacing = (spec_sd.flag & SD_BACKFACING) != 0;
   return true;
 }
 
@@ -1239,7 +1275,7 @@ bool load_surface_geometry(KernelGlobals kg,
     if (is_zero(face_normal)) {
       return false;
     }
-if constexpr (MPG_DEBUG::GEOMETRY) {
+if (MPG_DEBUG::GEOMETRY()) {
     const float3 mesh_normal = safe_normalize(geometry.normals[0]);
     printf("MPG DEBUG load_surface_geometry: Flat shading for object %d, prim %d\n", object, prim);
     printf("  Mesh normals (IGNORED):\n");
@@ -1549,7 +1585,7 @@ bool build_tangent_basis(const float3 &dXdu, const float3 &dXdv, float3 &tangent
   tangent_u = dXdu;
   const float len_u = len(tangent_u);
   if (!(len_u > 0.0f)) {
-if constexpr (MPG_DEBUG::GEOMETRY) {
+if (MPG_DEBUG::GEOMETRY()) {
     printf("MPG DEBUG build_tangent_basis: dXdu is zero-length\n");
 }
     return false;
@@ -1559,7 +1595,7 @@ if constexpr (MPG_DEBUG::GEOMETRY) {
   tangent_v = dXdv - tangent_u * dot(tangent_u, dXdv);
   const float len_v = len(tangent_v);
   if (!(len_v > 0.0f)) {
-if constexpr (MPG_DEBUG::GEOMETRY) {
+if (MPG_DEBUG::GEOMETRY()) {
     printf("MPG DEBUG build_tangent_basis: tangent_v is zero after Gram-Schmidt\n");
     printf("  dXdu=[%.9f, %.9f, %.9f] len=%.12f\n", dXdu.x, dXdu.y, dXdu.z, len_u);
     printf("  dXdv=[%.9f, %.9f, %.9f] len=%.12f\n", dXdv.x, dXdv.y, dXdv.z, len(dXdv));
@@ -1629,7 +1665,7 @@ bool trace_secondary_seed(KernelGlobals kg,
    * The entering/exiting determination happens in compute_specular() using dot(normal, ray). */
   float3 specular_normal = primary_normal;
 
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
   printf("----------------------------------------\n");
   printf("PRIMARY VERTEX COMPUTED:\n");
   printf("  Position: (%.6f, %.6f, %.6f)\n", primary_point.x, primary_point.y, primary_point.z);
@@ -1653,7 +1689,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
   const float3 dir_sl = compute_specular(
       dir_ds, specular_normal, primary_params, tir, cos_theta_i, cos_theta_t, eta_used);
 
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
   printf("REFRACTION at primary vertex:\n");
   printf("  Incoming ray (from diffuse): (%.6f, %.6f, %.6f) %s\n",
          dir_ds.x, dir_ds.y, dir_ds.z,
@@ -1733,7 +1769,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
 
   Intersection isect;
   if (!scene_intersect(kg, &ray, PATH_RAY_ALL_VISIBILITY, &isect)) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("  trace_secondary_seed: NO intersection found\n");
 }
     return false;
@@ -1743,7 +1779,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
     return false;
   }
 
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
   const float3 hit_point = ray.P + ray.D * isect.t;
   printf("SECONDARY VERTEX FOUND:\n");
   printf("  Position: (%.6f, %.6f, %.6f)\n", hit_point.x, hit_point.y, hit_point.z);
@@ -1777,9 +1813,10 @@ if constexpr (MPG_DEBUG::PARAMS) {
    * - Bit 1 = secondary bounce type
    * No shifting or modification needed - bounce_index parameter selects which bit to query. */
 
-  bool has_smooth_normals = secondary_seed.use_smooth_normals;
-  smooth_normals_at_hit(kg, ray, isect, has_smooth_normals);
-  secondary_seed.use_smooth_normals = has_smooth_normals;
+  /* Force flat shading for ALL MPG vertices to ensure tangent basis orthogonality.
+   * Smooth normals (interpolated from vertices) are not guaranteed to be orthogonal
+   * to the geometric tangent basis, causing Newton solver divergence. */
+  secondary_seed.use_smooth_normals = false;
 
   /* Mitsuba approach: Accept all ray-traced secondary vertices without pre-validation.
    * Let the Newton solver naturally reject infeasible seeds through convergence failure.
@@ -1820,19 +1857,19 @@ bool evaluate_double_bounce(const ShadingPoint &receiver,
 
   evaluate_specular(receiver, primary_seed, primary_geometry, primary_params, u1, v1, eval.primary);
   if (!isfinite_safe(eval.primary.distance_ds) || !(eval.primary.distance_ds > 1e-4f)) {
-if constexpr (MPG_DEBUG::EVAL_FAIL) {
+if (MPG_DEBUG::EVAL_FAIL()) {
     printf("  evaluate_double_bounce FAIL: Primary distance_ds invalid (%.6e)\n", eval.primary.distance_ds);
 }
     return false;
   }
   if (!isfinite_safe(eval.primary.distance_sl) || !(eval.primary.distance_sl > 1e-4f)) {
-if constexpr (MPG_DEBUG::EVAL_FAIL) {
+if (MPG_DEBUG::EVAL_FAIL()) {
     printf("  evaluate_double_bounce FAIL: Primary distance_sl invalid (%.6e)\n", eval.primary.distance_sl);
 }
     return false;
   }
   if (eval.primary.tir) {
-if constexpr (MPG_DEBUG::EVAL_FAIL) {
+if (MPG_DEBUG::EVAL_FAIL()) {
     printf("  evaluate_double_bounce FAIL: Primary TIR\n");
 }
     return false;
@@ -1849,19 +1886,19 @@ if constexpr (MPG_DEBUG::EVAL_FAIL) {
 
   evaluate_specular(intermediate_point, secondary_seed, secondary_geometry, secondary_params, u2, v2, eval.secondary);
   if (!isfinite_safe(eval.secondary.distance_ds) || !(eval.secondary.distance_ds > 1e-4f)) {
-if constexpr (MPG_DEBUG::EVAL_FAIL) {
+if (MPG_DEBUG::EVAL_FAIL()) {
     printf("  evaluate_double_bounce FAIL: Secondary distance_ds invalid (%.6e)\n", eval.secondary.distance_ds);
 }
     return false;
   }
   if (!isfinite_safe(eval.secondary.distance_sl) || !(eval.secondary.distance_sl > 1e-4f)) {
-if constexpr (MPG_DEBUG::EVAL_FAIL) {
+if (MPG_DEBUG::EVAL_FAIL()) {
     printf("  evaluate_double_bounce FAIL: Secondary distance_sl invalid (%.6e)\n", eval.secondary.distance_sl);
 }
     return false;
   }
   if (eval.secondary.tir) {
-if constexpr (MPG_DEBUG::EVAL_FAIL) {
+if (MPG_DEBUG::EVAL_FAIL()) {
     printf("  evaluate_double_bounce FAIL: Secondary TIR\n");
 }
     return false;
@@ -1869,7 +1906,7 @@ if constexpr (MPG_DEBUG::EVAL_FAIL) {
 
   float3 tangent_u, tangent_v;
   if (!build_tangent_basis(eval.primary.dXdu, eval.primary.dXdv, tangent_u, tangent_v)) {
-if constexpr (MPG_DEBUG::EVAL_FAIL) {
+if (MPG_DEBUG::EVAL_FAIL()) {
     printf("  evaluate_double_bounce FAIL: Primary tangent basis failed\n");
 }
     return false;
@@ -1878,7 +1915,7 @@ if constexpr (MPG_DEBUG::EVAL_FAIL) {
   eval.residual[1] = dot(eval.primary.residual, tangent_v);
 
   if (!build_tangent_basis(eval.secondary.dXdu, eval.secondary.dXdv, tangent_u, tangent_v)) {
-if constexpr (MPG_DEBUG::EVAL_FAIL) {
+if (MPG_DEBUG::EVAL_FAIL()) {
     printf("  evaluate_double_bounce FAIL: Secondary tangent basis failed\n");
 }
     return false;
@@ -1886,7 +1923,7 @@ if constexpr (MPG_DEBUG::EVAL_FAIL) {
   eval.residual[2] = dot(eval.secondary.residual, tangent_u);
   eval.residual[3] = dot(eval.secondary.residual, tangent_v);
 
-if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
   const float norm = sqrtf(eval.residual[0]*eval.residual[0] + eval.residual[1]*eval.residual[1] +
                            eval.residual[2]*eval.residual[2] + eval.residual[3]*eval.residual[3]);
   printf("    Residual after projection: C=(%.4f, %.4f, %.4f, %.4f), norm=%.4f\n",
@@ -2383,7 +2420,7 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     const float alpha_y = fmaxf(params.microfacet.alpha_y, 0.0f);
     const bool is_glossy = (alpha_x > 1e-6f || alpha_y > 1e-6f);
     if (is_glossy) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
       printf("MPG DEBUG: Rejecting glossy specular (alpha_x=%.6f, alpha_y=%.6f)\n", alpha_x, alpha_y);
       printf("  Current implementation only supports perfect speculars (roughness=0)\n");
 }
@@ -2406,7 +2443,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
    * This formulation is proven to converge to 1e-4 in Mitsuba. */
   float3 tangent_u, tangent_v;
   if (!build_tangent_basis(eval.dXdu, eval.dXdv, tangent_u, tangent_v)) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: Degenerate normals at build_tangent_basis\n");
     printf("  dXdu=[%.6f, %.6f, %.6f] len=%.9f\n", eval.dXdu.x, eval.dXdu.y, eval.dXdu.z, len(eval.dXdu));
     printf("  dXdv=[%.6f, %.6f, %.6f] len=%.9f\n", eval.dXdv.x, eval.dXdv.y, eval.dXdv.z, len(eval.dXdv));
@@ -2420,21 +2457,19 @@ if constexpr (MPG_DEBUG::PARAMS) {
   const float3 wo = eval.dir_sl;
   float h_eta = params.is_refraction ? params.base_eta : 1.0f;
   if (params.is_refraction) {
-    /* Determine entering/exiting using the same logic as compute_specular().
-     * dir_ds points FROM receiver TO specular point (light propagation direction).
-     * If dot(normal, dir_ds) > 0, we're exiting the material.
+    /* Use backfacing flag from params for entering/exiting determination.
+     * This matches compute_specular() and is robust for thin geometry.
      *
      * CRITICAL: Half-vector eta is INVERSE of Snell's law eta!
      * - Snell's law: entering = 1/IOR, exiting = IOR
      * - Half-vector: entering = IOR, exiting = 1/IOR
      *
-     * Therefore, invert the logic compared to compute_specular. */
-    const bool exiting = dot(eval.normal, eval.dir_ds) > 0.0f;
-    if (exiting) {
-      /* Exiting: use inverse IOR for half-vector (opposite of Snell's law) */
+     * Therefore, invert when exiting (backfacing). */
+    if (params.backfacing) {
+      /* Exiting (backfacing): use inverse IOR for half-vector */
       h_eta = 1.0f / fmaxf(h_eta, 1e-6f);
     }
-    /* Entering: keep h_eta = base_eta (opposite of Snell's law) */
+    /* Entering (!backfacing): keep h_eta = base_eta */
   }
 
   /* Generalized half-vector: h = normalize(wi + eta * wo), negated for refraction.
@@ -2458,7 +2493,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
 
   /* Verify normalization produced valid result */
   if (!isfinite_safe(h.x) || !isfinite_safe(h.y) || !isfinite_safe(h.z)) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: Degenerate normals at half-vector normalization (NaN/Inf)\n");
     printf("  h=[%.6f, %.6f, %.6f] h_len=%.9f\n", h.x, h.y, h.z, h_len);
 }
@@ -2550,10 +2585,8 @@ if constexpr (MPG_DEBUG::PARAMS) {
     const float3 new_wo = new_eval.dir_sl;
     float new_h_eta = new_params.is_refraction ? new_params.base_eta : 1.0f;
     if (new_params.is_refraction) {
-      /* Use same entering/exiting logic as initial half-vector computation.
-       * Half-vector eta is INVERSE of Snell's law - see lines 2421-2438. */
-      const bool exiting = dot(new_eval.normal, new_eval.dir_ds) > 0.0f;
-      if (exiting) {
+      /* Use backfacing flag for entering/exiting - see lines 2426-2441. */
+      if (new_params.backfacing) {
         new_h_eta = 1.0f / fmaxf(new_h_eta, 1e-6f);
       }
     }
@@ -2685,7 +2718,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
 
   float residual_matrix[2][2];
   if (!compute_residual_matrix(shading_point, seed, geometry, eval, residual_matrix)) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: Degenerate normals at compute_residual_matrix\n");
     printf("  dir_sl=[%.6f, %.6f, %.6f]\n", eval.dir_sl.x, eval.dir_sl.y, eval.dir_sl.z);
 }
@@ -2705,7 +2738,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
   /* Use relaxed thresholds matching reference implementation solver_threshold (1e-4).
    * Original 1e-10 was 10000x stricter than reference's 1e-4. */
   if (area_element < 1e-4f || cos_theta < 1e-4f) {
-if constexpr (MPG_DEBUG::NEWTON) {
+if (MPG_DEBUG::NEWTON()) {
     printf("MPG DEBUG single-bounce: FAILED geometry check, area=%.9f cos_theta=%.9f\n",
            area_element, cos_theta);
 }
@@ -2762,7 +2795,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
   result = MpgSolverOutput();
   failure_code = MPG_FAILURE_NONE;
 
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
   printf("\n");
   printf("========================================\n");
   printf("MPG DOUBLE-BOUNCE PATH TRACE\n");
@@ -2795,7 +2828,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
 
   SpecularParameters primary_params;
   if (!specular_parameters_from_surface(kg, sd, primary_geometry, seed, 0, primary_u, primary_v, primary_params)) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: specular_parameters_from_surface failed for primary (line 2268)\n");
 }
     failure_code = MPG_FAILURE_NO_SPECULAR;
@@ -2826,7 +2859,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
         single_bounce_seed.tau_count = 1;
       }
 
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
       if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
         LOG_DEBUG
             << "MPG double-bounce refraction seed missing exit surface, retrying as single bounce";
@@ -2865,7 +2898,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
 
   ShaderData primary_sd;
   if (!build_primary_shading_data(sd, primary_geometry, seed, primary_u, primary_v, primary_sd)) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: build_primary_shading_data failed (line 2325)\n");
 }
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
@@ -2876,7 +2909,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
   if (!specular_parameters_from_surface(
           kg, primary_sd, secondary_geometry, secondary_seed, 1, secondary_u, secondary_v, secondary_params))
   {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: specular_parameters_from_surface failed for secondary (line 2333)\n");
 }
     failure_code = MPG_FAILURE_NO_SPECULAR;
@@ -2925,9 +2958,9 @@ if constexpr (MPG_DEBUG::PARAMS) {
     return false;
   }
 
-if constexpr (MPG_DEBUG::NEWTON) {
+if (MPG_DEBUG::NEWTON()) {
   printf("----------------------------------------\n");
-  printf("NEWTON DOUBLE-BOUNCE: Starting iterations\n");
+  printf("NEWTON DOUBLE-BOUNCE: Starting iterations (sample %d)\n", g_current_sample);
   printf("  Initial residual_norm: %.9e\n", residual_norm);
   printf("  Convergence threshold: 1e-4\n");
   printf("  Max iterations: %d\n", options.max_iters);
@@ -2977,7 +3010,7 @@ if constexpr (MPG_DEBUG::NEWTON) {
         return false;
       }
 
-if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
       if (iter == 0) {
         printf("    Jacobian matrix J:\n");
         printf("      [%8.4f %8.4f %8.4f %8.4f]\n", J[0][0], J[0][1], J[0][2], J[0][3]);
@@ -2996,7 +3029,7 @@ if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
     float new_secondary_u = secondary_u - beta * delta[2];
     float new_secondary_v = secondary_v - beta * delta[3];
 
-if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
     if ((iter + 1) % 5 == 0 || iter == 0) {
       printf("    Step %2d: delta=(%.4f,%.4f,%.4f,%.4f) → prim(%.4f,%.4f) sec(%.4f,%.4f)\n",
              iter + 1, delta[0], delta[1], delta[2], delta[3],
@@ -3007,7 +3040,7 @@ if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
     project_barycentrics(new_primary_u, new_primary_v);
     project_barycentrics(new_secondary_u, new_secondary_v);
 
-if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
     if ((iter + 1) % 5 == 0 || iter == 0) {
       printf("    After projection: prim(%.4f,%.4f) sec(%.4f,%.4f)\n",
              new_primary_u, new_primary_v, new_secondary_u, new_secondary_v);
@@ -3018,7 +3051,7 @@ if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
     if (!specular_parameters_from_surface(
             kg, sd, primary_geometry, seed, 0, new_primary_u, new_primary_v, new_primary_params))
     {
-if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
       printf("  Iter %2d: REJECT #1 - primary params extraction failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
 }
       beta *= 0.5f;
@@ -3028,7 +3061,7 @@ if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
 
     ShaderData new_primary_sd;
     if (!build_primary_shading_data(sd, primary_geometry, seed, new_primary_u, new_primary_v, new_primary_sd)) {
-if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
       printf("  Iter %2d: REJECT #2 - primary shading data build failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
 }
       beta *= 0.5f;
@@ -3046,7 +3079,7 @@ if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
                                           new_secondary_v,
                                           new_secondary_params))
     {
-if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
       printf("  Iter %2d: REJECT #3 - secondary params extraction failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
 }
       beta *= 0.5f;
@@ -3069,7 +3102,7 @@ if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
                                 secondary_seed.use_smooth_normals,
                                 new_eval))
     {
-if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
       printf("  Iter %2d: REJECT #4 - evaluate_double_bounce failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
 }
       beta *= 0.5f;
@@ -3102,7 +3135,7 @@ if constexpr (MPG_DEBUG::NEWTON_DETAIL) {
     beta = fminf(beta * 2.0f, 1.0f);
     needs_step_update = true;
 
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     if ((iter + 1) % 5 == 0 || iter == 0 || residual_norm < 1e-4f) {
       printf("  Iter %2d: residual=%.9e, prim(%.4f,%.4f) sec(%.4f,%.4f)\n",
              iter + 1, residual_norm, primary_u, primary_v, secondary_u, secondary_v);
@@ -3113,7 +3146,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
   /* Accept solutions with residual <= 1e-4 (matching single-bounce and Mitsuba).
    * The double-bounce solver uses 2D projected residuals (4D total for 2 vertices). */
   if (!isfinite_safe(residual_norm) || residual_norm > 1e-4f) {
-if constexpr (MPG_DEBUG::NEWTON) {
+if (MPG_DEBUG::NEWTON()) {
     printf("========================================\n");
     printf("MPG DOUBLE-BOUNCE: NEWTON FAILED TO CONVERGE\n");
     printf("========================================\n");
@@ -3130,7 +3163,7 @@ if constexpr (MPG_DEBUG::NEWTON) {
   }
 
   if (!specular_parameters_from_surface(kg, sd, primary_geometry, seed, 0, primary_u, primary_v, primary_params)) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: specular_parameters_from_surface (post-Newton, primary) (line 2518)\n");
 }
     failure_code = MPG_FAILURE_NO_SPECULAR;
@@ -3138,7 +3171,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
   }
 
   if (!build_primary_shading_data(sd, primary_geometry, seed, primary_u, primary_v, primary_sd)) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: build_primary_shading_data (post-Newton) (line 2523)\n");
 }
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
@@ -3154,7 +3187,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
                                         secondary_v,
                                         secondary_params))
   {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: specular_parameters_from_surface (post-Newton, secondary) (line 2528)\n");
 }
     failure_code = MPG_FAILURE_NO_SPECULAR;
@@ -3199,7 +3232,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
 
   float matrix_primary[2][2];
   if (!compute_residual_matrix(receiver, primary_seed_for_jacobian, primary_geometry, eval.primary, matrix_primary)) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: compute_residual_matrix (primary double-bounce) (line 2586)\n");
 }
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
@@ -3216,7 +3249,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
   const float area_primary = len(cross(eval.primary.dXdu, eval.primary.dXdv));
   const float cos_primary = fabsf(dot(eval.primary.normal, eval.primary.dir_ds));
   if (area_primary < 1e-4f || cos_primary < 1e-4f) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: geometry check (primary double-bounce), area=%.9f cos=%.9f (line 2600)\n",
            area_primary, cos_primary);
 }
@@ -3247,7 +3280,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
 
   float matrix_secondary[2][2];
   if (!compute_residual_matrix(intermediate_point, secondary_seed, secondary_geometry, eval.secondary, matrix_secondary)) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: compute_residual_matrix (secondary double-bounce) (line 2632)\n");
 }
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
@@ -3264,7 +3297,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
   const float area_secondary = len(cross(eval.secondary.dXdu, eval.secondary.dXdv));
   const float cos_secondary = fabsf(dot(eval.secondary.normal, eval.secondary.dir_sl));
   if (area_secondary < 1e-4f || cos_secondary < 1e-4f) {
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: geometry check (secondary double-bounce), area=%.9f cos=%.9f (line 2649)\n",
            area_secondary, cos_secondary);
 }
@@ -3434,7 +3467,7 @@ if constexpr (MPG_DEBUG::PARAMS) {
 
   failure_code = MPG_FAILURE_NONE;
 
-if constexpr (MPG_DEBUG::PARAMS) {
+if (MPG_DEBUG::PARAMS()) {
   printf("========================================\n");
   printf("MPG DOUBLE-BOUNCE SOLVER: SUCCESS!\n");
   printf("========================================\n");

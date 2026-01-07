@@ -1102,7 +1102,7 @@ if constexpr (MPG_DEBUG::SEED) {
       accepted_branch_pdf = candidate_branch_pdf;
       accepted_direction_pdf = candidate_direction_pdf;
       accepted_scatter_pdf = candidate_scatter_pdf;
-      seed.use_smooth_normals = has_smooth_normals && (scatter_branch != MPG_SEED_SCATTER_REFRACTION);
+      seed.use_smooth_normals = false;
       successful_branch = branch;
       successful_scatter_branch = scatter_branch;
       accepted_direction_normalized = normalized_direction;
