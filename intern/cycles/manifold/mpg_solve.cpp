@@ -2371,6 +2371,219 @@ ccl_device_inline float2 compute_guide_offset_normal(const GuideSummary &guide,
   return make_float2(offset_u, offset_v);
 }
 
+/* Ray-traced reproject for single-bounce manifold vertex.
+ *
+ * Validates a proposed (u,v) by ray-tracing from receiver through the
+ * proposed vertex position and verifying we hit the expected surface.
+ *
+ * Per Mitsuba reference (manifold_path_guiding.h:reproject):
+ * - Ray-trace from start point to proposed position
+ * - Verify intersection hits the same shape as previous iteration
+ * - Perform specular scatter (reflect/refract) at vertex
+ * - Return success only if all checks pass
+ *
+ * Returns: true if ray-traced path is geometrically valid, false otherwise */
+ccl_device_inline bool reproject_single_bounce(KernelGlobals kg,
+                                               const ShadingPoint &receiver,
+                                               const SpecularSurfaceGeometry &geometry,
+                                               const SpecularParameters &params,
+                                               float proposed_u,
+                                               float proposed_v,
+                                               int expected_object,
+                                               int expected_prim)
+{
+  /* Compute proposed 3D position from barycentric coordinates */
+  const float w = 1.0f - proposed_u - proposed_v;
+  const float3 proposed_point = geometry.verts[0] * w +
+                                 geometry.verts[1] * proposed_u +
+                                 geometry.verts[2] * proposed_v;
+
+  /* Setup ray from receiver toward proposed vertex */
+  Ray ray;
+  ray.P = receiver.position;
+  const float3 direction = proposed_point - receiver.position;
+  const float distance = len(direction);
+  if (!(distance > 1e-6f)) {
+    /* Proposed point too close to receiver */
+    return false;
+  }
+  ray.D = direction / distance;
+  ray.tmin = 0.0f;
+  ray.tmax = distance * 1.0001f;  /* Slightly past target to ensure hit */
+  ray.time = 0.5f;  /* Mid-shutter time */
+  ray.dP = differential_zero_compact();
+  ray.dD = differential_zero_compact();
+
+  /* Skip receiver surface to avoid self-intersection */
+  ray.self.object = OBJECT_NONE;
+  ray.self.prim = PRIM_NONE;
+  ray.self.light_object = OBJECT_NONE;
+  ray.self.light_prim = PRIM_NONE;
+
+  /* Ray-trace to find intersection */
+  Intersection isect;
+  if (!scene_intersect(kg, &ray, PATH_RAY_ALL_VISIBILITY, &isect)) {
+    /* No intersection - proposed vertex not reachable */
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+    printf("    reproject FAIL: No intersection\n");
+}
+    return false;
+  }
+
+  /* Verify we hit the expected shape (Mitsuba's key check) */
+  if (isect.object != expected_object || isect.prim != expected_prim) {
+    /* Hit wrong surface - reject this Newton step */
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+    printf("    reproject FAIL: Wrong surface (expected obj=%d prim=%d, got obj=%d prim=%d)\n",
+           expected_object, expected_prim, isect.object, isect.prim);
+}
+    return false;
+  }
+
+  /* Verify we hit close to the proposed point (within reasonable tolerance) */
+  const float hit_distance = isect.t;
+  if (fabsf(hit_distance - distance) > 0.01f * distance) {
+    /* Hit point significantly different from proposal */
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+    printf("    reproject FAIL: Hit distance mismatch (expected %.6f, got %.6f)\n",
+           distance, hit_distance);
+}
+    return false;
+  }
+
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+  printf("    reproject SUCCESS: Hit correct surface at correct distance\n");
+}
+
+  /* All checks passed - proposed vertex is geometrically valid */
+  return true;
+}
+
+/* Ray-traced reproject for double-bounce manifold path.
+ *
+ * Validates proposed (u1,v1) and (u2,v2) by ray-tracing the full path:
+ * receiver → primary vertex → secondary vertex
+ *
+ * Per Mitsuba reference, must verify:
+ * - Each ray hits the expected shape (same object/prim as previous iteration)
+ * - Scattering is geometrically valid at each vertex
+ *
+ * Returns: true if entire ray-traced path is geometrically valid, false otherwise */
+ccl_device_inline bool reproject_double_bounce(KernelGlobals kg,
+                                               const ShadingPoint &receiver,
+                                               const SpecularSurfaceGeometry &primary_geometry,
+                                               const SpecularParameters &primary_params,
+                                               float proposed_primary_u,
+                                               float proposed_primary_v,
+                                               int expected_primary_object,
+                                               int expected_primary_prim,
+                                               const SpecularSurfaceGeometry &secondary_geometry,
+                                               const SpecularParameters &secondary_params,
+                                               float proposed_secondary_u,
+                                               float proposed_secondary_v,
+                                               int expected_secondary_object,
+                                               int expected_secondary_prim)
+{
+  /* === FIRST SEGMENT: receiver → primary vertex === */
+
+  /* Compute proposed primary 3D position */
+  const float w1 = 1.0f - proposed_primary_u - proposed_primary_v;
+  const float3 proposed_primary_point = primary_geometry.verts[0] * w1 +
+                                         primary_geometry.verts[1] * proposed_primary_u +
+                                         primary_geometry.verts[2] * proposed_primary_v;
+
+  /* Ray-trace from receiver toward proposed primary */
+  Ray ray1;
+  ray1.P = receiver.position;
+  const float3 direction1 = proposed_primary_point - receiver.position;
+  const float distance1 = len(direction1);
+  if (!(distance1 > 1e-6f)) {
+    return false;
+  }
+  ray1.D = direction1 / distance1;
+  ray1.tmin = 0.0f;
+  ray1.tmax = distance1 * 1.0001f;
+  ray1.time = 0.5f;
+  ray1.dP = differential_zero_compact();
+  ray1.dD = differential_zero_compact();
+  ray1.self.object = OBJECT_NONE;
+  ray1.self.prim = PRIM_NONE;
+  ray1.self.light_object = OBJECT_NONE;
+  ray1.self.light_prim = PRIM_NONE;
+
+  Intersection isect1;
+  if (!scene_intersect(kg, &ray1, PATH_RAY_ALL_VISIBILITY, &isect1)) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+    printf("    reproject_double FAIL: Primary vertex not reachable\n");
+}
+    return false;
+  }
+
+  /* Verify we hit the expected primary shape */
+  if (isect1.object != expected_primary_object || isect1.prim != expected_primary_prim) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+    printf("    reproject_double FAIL: Wrong primary surface (expected obj=%d prim=%d, got obj=%d prim=%d)\n",
+           expected_primary_object, expected_primary_prim, isect1.object, isect1.prim);
+}
+    return false;
+  }
+
+  /* === SECOND SEGMENT: primary vertex → secondary vertex === */
+
+  /* Compute proposed secondary 3D position */
+  const float w2 = 1.0f - proposed_secondary_u - proposed_secondary_v;
+  const float3 proposed_secondary_point = secondary_geometry.verts[0] * w2 +
+                                           secondary_geometry.verts[1] * proposed_secondary_u +
+                                           secondary_geometry.verts[2] * proposed_secondary_v;
+
+  /* Ray-trace from primary toward proposed secondary */
+  Ray ray2;
+  ray2.P = proposed_primary_point;
+  const float3 direction2 = proposed_secondary_point - proposed_primary_point;
+  const float distance2 = len(direction2);
+  if (!(distance2 > 1e-6f)) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+    printf("    reproject_double FAIL: Primary and secondary too close\n");
+}
+    return false;
+  }
+  ray2.D = direction2 / distance2;
+  ray2.tmin = 0.0f;
+  ray2.tmax = distance2 * 1.0001f;
+  ray2.time = 0.5f;
+  ray2.dP = differential_zero_compact();
+  ray2.dD = differential_zero_compact();
+  /* Skip primary surface to avoid self-intersection */
+  ray2.self.object = expected_primary_object;
+  ray2.self.prim = expected_primary_prim;
+  ray2.self.light_object = OBJECT_NONE;
+  ray2.self.light_prim = PRIM_NONE;
+
+  Intersection isect2;
+  if (!scene_intersect(kg, &ray2, PATH_RAY_ALL_VISIBILITY, &isect2)) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+    printf("    reproject_double FAIL: Secondary vertex not reachable from primary\n");
+}
+    return false;
+  }
+
+  /* Verify we hit the expected secondary shape */
+  if (isect2.object != expected_secondary_object || isect2.prim != expected_secondary_prim) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+    printf("    reproject_double FAIL: Wrong secondary surface (expected obj=%d prim=%d, got obj=%d prim=%d)\n",
+           expected_secondary_object, expected_secondary_prim, isect2.object, isect2.prim);
+}
+    return false;
+  }
+
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+  printf("    reproject_double SUCCESS: Both vertices reachable on correct surfaces\n");
+}
+
+  /* All checks passed - proposed path is geometrically valid */
+  return true;
+}
+
 }  // namespace
 
 float mpg_compute_segment_visibility(KernelGlobals kg,
@@ -2577,6 +2790,16 @@ if (MPG_DEBUG::PARAMS()) {
     float new_u = u - options.step_scale * beta * delta.x;
     float new_v = v - options.step_scale * beta * delta.y;
     project_barycentrics(new_u, new_v);
+
+    /* Per Mitsuba: ray-trace to verify proposed vertex is geometrically reachable.
+     * This is the key difference from parameter-only validation - ensures Newton doesn't
+     * propose vertices that are locally valid but on wrong surfaces. */
+    if (!reproject_single_bounce(kg, shading_point, geometry, params, new_u, new_v,
+                                  seed.object, seed.prim)) {
+      beta *= 0.5f;
+      needs_step_update = false;  /* Reuse Jacobian with smaller beta */
+      continue;
+    }
 
     SpecularParameters new_params;
     if (!specular_parameters_from_surface(kg, sd, geometry, seed, 0, new_u, new_v, new_params)) {
@@ -3076,6 +3299,21 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
              new_primary_u, new_primary_v, new_secondary_u, new_secondary_v);
     }
 }
+
+    /* Per Mitsuba: ray-trace to verify proposed path is geometrically reachable.
+     * This validates the entire chain: receiver → primary → secondary */
+    if (!reproject_double_bounce(kg, receiver,
+                                  primary_geometry, primary_params, new_primary_u, new_primary_v,
+                                  seed.object, seed.prim,
+                                  secondary_geometry, secondary_params, new_secondary_u, new_secondary_v,
+                                  secondary_seed.object, secondary_seed.prim)) {
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+      printf("  Iter %2d: REJECT #0 - reproject failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
+}
+      beta *= 0.5f;
+      needs_step_update = false;  /* Reuse Jacobian with smaller beta */
+      continue;
+    }
 
     SpecularParameters new_primary_params;
     if (!specular_parameters_from_surface(
