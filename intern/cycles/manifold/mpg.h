@@ -26,6 +26,10 @@ struct MpgOptions {
   int max_iters = 20;
   float gate_w = 0.35f;
   float gate_kappa = 40.0f;
+  /* Newton solver step scaling factor (matches Mitsuba's m_config.step_scale).
+   * Multiplies the Newton step size: new_param = param - step_scale * beta * delta.
+   * Default 1.0 for standard Newton steps. */
+  float step_scale = 1.0f;
   /* Angular jitter removed - Mitsuba reference uses uniform sampling without cone restrictions.
    * Cone-based sampling is replaced with uniform sphere/hemisphere sampling to match reference. */
   /* Enable relax_gate by default to allow bootstrap sampling when guide isn't ready yet.

@@ -2572,9 +2572,10 @@ if (MPG_DEBUG::PARAMS()) {
       }
     }
 
-    /* Apply step with current beta scaling (Mitsuba approach) */
-    float new_u = u - beta * delta.x;
-    float new_v = v - beta * delta.y;
+    /* Apply step with step_scale * beta scaling (Mitsuba approach).
+     * Matches Mitsuba: p_prop = p - step_scale * beta * (dp_du * dx[0] + dp_dv * dx[1]) */
+    float new_u = u - options.step_scale * beta * delta.x;
+    float new_v = v - options.step_scale * beta * delta.y;
     project_barycentrics(new_u, new_v);
 
     SpecularParameters new_params;
@@ -2971,12 +2972,15 @@ if (MPG_DEBUG::PARAMS()) {
     return false;
   }
 
-  float residual_norm = 0.0f;
-  for (int i = 0; i < 4; ++i) {
-    residual_norm += eval.residual[i] * eval.residual[i];
-  }
-  residual_norm = sqrtf(residual_norm);
-  if (!isfinite_safe(residual_norm)) {
+  /* Per Mitsuba reference: check convergence per-vertex, not aggregated.
+   * Primary vertex: residual[0], residual[1]
+   * Secondary vertex: residual[2], residual[3] */
+  float primary_residual_norm = sqrtf(eval.residual[0] * eval.residual[0] +
+                                       eval.residual[1] * eval.residual[1]);
+  float secondary_residual_norm = sqrtf(eval.residual[2] * eval.residual[2] +
+                                         eval.residual[3] * eval.residual[3]);
+
+  if (!isfinite_safe(primary_residual_norm) || !isfinite_safe(secondary_residual_norm)) {
     failure_code = MPG_FAILURE_NEWTON_DIVERGED;
     return false;
   }
@@ -2984,8 +2988,9 @@ if (MPG_DEBUG::PARAMS()) {
 if (MPG_DEBUG::NEWTON()) {
   printf("----------------------------------------\n");
   printf("NEWTON DOUBLE-BOUNCE: Starting iterations (sample %d)\n", g_current_sample);
-  printf("  Initial residual_norm: %.9e\n", residual_norm);
-  printf("  Convergence threshold: 1e-4\n");
+  printf("  Initial primary residual: %.9e\n", primary_residual_norm);
+  printf("  Initial secondary residual: %.9e\n", secondary_residual_norm);
+  printf("  Convergence threshold: 1e-4 (per vertex)\n");
   printf("  Max iterations: %d\n", options.max_iters);
   printf("  Primary u,v: (%.6f, %.6f)\n", primary_u, primary_v);
   printf("  Secondary u,v: (%.6f, %.6f)\n", secondary_u, secondary_v);
@@ -2998,9 +3003,10 @@ if (MPG_DEBUG::NEWTON()) {
   float delta[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
   for (int iter = 0; iter < options.max_iters; ++iter) {
-    /* Double-bounce uses same 1e-4 threshold as single-bounce (Mitsuba standard).
-     * Both use half-vector constraint formulation converging to 1e-4. */
-    if (residual_norm < 1e-4f) {
+    /* Per Mitsuba: check convergence per-vertex. Both vertices must satisfy threshold. */
+    const bool primary_converged = (primary_residual_norm < 1e-4f);
+    const bool secondary_converged = (secondary_residual_norm < 1e-4f);
+    if (primary_converged && secondary_converged) {
       break;
     }
 
@@ -3046,11 +3052,12 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
 }
     }
 
-    /* Apply step with current beta scaling (Mitsuba approach) */
-    float new_primary_u = primary_u - beta * delta[0];
-    float new_primary_v = primary_v - beta * delta[1];
-    float new_secondary_u = secondary_u - beta * delta[2];
-    float new_secondary_v = secondary_v - beta * delta[3];
+    /* Apply step with step_scale * beta scaling (Mitsuba approach).
+     * Matches Mitsuba: p_prop = p - step_scale * beta * (dp_du * dx[0] + dp_dv * dx[1]) */
+    float new_primary_u = primary_u - options.step_scale * beta * delta[0];
+    float new_primary_v = primary_v - options.step_scale * beta * delta[1];
+    float new_secondary_u = secondary_u - options.step_scale * beta * delta[2];
+    float new_secondary_v = secondary_v - options.step_scale * beta * delta[3];
 
 if (MPG_DEBUG::NEWTON_DETAIL()) {
     if ((iter + 1) % 5 == 0 || iter == 0) {
@@ -3133,12 +3140,12 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
       continue;
     }
 
-    float new_norm = 0.0f;
-    for (int i = 0; i < 4; ++i) {
-      new_norm += new_eval.residual[i] * new_eval.residual[i];
-    }
-    new_norm = sqrtf(new_norm);
-    if (!isfinite_safe(new_norm)) {
+    /* Compute per-vertex residual norms (Mitsuba approach) */
+    const float new_primary_residual_norm = sqrtf(new_eval.residual[0] * new_eval.residual[0] +
+                                                    new_eval.residual[1] * new_eval.residual[1]);
+    const float new_secondary_residual_norm = sqrtf(new_eval.residual[2] * new_eval.residual[2] +
+                                                      new_eval.residual[3] * new_eval.residual[3]);
+    if (!isfinite_safe(new_primary_residual_norm) || !isfinite_safe(new_secondary_residual_norm)) {
       failure_code = MPG_FAILURE_NEWTON_DIVERGED;
       return false;
     }
@@ -3159,28 +3166,34 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     primary_params = new_primary_params;
     secondary_params = new_secondary_params;
     primary_sd = new_primary_sd;
-    residual_norm = new_norm;
+    primary_residual_norm = new_primary_residual_norm;
+    secondary_residual_norm = new_secondary_residual_norm;
     beta = fminf(beta * 2.0f, 1.0f);
     needs_step_update = true;
 
 if (MPG_DEBUG::PARAMS()) {
-    if ((iter + 1) % 5 == 0 || iter == 0 || residual_norm < 1e-4f) {
-      printf("  Iter %2d: residual=%.9e, prim(%.4f,%.4f) sec(%.4f,%.4f)\n",
-             iter + 1, residual_norm, primary_u, primary_v, secondary_u, secondary_v);
+    const float max_residual = fmaxf(primary_residual_norm, secondary_residual_norm);
+    if ((iter + 1) % 5 == 0 || iter == 0 || max_residual < 1e-4f) {
+      printf("  Iter %2d: prim_res=%.6e, sec_res=%.6e, prim(%.4f,%.4f) sec(%.4f,%.4f)\n",
+             iter + 1, primary_residual_norm, secondary_residual_norm,
+             primary_u, primary_v, secondary_u, secondary_v);
     }
 }
   }
 
-  /* Accept solutions with residual <= 1e-4 (matching single-bounce and Mitsuba).
-   * The double-bounce solver uses 2D projected residuals (4D total for 2 vertices). */
-  if (!isfinite_safe(residual_norm) || residual_norm > 1e-4f) {
+  /* Per Mitsuba: accept only if BOTH vertices converged to threshold.
+   * Each vertex's 2D constraint must satisfy norm(C) <= 1e-4. */
+  const bool primary_converged = (primary_residual_norm <= 1e-4f);
+  const bool secondary_converged = (secondary_residual_norm <= 1e-4f);
+  if (!primary_converged || !secondary_converged) {
 if (MPG_DEBUG::NEWTON()) {
     printf("========================================\n");
     printf("MPG DOUBLE-BOUNCE: NEWTON FAILED TO CONVERGE\n");
     printf("========================================\n");
-    printf("  Final residual_norm: %.9e (threshold: 1e-4)\n", residual_norm);
-    printf("  residual_norm > 1e-4: %d\n", residual_norm > 1e-4f);
-    printf("  isfinite: %d\n", isfinite_safe(residual_norm));
+    printf("  Primary residual: %.9e (threshold: 1e-4) %s\n",
+           primary_residual_norm, primary_converged ? "[CONVERGED]" : "[FAILED]");
+    printf("  Secondary residual: %.9e (threshold: 1e-4) %s\n",
+           secondary_residual_norm, secondary_converged ? "[CONVERGED]" : "[FAILED]");
     printf("  Max iterations reached: 30\n");
     printf("  Primary u,v: (%.6f, %.6f)\n", primary_u, primary_v);
     printf("  Secondary u,v: (%.6f, %.6f)\n", secondary_u, secondary_v);
