@@ -1157,6 +1157,11 @@ if (MPG_DEBUG::PARAMS()) {
   copy_microfacet_to_parameters(microfacet, params);
 
   params.is_refraction = selected_refraction;
+if (MPG_DEBUG::PARAMS()) {
+  printf("  -> Selected mode: %s\n", selected_refraction ? "REFRACTION" : "REFLECTION");
+  printf("  -> Microfacet IOR from closure: %.6f\n", microfacet->ior);
+  printf("  -> params.base_eta (after copy): %.6f\n", params.base_eta);
+}
   if (params.is_refraction) {
     const float eta = microfacet->ior;
     if (fabsf(eta) <= 1e-6f) {
@@ -1226,6 +1231,10 @@ if (MPG_DEBUG::PARAMS()) {
   /* Store backfacing flag for robust entering/exiting determination.
    * SD_BACKFACING is set by shader_setup_from_ray based on dot(Ng, wi) < 0. */
   params.backfacing = (spec_sd.flag & SD_BACKFACING) != 0;
+if (MPG_DEBUG::PARAMS()) {
+  printf("  -> SD_BACKFACING flag: %s\n", params.backfacing ? "TRUE (exiting)" : "FALSE (entering)");
+  printf("  -> Final params.base_eta: %.6f\n", params.base_eta);
+}
   return true;
 }
 
