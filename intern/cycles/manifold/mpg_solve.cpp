@@ -821,7 +821,12 @@ if (MPG_DEBUG::PARAMS()) {
    * travel direction), making the "same side" test invalid. Only apply geometric checks for
    * finite lights where light_dir represents the actual light ray direction. */
   const bool is_directional_light = (seed.light_sample.t == FLT_MAX);
-  if (!light_dir_degenerate && hemisphere_normal_valid && !is_directional_light) {
+
+  /* CRITICAL: Tau hints must NEVER be overridden. They encode the successful path found during
+   * seed generation. The hemisphere test should only influence preference when NO tau hint exists. */
+  const bool have_tau_hint = (force_transmission || force_reflection);
+
+  if (!light_dir_degenerate && hemisphere_normal_valid && !is_directional_light && !have_tau_hint) {
     /* Compare directions in the shading-normal frame (hemisphere_normal) to detect interface crossings. */
     const float dot_in = dot(hemisphere_normal, -ray_dir);
     const float dot_light = dot(hemisphere_normal, light_dir);
@@ -849,6 +854,9 @@ if (MPG_DEBUG::PARAMS()) {
 }
       prefer_reflection_from_geometry = true;
     }
+  }
+else if (MPG_DEBUG::PARAMS() && have_tau_hint) {
+    printf("  -> SKIPPING hemisphere test (tau hint active)\n");
   }
 
   const bool has_forced_scatter = force_transmission || force_reflection;
