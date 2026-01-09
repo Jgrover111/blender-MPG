@@ -2091,13 +2091,12 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
    * - Secondary wi = normalize(primary - secondary) changes
    * - Secondary wo stays the same (secondary to light is independent of primary)
    *
-   * Mathematical note: wi_secondary = normalize(primary - secondary).
-   * When primary moves by +dPdu, the vector (primary - secondary) changes by +dPdu.
-   * derivative_normalized(secondary - primary, -dPdu) = derivative_normalized(primary - secondary, +dPdu)
-   * due to sign cancellation: normalize(-(v + dv)) = -normalize(v + dv), and the negations cancel.
+   * Per Mitsuba reference: wi = x_prev - x_cur, so for secondary vertex:
+   * wi_secondary = normalize(primary.point - secondary.point)
+   * When primary moves by +dPdu, derivative is computed with respect to the first argument.
    */
-  const float3 d_secondary_wi_du1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdu);
-  const float3 d_secondary_wi_dv1 = derivative_normalized(eval.secondary.point - eval.primary.point, -primary_geometry.dPdv);
+  const float3 d_secondary_wi_du1 = derivative_normalized(eval.primary.point - eval.secondary.point, primary_geometry.dPdu);
+  const float3 d_secondary_wi_dv1 = derivative_normalized(eval.primary.point - eval.secondary.point, primary_geometry.dPdv);
 
   float3 d_secondary_g_du1 = d_secondary_wi_du1;  // wo doesn't change
   float3 d_secondary_g_dv1 = d_secondary_wi_dv1;
@@ -2119,11 +2118,14 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
   /*
    * When u2, v2 change:
    * - Secondary vertex position changes
-   * - Secondary wi changes (primary to secondary direction changes)
+   * - Secondary wi = normalize(primary - secondary) changes
    * - Secondary wo changes (secondary to light direction changes)
+   *
+   * Per Mitsuba: wi_secondary = normalize(primary - secondary)
+   * When secondary moves by +dPdu, derivative is -dPdu (moving away from primary).
    */
-  const float3 d_secondary_wi_du2 = derivative_normalized(eval.secondary.point - eval.primary.point, secondary_geometry.dPdu);
-  const float3 d_secondary_wi_dv2 = derivative_normalized(eval.secondary.point - eval.primary.point, secondary_geometry.dPdv);
+  const float3 d_secondary_wi_du2 = derivative_normalized(eval.primary.point - eval.secondary.point, -secondary_geometry.dPdu);
+  const float3 d_secondary_wi_dv2 = derivative_normalized(eval.primary.point - eval.secondary.point, -secondary_geometry.dPdv);
 
   /* For wo: compute light direction derivative (handles both finite and directional lights) */
   MpgSeedRay temp_seed;
