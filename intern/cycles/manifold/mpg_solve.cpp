@@ -449,28 +449,39 @@ float3 compute_specular(const float3 &dir_ds,
                         float &cos_theta_t,
                         float &eta_used)
 {
-  /* Use geometric normal directly for entering/exiting determination.
-   * For refraction: dot(normal, ray) > 0 means exiting, < 0 means entering. */
-  const float3 refraction_normal = normal;
+  /* Per Codex finding #2: Mitsuba's refract() uses dot(w, n) directly to flip the normal
+   * and swap the IOR ratio. It does NOT depend on a precomputed backface flag (SD_BACKFACING).
+   * This is critical for consistency with the BSDF frame normal used in the half-vector constraint.
+   *
+   * For refraction: dot(normal, ray) determines entering vs. exiting:
+   * - dot > 0: ray and normal point in same direction → exiting (glass→air)
+   * - dot < 0: ray and normal point in opposite directions → entering (air→glass) */
+
+  const float dot_w_n = dot(normal, dir_ds);
 
 if (MPG_DEBUG::PARAMS()) {
   if (params.is_refraction) {
-    printf("MPG DEBUG compute_specular: refraction direction determination\n");
+    printf("MPG DEBUG compute_specular: Mitsuba-style refraction\n");
     printf("  normal: (%.6f, %.6f, %.6f)\n", normal.x, normal.y, normal.z);
     printf("  dir_ds: (%.6f, %.6f, %.6f)\n", dir_ds.x, dir_ds.y, dir_ds.z);
-    printf("  dot(normal, dir_ds): %.6f\n", dot(normal, dir_ds));
+    printf("  dot(normal, dir_ds): %.6f\n", dot_w_n);
   }
 }
 
-  /* Use backfacing flag for robust entering/exiting determination.
-   * SD_BACKFACING means ray hit back face, which for closed objects means exiting.
-   * This is more reliable than dot(normal, ray) for thin geometry. */
-  const bool exiting = params.backfacing;
+  /* Determine entering/exiting using dot product per Mitsuba's approach.
+   * This is computed dynamically from the actual normal being used (BSDF frame),
+   * not from a precomputed flag that may be inconsistent. */
+  const bool exiting = (dot_w_n > 0.0f);
 
-  /* Orient normal to ensure it points toward the medium the ray came from.
-   * This ensures cos_theta_i = -dot(dir_ds, oriented_normal) > 0.
-   * Use the same normal (microfacet or geometric) that was used for exiting determination. */
-  float3 oriented_normal = exiting ? -refraction_normal : refraction_normal;
+if (MPG_DEBUG::PARAMS()) {
+  if (params.is_refraction) {
+    printf("  → Determined: %s (dot_w_n=%.6f)\n", exiting ? "EXITING" : "ENTERING", dot_w_n);
+  }
+}
+
+  /* Orient normal to point toward the medium the ray came from.
+   * Per Mitsuba: flip normal if dot(w, n) > 0 (exiting case). */
+  float3 oriented_normal = exiting ? -normal : normal;
 
   if (!params.is_refraction) {
     /* For reflection, use propagation direction (toward surface) */
@@ -482,13 +493,21 @@ if (MPG_DEBUG::PARAMS()) {
     return reflect_dir(incoming_reflect, oriented_normal);
   }
 
-  /* Compute eta ratio for reverse ray tracing.
+  /* Compute eta ratio for reverse ray tracing per Mitsuba's refract().
    * Eta = n_incident / n_transmitted for Snell's law.
-   * If exiting (glass→air): eta = n_glass/n_air = IOR.
-   * If entering (air→glass): eta = n_air/n_glass = 1/IOR. */
+   * Exiting (glass→air): eta = n_glass/n_air = IOR (e.g., 1.5)
+   * Entering (air→glass): eta = n_air/n_glass = 1/IOR (e.g., 0.667) */
   const float safe_base_eta = fmaxf(params.base_eta, 1e-6f);
   const float eta_ratio = exiting ? safe_base_eta : (1.0f / safe_base_eta);
   const float safe_eta_ratio = fmaxf(eta_ratio, 1e-6f);
+
+if (MPG_DEBUG::PARAMS()) {
+  if (params.is_refraction) {
+    printf("  → IOR: base=%.6f, eta_ratio=%s ? %.6f : %.6f = %.6f\n",
+           safe_base_eta, exiting ? "base" : "1/base",
+           safe_base_eta, 1.0f / safe_base_eta, safe_eta_ratio);
+  }
+}
 
   float3 dir = refract_dir(dir_ds, oriented_normal, safe_eta_ratio, tir, cos_theta_i, cos_theta_t);
   eta_used = safe_eta_ratio;
@@ -572,10 +591,31 @@ void evaluate_specular(const ShadingPoint &D,
   compute_light_sample_direction(seed.light_sample, eval.point, eval.dir_sl, eval.distance_sl);
   eval.light_sample = seed.light_sample;  /* Store for analytical Jacobian computation */
 
-  /* Use the precomputed normals from load_surface_geometry.
+  /* Use normals following Mitsuba's ManifoldVertex construction approach.
+   * Per Codex finding: Mitsuba builds each vertex from bsdf()->frame and only flips
+   * the geometric normal to match the shading frame. We prioritize BSDF frame normal
+   * when available (from params.normal), falling back to interpolated/face normals.
+   *
    * For smooth shading: interpolate vertex normals
-   * For flat shading: use the face normal (already computed and stored in geometry.normals) */
-  if (seed.use_smooth_normals) {
+   * For flat shading: use the face normal (already computed and stored in geometry.normals)
+   * For BSDF frame: use params.normal if available (highest priority) */
+
+  if (params.has_normal) {
+    /* Use BSDF frame normal - highest priority per Mitsuba's approach.
+     * This comes from microfacet->N or shading_normal from specular_parameters_from_surface. */
+    eval.normal = params.normal;
+if (MPG_DEBUG::PARAMS()) {
+    printf("MPG DEBUG evaluate_specular: Using BSDF frame normal from params\n");
+    printf("  params.normal: (%.6f, %.6f, %.6f)\n",
+           params.normal.x, params.normal.y, params.normal.z);
+}
+    /* For BSDF frame normals, derivatives are zero (normal is constant across surface).
+     * Mitsuba uses frame->s and frame->t which are orthogonal to frame->n. */
+    eval.dNdu = zero_float3();
+    eval.dNdv = zero_float3();
+  }
+  else if (seed.use_smooth_normals) {
+    /* Fallback to interpolated vertex normals */
     eval.normal = combine_vertex_normals(geometry, u, v);
     if (is_zero(eval.normal)) {
       /* Fallback to face normal if interpolation gives zero */
@@ -585,7 +625,7 @@ void evaluate_specular(const ShadingPoint &D,
     eval.dNdv = compute_normal_derivative(geometry, u, v, eval.normal, false);
   }
   else {
-    /* Use precomputed face normal from load_surface_geometry - don't recompute! */
+    /* Use precomputed face normal from load_surface_geometry */
     eval.normal = geometry.normals[0];
 if (MPG_DEBUG::PARAMS()) {
     printf("MPG DEBUG evaluate_specular: Using flat shading normal\n");
