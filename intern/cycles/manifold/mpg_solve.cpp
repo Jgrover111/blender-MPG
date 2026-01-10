@@ -2408,6 +2408,19 @@ ccl_device_inline bool reproject_single_bounce(KernelGlobals kg,
                                  geometry.verts[1] * proposed_u +
                                  geometry.verts[2] * proposed_v;
 
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+  printf("    reproject_single DEBUG:\n");
+  printf("      proposed (u,v,w) = (%.6f, %.6f, %.6f)\n", proposed_u, proposed_v, w);
+  printf("      Triangle verts: v0=(%.4f,%.4f,%.4f) v1=(%.4f,%.4f,%.4f) v2=(%.4f,%.4f,%.4f)\n",
+         geometry.verts[0].x, geometry.verts[0].y, geometry.verts[0].z,
+         geometry.verts[1].x, geometry.verts[1].y, geometry.verts[1].z,
+         geometry.verts[2].x, geometry.verts[2].y, geometry.verts[2].z);
+  printf("      Proposed 3D point: (%.6f, %.6f, %.6f)\n",
+         proposed_point.x, proposed_point.y, proposed_point.z);
+  printf("      Receiver position: (%.6f, %.6f, %.6f)\n",
+         receiver.position.x, receiver.position.y, receiver.position.z);
+}
+
   /* Setup ray from receiver toward proposed vertex */
   Ray ray;
   ray.P = receiver.position;
@@ -2504,6 +2517,19 @@ ccl_device_inline bool reproject_double_bounce(KernelGlobals kg,
                                          primary_geometry.verts[1] * proposed_primary_u +
                                          primary_geometry.verts[2] * proposed_primary_v;
 
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+  printf("    reproject_double DEBUG (PRIMARY):\n");
+  printf("      proposed (u,v,w) = (%.6f, %.6f, %.6f)\n", proposed_primary_u, proposed_primary_v, w1);
+  printf("      Triangle verts: v0=(%.4f,%.4f,%.4f) v1=(%.4f,%.4f,%.4f) v2=(%.4f,%.4f,%.4f)\n",
+         primary_geometry.verts[0].x, primary_geometry.verts[0].y, primary_geometry.verts[0].z,
+         primary_geometry.verts[1].x, primary_geometry.verts[1].y, primary_geometry.verts[1].z,
+         primary_geometry.verts[2].x, primary_geometry.verts[2].y, primary_geometry.verts[2].z);
+  printf("      Proposed 3D primary point: (%.6f, %.6f, %.6f)\n",
+         proposed_primary_point.x, proposed_primary_point.y, proposed_primary_point.z);
+  printf("      Receiver position: (%.6f, %.6f, %.6f)\n",
+         receiver.position.x, receiver.position.y, receiver.position.z);
+}
+
   /* Ray-trace from receiver toward proposed primary */
   Ray ray1;
   ray1.P = receiver.position;
@@ -2514,7 +2540,7 @@ ccl_device_inline bool reproject_double_bounce(KernelGlobals kg,
   }
   ray1.D = direction1 / distance1;
   ray1.tmin = 0.0f;
-  ray1.tmax = distance1 * 1.0001f;
+  ray1.tmax = FLT_MAX;  /* Don't limit - let it find whatever it hits */
   ray1.time = 0.5f;
   ray1.dP = differential_zero_compact();
   ray1.dD = differential_zero_compact();
