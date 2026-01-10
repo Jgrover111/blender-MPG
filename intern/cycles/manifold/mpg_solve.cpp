@@ -2390,6 +2390,8 @@ ccl_device_inline float2 compute_guide_offset_normal(const GuideSummary &guide,
  * On success, updates hit_u and hit_v with the intersection's barycentric coords */
 ccl_device_inline bool reproject_single_bounce(KernelGlobals kg,
                                                const ShadingPoint &receiver,
+                                               int receiver_object,
+                                               int receiver_prim,
                                                const SpecularSurfaceGeometry &geometry,
                                                const SpecularParameters &params,
                                                float proposed_u,
@@ -2437,9 +2439,9 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
   ray.dP = differential_zero_compact();
   ray.dD = differential_zero_compact();
 
-  /* Skip receiver surface to avoid self-intersection */
-  ray.self.object = OBJECT_NONE;
-  ray.self.prim = PRIM_NONE;
+  /* Configure ray to skip the receiver surface - critical to avoid self-intersection */
+  ray.self.object = receiver_object;
+  ray.self.prim = receiver_prim;
   ray.self.light_object = OBJECT_NONE;
   ray.self.light_prim = PRIM_NONE;
 
@@ -2492,6 +2494,8 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
  * On success, updates hit coordinates with the intersections' barycentric coords */
 ccl_device_inline bool reproject_double_bounce(KernelGlobals kg,
                                                const ShadingPoint &receiver,
+                                               int receiver_object,
+                                               int receiver_prim,
                                                const SpecularSurfaceGeometry &primary_geometry,
                                                const SpecularParameters &primary_params,
                                                float proposed_primary_u,
@@ -2544,8 +2548,9 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
   ray1.time = 0.5f;
   ray1.dP = differential_zero_compact();
   ray1.dD = differential_zero_compact();
-  ray1.self.object = OBJECT_NONE;
-  ray1.self.prim = PRIM_NONE;
+  /* Configure ray to skip the receiver surface - critical to avoid self-intersection */
+  ray1.self.object = receiver_object;
+  ray1.self.prim = receiver_prim;
   ray1.self.light_object = OBJECT_NONE;
   ray1.self.light_prim = PRIM_NONE;
 
@@ -2562,6 +2567,12 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
 if (MPG_DEBUG::NEWTON_DETAIL()) {
     printf("    reproject_double FAIL: Wrong primary surface (expected obj=%d prim=%d, got obj=%d prim=%d)\n",
            expected_primary_object, expected_primary_prim, isect1.object, isect1.prim);
+    printf("      Ray origin: (%.6f, %.6f, %.6f)\n", ray1.P.x, ray1.P.y, ray1.P.z);
+    printf("      Ray direction: (%.6f, %.6f, %.6f)\n", ray1.D.x, ray1.D.y, ray1.D.z);
+    printf("      Hit distance t: %.6f\n", isect1.t);
+    const float3 hit_pos = ray1.P + ray1.D * isect1.t;
+    printf("      Hit 3D position: (%.6f, %.6f, %.6f)\n", hit_pos.x, hit_pos.y, hit_pos.z);
+    printf("      ray.self: object=%d prim=%d (should skip receiver if same as hit)\n", ray1.self.object, ray1.self.prim);
 }
     return false;
   }
@@ -2850,7 +2861,8 @@ if (MPG_DEBUG::PARAMS()) {
      * ray-traces to find what surface is hit, and returns the hit's barycentric coords.
      * This is the key difference from parameter-space clamping. */
     float new_u, new_v;
-    if (!reproject_single_bounce(kg, shading_point, geometry, params, proposed_u, proposed_v,
+    if (!reproject_single_bounce(kg, shading_point, sd.object, sd.prim,
+                                  geometry, params, proposed_u, proposed_v,
                                   seed.object, seed.prim, new_u, new_v)) {
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
@@ -3353,7 +3365,7 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
      * ray-traces the full path, and returns the hits' barycentric coords.
      * This validates the entire chain: receiver → primary → secondary */
     float new_primary_u, new_primary_v, new_secondary_u, new_secondary_v;
-    if (!reproject_double_bounce(kg, receiver,
+    if (!reproject_double_bounce(kg, receiver, sd.object, sd.prim,
                                   primary_geometry, primary_params, proposed_primary_u, proposed_primary_v,
                                   seed.object, seed.prim, new_primary_u, new_primary_v,
                                   secondary_geometry, secondary_params, proposed_secondary_u, proposed_secondary_v,
