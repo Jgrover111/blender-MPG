@@ -2377,12 +2377,17 @@ ccl_device_inline float2 compute_guide_offset_normal(const GuideSummary &guide,
  * proposed vertex position and verifying we hit the expected surface.
  *
  * Per Mitsuba reference (manifold_path_guiding.h:reproject):
- * - Ray-trace from start point to proposed position
+ * - Compute 3D position from potentially OUT-OF-BOUNDS barycentric coords
+ *   (position in tangent plane extension, might be off-triangle)
+ * - Ray-trace from start point toward this 3D position
  * - Verify intersection hits the same shape as previous iteration
- * - Perform specular scatter (reflect/refract) at vertex
- * - Return success only if all checks pass
+ * - Return the HIT's barycentric coordinates (not the input coords)
  *
- * Returns: true if ray-traced path is geometrically valid, false otherwise */
+ * This differs from parameter-space clamping: Newton can propose far off-triangle,
+ * and reproject finds where the ray actually hits.
+ *
+ * Returns: true if ray-traced path is geometrically valid, false otherwise
+ * On success, updates hit_u and hit_v with the intersection's barycentric coords */
 ccl_device_inline bool reproject_single_bounce(KernelGlobals kg,
                                                const ShadingPoint &receiver,
                                                const SpecularSurfaceGeometry &geometry,
@@ -2390,9 +2395,14 @@ ccl_device_inline bool reproject_single_bounce(KernelGlobals kg,
                                                float proposed_u,
                                                float proposed_v,
                                                int expected_object,
-                                               int expected_prim)
+                                               int expected_prim,
+                                               float &hit_u,
+                                               float &hit_v)
 {
-  /* Compute proposed 3D position from barycentric coordinates */
+  /* Compute proposed 3D position from UNCLAMPED barycentric coordinates.
+   * This extends into the triangle's tangent plane, matching Mitsuba's approach:
+   * p_prop = v.p - step_scale * beta * (v.dp_du * dx[0] + v.dp_dv * dx[1])
+   * The position might be far off-triangle if Newton proposes a large step. */
   const float w = 1.0f - proposed_u - proposed_v;
   const float3 proposed_point = geometry.verts[0] * w +
                                  geometry.verts[1] * proposed_u +
@@ -2409,7 +2419,7 @@ ccl_device_inline bool reproject_single_bounce(KernelGlobals kg,
   }
   ray.D = direction / distance;
   ray.tmin = 0.0f;
-  ray.tmax = distance * 1.0001f;  /* Slightly past target to ensure hit */
+  ray.tmax = FLT_MAX;  /* Don't limit - let it find whatever it hits */
   ray.time = 0.5f;  /* Mid-shutter time */
   ray.dP = differential_zero_compact();
   ray.dD = differential_zero_compact();
@@ -2440,19 +2450,13 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     return false;
   }
 
-  /* Verify we hit close to the proposed point (within reasonable tolerance) */
-  const float hit_distance = isect.t;
-  if (fabsf(hit_distance - distance) > 0.01f * distance) {
-    /* Hit point significantly different from proposal */
-if (MPG_DEBUG::NEWTON_DETAIL()) {
-    printf("    reproject FAIL: Hit distance mismatch (expected %.6f, got %.6f)\n",
-           distance, hit_distance);
-}
-    return false;
-  }
+  /* Extract barycentric coordinates from the hit.
+   * This is what Mitsuba does: use the ray-traced intersection point's actual coordinates. */
+  hit_u = isect.u;
+  hit_v = isect.v;
 
 if (MPG_DEBUG::NEWTON_DETAIL()) {
-  printf("    reproject SUCCESS: Hit correct surface at correct distance\n");
+  printf("    reproject SUCCESS: Hit correct surface at (u=%.6f, v=%.6f)\n", hit_u, hit_v);
 }
 
   /* All checks passed - proposed vertex is geometrically valid */
@@ -2468,7 +2472,11 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
  * - Each ray hits the expected shape (same object/prim as previous iteration)
  * - Scattering is geometrically valid at each vertex
  *
- * Returns: true if entire ray-traced path is geometrically valid, false otherwise */
+ * Like single-bounce, computes 3D positions from UNCLAMPED barycentric coords
+ * and returns the hit's actual barycentric coordinates.
+ *
+ * Returns: true if entire ray-traced path is geometrically valid, false otherwise
+ * On success, updates hit coordinates with the intersections' barycentric coords */
 ccl_device_inline bool reproject_double_bounce(KernelGlobals kg,
                                                const ShadingPoint &receiver,
                                                const SpecularSurfaceGeometry &primary_geometry,
@@ -2477,12 +2485,16 @@ ccl_device_inline bool reproject_double_bounce(KernelGlobals kg,
                                                float proposed_primary_v,
                                                int expected_primary_object,
                                                int expected_primary_prim,
+                                               float &hit_primary_u,
+                                               float &hit_primary_v,
                                                const SpecularSurfaceGeometry &secondary_geometry,
                                                const SpecularParameters &secondary_params,
                                                float proposed_secondary_u,
                                                float proposed_secondary_v,
                                                int expected_secondary_object,
-                                               int expected_secondary_prim)
+                                               int expected_secondary_prim,
+                                               float &hit_secondary_u,
+                                               float &hit_secondary_v)
 {
   /* === FIRST SEGMENT: receiver → primary vertex === */
 
@@ -2528,6 +2540,10 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     return false;
   }
 
+  /* Extract primary hit's barycentric coordinates */
+  hit_primary_u = isect1.u;
+  hit_primary_v = isect1.v;
+
   /* === SECOND SEGMENT: primary vertex → secondary vertex === */
 
   /* Compute proposed secondary 3D position */
@@ -2536,10 +2552,17 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
                                            secondary_geometry.verts[1] * proposed_secondary_u +
                                            secondary_geometry.verts[2] * proposed_secondary_v;
 
-  /* Ray-trace from primary toward proposed secondary */
+  /* Use the ACTUAL hit primary position for the second ray segment.
+   * Mitsuba uses the reprojected positions for subsequent segments. */
+  const float w1_hit = 1.0f - hit_primary_u - hit_primary_v;
+  const float3 hit_primary_point = primary_geometry.verts[0] * w1_hit +
+                                    primary_geometry.verts[1] * hit_primary_u +
+                                    primary_geometry.verts[2] * hit_primary_v;
+
+  /* Ray-trace from actual primary hit toward proposed secondary */
   Ray ray2;
-  ray2.P = proposed_primary_point;
-  const float3 direction2 = proposed_secondary_point - proposed_primary_point;
+  ray2.P = hit_primary_point;
+  const float3 direction2 = proposed_secondary_point - hit_primary_point;
   const float distance2 = len(direction2);
   if (!(distance2 > 1e-6f)) {
 if (MPG_DEBUG::NEWTON_DETAIL()) {
@@ -2549,7 +2572,7 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
   }
   ray2.D = direction2 / distance2;
   ray2.tmin = 0.0f;
-  ray2.tmax = distance2 * 1.0001f;
+  ray2.tmax = FLT_MAX;  /* Don't limit - let it find whatever it hits */
   ray2.time = 0.5f;
   ray2.dP = differential_zero_compact();
   ray2.dD = differential_zero_compact();
@@ -2576,8 +2599,13 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     return false;
   }
 
+  /* Extract secondary hit's barycentric coordinates */
+  hit_secondary_u = isect2.u;
+  hit_secondary_v = isect2.v;
+
 if (MPG_DEBUG::NEWTON_DETAIL()) {
-  printf("    reproject_double SUCCESS: Both vertices reachable on correct surfaces\n");
+  printf("    reproject_double SUCCESS: prim(%.6f,%.6f) sec(%.6f,%.6f)\n",
+         hit_primary_u, hit_primary_v, hit_secondary_u, hit_secondary_v);
 }
 
   /* All checks passed - proposed path is geometrically valid */
@@ -2786,21 +2814,24 @@ if (MPG_DEBUG::PARAMS()) {
     }
 
     /* Apply step with step_scale * beta scaling (Mitsuba approach).
-     * Matches Mitsuba: p_prop = p - step_scale * beta * (dp_du * dx[0] + dp_dv * dx[1]) */
-    float new_u = u - options.step_scale * beta * delta.x;
-    float new_v = v - options.step_scale * beta * delta.y;
-    project_barycentrics(new_u, new_v);
+     * Matches Mitsuba: p_prop = p - step_scale * beta * (dp_du * dx[0] + dp_dv * dx[1])
+     * DO NOT clamp to [0,1] - let reproject handle out-of-bounds proposals. */
+    float proposed_u = u - options.step_scale * beta * delta.x;
+    float proposed_v = v - options.step_scale * beta * delta.y;
 
     /* Per Mitsuba: ray-trace to verify proposed vertex is geometrically reachable.
-     * This is the key difference from parameter-only validation - ensures Newton doesn't
-     * propose vertices that are locally valid but on wrong surfaces. */
-    if (!reproject_single_bounce(kg, shading_point, geometry, params, new_u, new_v,
-                                  seed.object, seed.prim)) {
+     * Reproject computes 3D position from potentially out-of-bounds barycentric coords,
+     * ray-traces to find what surface is hit, and returns the hit's barycentric coords.
+     * This is the key difference from parameter-space clamping. */
+    float new_u, new_v;
+    if (!reproject_single_bounce(kg, shading_point, geometry, params, proposed_u, proposed_v,
+                                  seed.object, seed.prim, new_u, new_v)) {
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
       continue;
     }
 
+    /* Use the reprojected barycentric coordinates for subsequent evaluation */
     SpecularParameters new_params;
     if (!specular_parameters_from_surface(kg, sd, geometry, seed, 0, new_u, new_v, new_params)) {
       beta *= 0.5f;
@@ -3276,37 +3307,31 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     }
 
     /* Apply step with step_scale * beta scaling (Mitsuba approach).
-     * Matches Mitsuba: p_prop = p - step_scale * beta * (dp_du * dx[0] + dp_dv * dx[1]) */
-    float new_primary_u = primary_u - options.step_scale * beta * delta[0];
-    float new_primary_v = primary_v - options.step_scale * beta * delta[1];
-    float new_secondary_u = secondary_u - options.step_scale * beta * delta[2];
-    float new_secondary_v = secondary_v - options.step_scale * beta * delta[3];
+     * Matches Mitsuba: p_prop = p - step_scale * beta * (dp_du * dx[0] + dp_dv * dx[1])
+     * DO NOT clamp to [0,1] - let reproject handle out-of-bounds proposals. */
+    float proposed_primary_u = primary_u - options.step_scale * beta * delta[0];
+    float proposed_primary_v = primary_v - options.step_scale * beta * delta[1];
+    float proposed_secondary_u = secondary_u - options.step_scale * beta * delta[2];
+    float proposed_secondary_v = secondary_v - options.step_scale * beta * delta[3];
 
 if (MPG_DEBUG::NEWTON_DETAIL()) {
     if ((iter + 1) % 5 == 0 || iter == 0) {
-      printf("    Step %2d: delta=(%.4f,%.4f,%.4f,%.4f) → prim(%.4f,%.4f) sec(%.4f,%.4f)\n",
+      printf("    Step %2d: delta=(%.4f,%.4f,%.4f,%.4f) → proposed prim(%.4f,%.4f) sec(%.4f,%.4f)\n",
              iter + 1, delta[0], delta[1], delta[2], delta[3],
-             new_primary_u, new_primary_v, new_secondary_u, new_secondary_v);
-    }
-}
-
-    project_barycentrics(new_primary_u, new_primary_v);
-    project_barycentrics(new_secondary_u, new_secondary_v);
-
-if (MPG_DEBUG::NEWTON_DETAIL()) {
-    if ((iter + 1) % 5 == 0 || iter == 0) {
-      printf("    After projection: prim(%.4f,%.4f) sec(%.4f,%.4f)\n",
-             new_primary_u, new_primary_v, new_secondary_u, new_secondary_v);
+             proposed_primary_u, proposed_primary_v, proposed_secondary_u, proposed_secondary_v);
     }
 }
 
     /* Per Mitsuba: ray-trace to verify proposed path is geometrically reachable.
+     * Reproject computes 3D positions from potentially out-of-bounds barycentric coords,
+     * ray-traces the full path, and returns the hits' barycentric coords.
      * This validates the entire chain: receiver → primary → secondary */
+    float new_primary_u, new_primary_v, new_secondary_u, new_secondary_v;
     if (!reproject_double_bounce(kg, receiver,
-                                  primary_geometry, primary_params, new_primary_u, new_primary_v,
-                                  seed.object, seed.prim,
-                                  secondary_geometry, secondary_params, new_secondary_u, new_secondary_v,
-                                  secondary_seed.object, secondary_seed.prim)) {
+                                  primary_geometry, primary_params, proposed_primary_u, proposed_primary_v,
+                                  seed.object, seed.prim, new_primary_u, new_primary_v,
+                                  secondary_geometry, secondary_params, proposed_secondary_u, proposed_secondary_v,
+                                  secondary_seed.object, secondary_seed.prim, new_secondary_u, new_secondary_v)) {
 if (MPG_DEBUG::NEWTON_DETAIL()) {
       printf("  Iter %2d: REJECT #0 - reproject failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
 }
@@ -3315,6 +3340,7 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
       continue;
     }
 
+    /* Use the reprojected barycentric coordinates for subsequent evaluation */
     SpecularParameters new_primary_params;
     if (!specular_parameters_from_surface(
             kg, sd, primary_geometry, seed, 0, new_primary_u, new_primary_v, new_primary_params))
