@@ -769,8 +769,21 @@ if (MPG_DEBUG::PARAMS()) {
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
       kg, integrator_state, &spec_sd, nullptr, PATH_RAY_CAMERA, true);
 
-  const float3 shading_normal = safe_normalize(spec_sd.N);
-  const bool has_shading_normal = !is_zero(shading_normal);
+  /* CRITICAL: Do NOT use spec_sd.N directly as it may be faceforward-ed!
+   * Per Codex finding: Mitsuba builds ManifoldVertex from bsdf()->frame (not faceforward).
+   * We'll use microfacet->N (BSDF frame) when available, or raw geometric_normal.
+   * Never use spec_sd.N which is flipped to face the ray - this breaks entering/exiting. */
+  const float3 raw_shading_normal = safe_normalize(spec_sd.N);
+  const bool has_raw_shading_normal = !is_zero(raw_shading_normal);
+
+if (MPG_DEBUG::PARAMS()) {
+  printf("MPG DEBUG specular_parameters_from_surface: Normal sources\n");
+  printf("  geometric_normal (from cross product): (%.6f, %.6f, %.6f)\n",
+         geometric_normal.x, geometric_normal.y, geometric_normal.z);
+  printf("  spec_sd.N (potentially faceforward-ed): (%.6f, %.6f, %.6f)\n",
+         raw_shading_normal.x, raw_shading_normal.y, raw_shading_normal.z);
+  printf("  Will use microfacet->N if available, else geometric_normal\n");
+}
 
   const MicrofacetBsdf *reflection_microfacet = nullptr;
   const MicrofacetBsdf *refraction_microfacet = nullptr;
@@ -786,10 +799,11 @@ if (MPG_DEBUG::PARAMS()) {
     Transmission,
   };
 
-  float3 hemisphere_normal = shading_normal;
-  bool hemisphere_normal_valid = has_shading_normal;
-  if (!hemisphere_normal_valid && has_geometric_normal) {
-    hemisphere_normal = geometric_normal;
+  /* Use geometric_normal for hemisphere determination, not faceforward-ed spec_sd.N */
+  float3 hemisphere_normal = geometric_normal;
+  bool hemisphere_normal_valid = has_geometric_normal;
+  if (!hemisphere_normal_valid && has_raw_shading_normal) {
+    hemisphere_normal = raw_shading_normal;
     hemisphere_normal_valid = true;
   }
   if (hemisphere_normal_valid) {
@@ -1042,8 +1056,9 @@ if (MPG_DEBUG::PARAMS()) {
           eta = fmaxf(1.0e-6f, refraction_microfacet->ior);
         }
         refraction_params.base_eta = fabsf(eta);
-        if (has_shading_normal) {
-          refraction_params.normal = shading_normal;
+        /* Per Codex: use BSDF frame (microfacet->N) or geometric_normal, NOT faceforward-ed shading */
+        if (refraction_microfacet && !is_zero(refraction_microfacet->N)) {
+          refraction_params.normal = safe_normalize(refraction_microfacet->N);
           refraction_params.has_normal = true;
         }
         else if (has_geometric_normal) {
@@ -1088,11 +1103,8 @@ if (MPG_DEBUG::PARAMS()) {
         }
       }
     }
-    if (has_shading_normal && !params.has_normal) {
-      params.normal = shading_normal;
-      params.has_normal = true;
-    }
-    else if (!params.has_normal && has_geometric_normal) {
+    /* Per Codex: use geometric_normal, NOT faceforward-ed shading_normal */
+    if (!params.has_normal && has_geometric_normal) {
       params.normal = geometric_normal;
       params.has_normal = true;
     }
@@ -1247,8 +1259,9 @@ if (MPG_DEBUG::PARAMS()) {
     params.base_eta = 1.0f;
   }
   params.microfacet.N = normalize(params.microfacet.N);
-  if (has_shading_normal) {
-    params.normal = shading_normal;
+  /* Per Codex: use microfacet->N (BSDF frame) or geometric_normal, NOT faceforward-ed shading */
+  if (!is_zero(params.microfacet.N)) {
+    params.normal = params.microfacet.N;
     params.has_normal = true;
   }
   else if (has_geometric_normal) {
@@ -1270,10 +1283,15 @@ if (MPG_DEBUG::PARAMS()) {
     const bool bad_reflection = !params.is_refraction ? (s < 0.0f) : false;
     if (bad_refraction || bad_reflection) {
       params.microfacet.N = -params.microfacet.N;
+      /* Update params.normal to match flipped microfacet.N */
+      if (params.has_normal && !is_zero(params.microfacet.N)) {
+        params.normal = params.microfacet.N;
+      }
     }
   }
-  if (!params.has_normal && has_shading_normal) {
-    params.normal = shading_normal;
+  /* Fallback to geometric_normal if still no normal (should not happen with microfacet) */
+  if (!params.has_normal && has_geometric_normal) {
+    params.normal = geometric_normal;
     params.has_normal = true;
   }
   /* Store backfacing flag for robust entering/exiting determination.
