@@ -2493,18 +2493,19 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
 
 /* Ray-traced reproject for double-bounce manifold path.
  *
- * Validates proposed (u1,v1) and (u2,v2) by ray-tracing the full path:
- * receiver → primary vertex → secondary vertex
+ * Per Mitsuba reference: validates proposed vertices by scatter-and-trace loop:
+ * 1. Ray-trace receiver → proposed primary vertex
+ * 2. Apply specular scattering (refraction/reflection) at primary vertex
+ * 3. Trace scattered direction to find where it hits (determines secondary vertex)
+ * 4. Verify hits are on expected objects
  *
- * Per Mitsuba reference, must verify:
- * - Each ray hits the expected shape (same object/prim as previous iteration)
- * - Scattering is geometrically valid at each vertex
+ * This validates BOTH geometry (ray hits surface) AND physics (Snell's law, no TIR).
+ * Unlike parameter-space validation, this rejects physically impossible paths during
+ * reproject (before Jacobian computation).
  *
- * Like single-bounce, computes 3D positions from UNCLAMPED barycentric coords
- * and returns the hit's actual barycentric coordinates.
- *
- * Returns: true if entire ray-traced path is geometrically valid, false otherwise
- * On success, updates hit coordinates with the intersections' barycentric coords */
+ * Returns: true if path is geometrically and physically valid
+ * On success, updates hit coordinates (primary from ray-trace, secondary from scatter)
+ */
 ccl_device_inline bool reproject_double_bounce(KernelGlobals kg,
                                                const ShadingPoint &receiver,
                                                int receiver_object,
@@ -2603,48 +2604,77 @@ if (MPG_DEBUG::NEWTON_DETAIL() && isect1.prim != expected_primary_prim) {
   hit_primary_u = isect1.u;
   hit_primary_v = isect1.v;
 
-  /* === SECOND SEGMENT: primary vertex → secondary vertex === */
+  /* === SECOND SEGMENT: Apply specular scattering at primary, trace scattered ray === */
 
-  /* Compute proposed secondary 3D position */
-  const float w2 = 1.0f - proposed_secondary_u - proposed_secondary_v;
-  const float3 proposed_secondary_point = secondary_geometry.verts[0] * w2 +
-                                           secondary_geometry.verts[1] * proposed_secondary_u +
-                                           secondary_geometry.verts[2] * proposed_secondary_v;
-
-  /* Use the ACTUAL hit primary position for the second ray segment.
-   * Mitsuba uses the reprojected positions for subsequent segments. */
+  /* Compute actual hit primary 3D position and normal */
   const float w1_hit = 1.0f - hit_primary_u - hit_primary_v;
   const float3 hit_primary_point = primary_geometry.verts[0] * w1_hit +
                                     primary_geometry.verts[1] * hit_primary_u +
                                     primary_geometry.verts[2] * hit_primary_v;
 
-  /* Ray-trace from actual primary hit toward proposed secondary */
-  Ray ray2;
-  ray2.P = hit_primary_point;
-  const float3 direction2 = proposed_secondary_point - hit_primary_point;
-  const float distance2 = len(direction2);
-  if (!(distance2 > 1e-6f)) {
+  /* Get primary vertex normal for scattering.
+   * Use smooth shading if available, otherwise face normal. */
+  float3 primary_normal;
+  if (primary_params.has_normal) {
+    /* Use explicit normal from params (e.g., bump mapping) */
+    primary_normal = primary_params.normal;
+  } else {
+    /* Interpolate vertex normals (smooth shading) or use face normal */
+    primary_normal = combine_vertex_normals(primary_geometry, hit_primary_u, hit_primary_v);
+    if (is_zero(primary_normal)) {
+      /* Fallback to face normal */
+      primary_normal = primary_geometry.normals[0];
+    }
+  }
+  primary_normal = safe_normalize(primary_normal);
+
+  /* CRITICAL: Apply specular scattering (refraction/reflection) at primary vertex.
+   * This is the key difference from geometric-only reproject - we validate physics!
+   * Per Mitsuba: compute_specular() determines the scattered direction using Snell's law. */
+  bool tir_at_primary = false;
+  float cos_theta_i, cos_theta_t, eta_used;
+  const float3 scattered_direction = compute_specular(
+      ray1.D,              // Incoming direction (receiver → primary)
+      primary_normal,      // Primary vertex normal
+      primary_params,      // Primary material (IOR, is_refraction, backfacing, etc.)
+      tir_at_primary,      // Output: did total internal reflection occur?
+      cos_theta_i,         // Output: incident angle cosine
+      cos_theta_t,         // Output: transmitted angle cosine (0 if TIR)
+      eta_used);           // Output: eta ratio used
+
+  if (tir_at_primary) {
+    /* Total internal reflection at primary vertex - path is physically invalid.
+     * This is exactly what Mitsuba checks: if scattering fails (TIR), reject immediately.
+     * No need to check further - this path cannot exist. */
 if (MPG_DEBUG::NEWTON_DETAIL()) {
-    printf("    reproject_double FAIL: Primary and secondary too close\n");
+    printf("    reproject_double FAIL: TIR at primary vertex (physics violation)\n");
 }
     return false;
   }
-  ray2.D = direction2 / distance2;
-  ray2.tmin = 0.0f;
-  ray2.tmax = FLT_MAX;  /* Don't limit - let it find whatever it hits */
+
+  /* Trace the SCATTERED direction to find where it hits.
+   * Per Mitsuba: the secondary vertex is determined by WHERE THE SCATTERED RAY HITS,
+   * not by the Newton proposal! The proposal just suggests a direction to try. */
+  Ray ray2;
+  ray2.P = hit_primary_point;
+  ray2.D = scattered_direction;  // Use physics-correct scattered direction!
+  ray2.tmin = 1e-4f;  // Small offset to avoid self-intersection
+  ray2.tmax = FLT_MAX;
   ray2.time = 0.5f;
   ray2.dP = differential_zero_compact();
   ray2.dD = differential_zero_compact();
   /* Skip primary surface to avoid self-intersection */
-  ray2.self.object = expected_primary_object;
-  ray2.self.prim = expected_primary_prim;
+  ray2.self.object = hit_primary_object;  // Use actual hit, not expected
+  ray2.self.prim = hit_primary_prim;
   ray2.self.light_object = OBJECT_NONE;
   ray2.self.light_prim = PRIM_NONE;
 
   Intersection isect2;
   if (!scene_intersect(kg, &ray2, PATH_RAY_ALL_VISIBILITY, &isect2)) {
+    /* Scattered ray didn't hit anything - path is physically invalid.
+     * This can happen if the scattered direction points away from the scene. */
 if (MPG_DEBUG::NEWTON_DETAIL()) {
-    printf("    reproject_double FAIL: Secondary vertex not reachable from primary\n");
+    printf("    reproject_double FAIL: Scattered ray from primary didn't hit anything\n");
 }
     return false;
   }
@@ -2666,19 +2696,26 @@ if (MPG_DEBUG::NEWTON_DETAIL() && isect2.prim != expected_secondary_prim) {
          expected_secondary_prim, isect2.prim, isect2.object);
 }
 
-  /* Extract secondary hit information: object, primitive, and barycentric coordinates.
-   * If we walked to a different triangle, caller must reload geometry for the new prim. */
+  /* Extract secondary hit information from WHERE THE SCATTERED RAY HIT.
+   * CRITICAL: These are NOT the proposed secondary coordinates!
+   * The secondary vertex position is determined by physics (Snell's law),
+   * not by the Newton proposal. The proposal just suggests a search direction. */
   hit_secondary_object = isect2.object;
   hit_secondary_prim = isect2.prim;
-  hit_secondary_u = isect2.u;
-  hit_secondary_v = isect2.v;
+  hit_secondary_u = isect2.u;  // From scattered ray hit
+  hit_secondary_v = isect2.v;  // From scattered ray hit
 
 if (MPG_DEBUG::NEWTON_DETAIL()) {
-  printf("    reproject_double SUCCESS: prim(%.6f,%.6f) sec(%.6f,%.6f)\n",
-         hit_primary_u, hit_primary_v, hit_secondary_u, hit_secondary_v);
+  printf("    reproject_double SUCCESS:\n");
+  printf("      Primary: hit (%.6f, %.6f) on obj=%d prim=%d\n",
+         hit_primary_u, hit_primary_v, hit_primary_object, hit_primary_prim);
+  printf("      Secondary: scattered ray hit (%.6f, %.6f) on obj=%d prim=%d\n",
+         hit_secondary_u, hit_secondary_v, hit_secondary_object, hit_secondary_prim);
+  printf("      (Note: secondary coords from physics, not from proposal)\n");
 }
 
-  /* All checks passed - proposed path is geometrically valid */
+  /* All checks passed - path is geometrically and physically valid!
+   * Both ray-tracing (geometry) and scattering (physics) succeeded. */
   return true;
 }
 
