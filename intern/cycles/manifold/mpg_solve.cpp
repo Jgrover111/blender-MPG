@@ -2398,6 +2398,8 @@ ccl_device_inline bool reproject_single_bounce(KernelGlobals kg,
                                                float proposed_v,
                                                int expected_object,
                                                int expected_prim,
+                                               int &hit_object,
+                                               int &hit_prim,
                                                float &hit_u,
                                                float &hit_v)
 {
@@ -2455,23 +2457,34 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     return false;
   }
 
-  /* Verify we hit the expected shape (Mitsuba's key check) */
-  if (isect.object != expected_object || isect.prim != expected_prim) {
-    /* Hit wrong surface - reject this Newton step */
+  /* Verify we hit the expected shape (Mitsuba's key check).
+   * Per Mitsuba: compare Shape (object), NOT primitive (triangle).
+   * Newton is allowed to walk across triangle boundaries on the same continuous mesh. */
+  if (isect.object != expected_object) {
+    /* Hit different mesh - reject this Newton step */
 if (MPG_DEBUG::NEWTON_DETAIL()) {
-    printf("    reproject FAIL: Wrong surface (expected obj=%d prim=%d, got obj=%d prim=%d)\n",
-           expected_object, expected_prim, isect.object, isect.prim);
+    printf("    reproject FAIL: Wrong mesh object (expected obj=%d, got obj=%d)\n",
+           expected_object, isect.object);
 }
     return false;
   }
 
-  /* Extract barycentric coordinates from the hit.
-   * This is what Mitsuba does: use the ray-traced intersection point's actual coordinates. */
+  /* If we hit a different triangle on the same mesh, that's OK - Newton walked to adjacent triangle */
+if (MPG_DEBUG::NEWTON_DETAIL() && isect.prim != expected_prim) {
+  printf("    reproject: Walked to adjacent triangle (prim %d → %d on same mesh obj=%d)\n",
+         expected_prim, isect.prim, isect.object);
+}
+
+  /* Extract hit information: object, primitive, and barycentric coordinates.
+   * This is what Mitsuba does: use the ray-traced intersection point's actual coordinates.
+   * If we walked to a different triangle, caller must reload geometry for the new prim. */
+  hit_object = isect.object;
+  hit_prim = isect.prim;
   hit_u = isect.u;
   hit_v = isect.v;
 
 if (MPG_DEBUG::NEWTON_DETAIL()) {
-  printf("    reproject SUCCESS: Hit correct surface at (u=%.6f, v=%.6f)\n", hit_u, hit_v);
+  printf("    reproject SUCCESS: Hit surface at (u=%.6f, v=%.6f)\n", hit_u, hit_v);
 }
 
   /* All checks passed - proposed vertex is geometrically valid */
@@ -2502,6 +2515,8 @@ ccl_device_inline bool reproject_double_bounce(KernelGlobals kg,
                                                float proposed_primary_v,
                                                int expected_primary_object,
                                                int expected_primary_prim,
+                                               int &hit_primary_object,
+                                               int &hit_primary_prim,
                                                float &hit_primary_u,
                                                float &hit_primary_v,
                                                const SpecularSurfaceGeometry &secondary_geometry,
@@ -2510,6 +2525,8 @@ ccl_device_inline bool reproject_double_bounce(KernelGlobals kg,
                                                float proposed_secondary_v,
                                                int expected_secondary_object,
                                                int expected_secondary_prim,
+                                               int &hit_secondary_object,
+                                               int &hit_secondary_prim,
                                                float &hit_secondary_u,
                                                float &hit_secondary_v)
 {
@@ -2562,22 +2579,27 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     return false;
   }
 
-  /* Verify we hit the expected primary shape */
-  if (isect1.object != expected_primary_object || isect1.prim != expected_primary_prim) {
+  /* Verify we hit the expected primary shape.
+   * Per Mitsuba: compare Shape (object), NOT primitive (triangle).
+   * Newton is allowed to walk across triangle boundaries on the same continuous mesh. */
+  if (isect1.object != expected_primary_object) {
 if (MPG_DEBUG::NEWTON_DETAIL()) {
-    printf("    reproject_double FAIL: Wrong primary surface (expected obj=%d prim=%d, got obj=%d prim=%d)\n",
-           expected_primary_object, expected_primary_prim, isect1.object, isect1.prim);
-    printf("      Ray origin: (%.6f, %.6f, %.6f)\n", ray1.P.x, ray1.P.y, ray1.P.z);
-    printf("      Ray direction: (%.6f, %.6f, %.6f)\n", ray1.D.x, ray1.D.y, ray1.D.z);
-    printf("      Hit distance t: %.6f\n", isect1.t);
-    const float3 hit_pos = ray1.P + ray1.D * isect1.t;
-    printf("      Hit 3D position: (%.6f, %.6f, %.6f)\n", hit_pos.x, hit_pos.y, hit_pos.z);
-    printf("      ray.self: object=%d prim=%d (should skip receiver if same as hit)\n", ray1.self.object, ray1.self.prim);
+    printf("    reproject_double FAIL: Wrong primary mesh (expected obj=%d, got obj=%d)\n",
+           expected_primary_object, isect1.object);
 }
     return false;
   }
 
-  /* Extract primary hit's barycentric coordinates */
+  /* If we hit a different triangle on the same mesh, that's OK - Newton walked to adjacent triangle */
+if (MPG_DEBUG::NEWTON_DETAIL() && isect1.prim != expected_primary_prim) {
+  printf("    reproject_double: Primary walked to adjacent triangle (prim %d → %d on obj=%d)\n",
+         expected_primary_prim, isect1.prim, isect1.object);
+}
+
+  /* Extract primary hit information: object, primitive, and barycentric coordinates.
+   * If we walked to a different triangle, caller must reload geometry for the new prim. */
+  hit_primary_object = isect1.object;
+  hit_primary_prim = isect1.prim;
   hit_primary_u = isect1.u;
   hit_primary_v = isect1.v;
 
@@ -2627,16 +2649,27 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     return false;
   }
 
-  /* Verify we hit the expected secondary shape */
-  if (isect2.object != expected_secondary_object || isect2.prim != expected_secondary_prim) {
+  /* Verify we hit the expected secondary shape.
+   * Per Mitsuba: compare Shape (object), NOT primitive (triangle).
+   * Newton is allowed to walk across triangle boundaries on the same continuous mesh. */
+  if (isect2.object != expected_secondary_object) {
 if (MPG_DEBUG::NEWTON_DETAIL()) {
-    printf("    reproject_double FAIL: Wrong secondary surface (expected obj=%d prim=%d, got obj=%d prim=%d)\n",
-           expected_secondary_object, expected_secondary_prim, isect2.object, isect2.prim);
+    printf("    reproject_double FAIL: Wrong secondary mesh (expected obj=%d, got obj=%d)\n",
+           expected_secondary_object, isect2.object);
 }
     return false;
   }
 
-  /* Extract secondary hit's barycentric coordinates */
+  /* If we hit a different triangle on the same mesh, that's OK - Newton walked to adjacent triangle */
+if (MPG_DEBUG::NEWTON_DETAIL() && isect2.prim != expected_secondary_prim) {
+  printf("    reproject_double: Secondary walked to adjacent triangle (prim %d → %d on obj=%d)\n",
+         expected_secondary_prim, isect2.prim, isect2.object);
+}
+
+  /* Extract secondary hit information: object, primitive, and barycentric coordinates.
+   * If we walked to a different triangle, caller must reload geometry for the new prim. */
+  hit_secondary_object = isect2.object;
+  hit_secondary_prim = isect2.prim;
   hit_secondary_u = isect2.u;
   hit_secondary_v = isect2.v;
 
@@ -2860,25 +2893,41 @@ if (MPG_DEBUG::PARAMS()) {
      * Reproject computes 3D position from potentially out-of-bounds barycentric coords,
      * ray-traces to find what surface is hit, and returns the hit's barycentric coords.
      * This is the key difference from parameter-space clamping. */
+    int hit_object, hit_prim;
     float new_u, new_v;
     if (!reproject_single_bounce(kg, shading_point, sd.object, sd.prim,
                                   geometry, params, proposed_u, proposed_v,
-                                  seed.object, seed.prim, new_u, new_v)) {
+                                  seed.object, seed.prim,
+                                  hit_object, hit_prim, new_u, new_v)) {
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
       continue;
     }
 
+    /* If Newton walked to a different triangle, update geometry for the new prim.
+     * Per Mitsuba: allow walking across triangle boundaries on continuous surfaces. */
+    MpgSeedRay updated_seed = seed;
+    SpecularSurfaceGeometry updated_geometry = geometry;
+    if (hit_prim != seed.prim) {
+      updated_seed.object = hit_object;
+      updated_seed.prim = hit_prim;
+      if (!load_surface_geometry(kg, sd, updated_seed, updated_geometry)) {
+        beta *= 0.5f;
+        needs_step_update = false;
+        continue;
+      }
+    }
+
     /* Use the reprojected barycentric coordinates for subsequent evaluation */
     SpecularParameters new_params;
-    if (!specular_parameters_from_surface(kg, sd, geometry, seed, 0, new_u, new_v, new_params)) {
+    if (!specular_parameters_from_surface(kg, sd, updated_geometry, updated_seed, 0, new_u, new_v, new_params)) {
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
       continue;
     }
 
     SpecularEval new_eval;
-    evaluate_specular(shading_point, seed, geometry, new_params, new_u, new_v, new_eval);
+    evaluate_specular(shading_point, updated_seed, updated_geometry, new_params, new_u, new_v, new_eval);
     if (new_eval.tir) {
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
@@ -2960,6 +3009,9 @@ if (MPG_DEBUG::PARAMS()) {
     residual_2d_u = new_residual_2d_u;
     residual_2d_v = new_residual_2d_v;
     residual_norm = new_residual_norm;
+    /* If Newton walked to a different triangle, update seed and geometry permanently */
+    seed = updated_seed;
+    geometry = updated_geometry;
     beta = fminf(beta * 2.0f, 1.0f);
     needs_step_update = true;
   }
@@ -3364,12 +3416,16 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
      * Reproject computes 3D positions from potentially out-of-bounds barycentric coords,
      * ray-traces the full path, and returns the hits' barycentric coords.
      * This validates the entire chain: receiver → primary → secondary */
+    int hit_primary_object, hit_primary_prim;
+    int hit_secondary_object, hit_secondary_prim;
     float new_primary_u, new_primary_v, new_secondary_u, new_secondary_v;
     if (!reproject_double_bounce(kg, receiver, sd.object, sd.prim,
                                   primary_geometry, primary_params, proposed_primary_u, proposed_primary_v,
-                                  seed.object, seed.prim, new_primary_u, new_primary_v,
+                                  seed.object, seed.prim,
+                                  hit_primary_object, hit_primary_prim, new_primary_u, new_primary_v,
                                   secondary_geometry, secondary_params, proposed_secondary_u, proposed_secondary_v,
-                                  secondary_seed.object, secondary_seed.prim, new_secondary_u, new_secondary_v)) {
+                                  secondary_seed.object, secondary_seed.prim,
+                                  hit_secondary_object, hit_secondary_prim, new_secondary_u, new_secondary_v)) {
 if (MPG_DEBUG::NEWTON_DETAIL()) {
       printf("  Iter %2d: REJECT #0 - reproject failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
 }
@@ -3378,10 +3434,36 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
       continue;
     }
 
+    /* If Newton walked to different triangles, update geometry for the new prims.
+     * Per Mitsuba: allow walking across triangle boundaries on continuous surfaces. */
+    MpgSeedRay updated_primary_seed = seed;
+    SpecularSurfaceGeometry updated_primary_geometry = primary_geometry;
+    if (hit_primary_prim != seed.prim) {
+      updated_primary_seed.object = hit_primary_object;
+      updated_primary_seed.prim = hit_primary_prim;
+      if (!load_surface_geometry(kg, sd, updated_primary_seed, updated_primary_geometry)) {
+        beta *= 0.5f;
+        needs_step_update = false;
+        continue;
+      }
+    }
+
+    MpgSeedRay updated_secondary_seed = secondary_seed;
+    SpecularSurfaceGeometry updated_secondary_geometry = secondary_geometry;
+    if (hit_secondary_prim != secondary_seed.prim) {
+      updated_secondary_seed.object = hit_secondary_object;
+      updated_secondary_seed.prim = hit_secondary_prim;
+      if (!load_surface_geometry(kg, sd, updated_secondary_seed, updated_secondary_geometry)) {
+        beta *= 0.5f;
+        needs_step_update = false;
+        continue;
+      }
+    }
+
     /* Use the reprojected barycentric coordinates for subsequent evaluation */
     SpecularParameters new_primary_params;
     if (!specular_parameters_from_surface(
-            kg, sd, primary_geometry, seed, 0, new_primary_u, new_primary_v, new_primary_params))
+            kg, sd, updated_primary_geometry, updated_primary_seed, 0, new_primary_u, new_primary_v, new_primary_params))
     {
 if (MPG_DEBUG::NEWTON_DETAIL()) {
       printf("  Iter %2d: REJECT #1 - primary params extraction failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
@@ -3392,7 +3474,7 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     }
 
     ShaderData new_primary_sd;
-    if (!build_primary_shading_data(sd, primary_geometry, seed, new_primary_u, new_primary_v, new_primary_sd)) {
+    if (!build_primary_shading_data(sd, updated_primary_geometry, updated_primary_seed, new_primary_u, new_primary_v, new_primary_sd)) {
 if (MPG_DEBUG::NEWTON_DETAIL()) {
       printf("  Iter %2d: REJECT #2 - primary shading data build failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
 }
@@ -3404,8 +3486,8 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     SpecularParameters new_secondary_params;
     if (!specular_parameters_from_surface(kg,
                                           new_primary_sd,
-                                          secondary_geometry,
-                                          secondary_seed,
+                                          updated_secondary_geometry,
+                                          updated_secondary_seed,
                                           1,
                                           new_secondary_u,
                                           new_secondary_v,
@@ -3421,17 +3503,17 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
 
     DoubleBounceEval new_eval;
     if (!evaluate_double_bounce(receiver,
-                                primary_geometry,
+                                updated_primary_geometry,
                                 new_primary_params,
-                                secondary_geometry,
+                                updated_secondary_geometry,
                                 new_secondary_params,
-                                seed.light_sample,
+                                updated_primary_seed.light_sample,
                                 new_primary_u,
                                 new_primary_v,
                                 new_secondary_u,
                                 new_secondary_v,
-                                seed.use_smooth_normals,
-                                secondary_seed.use_smooth_normals,
+                                updated_primary_seed.use_smooth_normals,
+                                updated_secondary_seed.use_smooth_normals,
                                 new_eval))
     {
 if (MPG_DEBUG::NEWTON_DETAIL()) {
@@ -3470,6 +3552,11 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     primary_sd = new_primary_sd;
     primary_residual_norm = new_primary_residual_norm;
     secondary_residual_norm = new_secondary_residual_norm;
+    /* If Newton walked to different triangles, update seeds and geometries permanently */
+    seed = updated_primary_seed;
+    primary_geometry = updated_primary_geometry;
+    secondary_seed = updated_secondary_seed;
+    secondary_geometry = updated_secondary_geometry;
     beta = fminf(beta * 2.0f, 1.0f);
     needs_step_update = true;
 
