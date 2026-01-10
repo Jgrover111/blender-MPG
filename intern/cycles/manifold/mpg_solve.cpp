@@ -1259,39 +1259,42 @@ if (MPG_DEBUG::PARAMS()) {
     params.base_eta = 1.0f;
   }
   params.microfacet.N = normalize(params.microfacet.N);
-  /* Per Codex: use microfacet->N (BSDF frame) or geometric_normal, NOT faceforward-ed shading */
+
+  /* Per Codex: Align geometric_normal to BSDF frame, matching Mitsuba's approach.
+   * Mitsuba does: masked(gn, dot(n, gn) < 0) *= -1
+   * This ensures geometric normal points in same hemisphere as BSDF frame.
+   * Unlike faceforward which aligns to viewing direction, this aligns to BSDF frame. */
+  float3 aligned_geometric_normal = geometric_normal;
+  if (has_geometric_normal && !is_zero(params.microfacet.N)) {
+    if (dot(params.microfacet.N, geometric_normal) < 0.0f) {
+      aligned_geometric_normal = -geometric_normal;
+if (MPG_DEBUG::PARAMS()) {
+      printf("  -> Aligned geometric_normal to BSDF frame: flipped from (%.6f, %.6f, %.6f) to (%.6f, %.6f, %.6f)\n",
+             geometric_normal.x, geometric_normal.y, geometric_normal.z,
+             aligned_geometric_normal.x, aligned_geometric_normal.y, aligned_geometric_normal.z);
+}
+    }
+  }
+
+  /* Per Codex: use microfacet->N (BSDF frame) or aligned_geometric_normal, NOT faceforward-ed shading */
   if (!is_zero(params.microfacet.N)) {
     params.normal = params.microfacet.N;
     params.has_normal = true;
   }
   else if (has_geometric_normal) {
-    params.normal = geometric_normal;
+    params.normal = aligned_geometric_normal;
     params.has_normal = true;
   }
-  {
-    const float3 spec_point = geometry.verts[0] * (1.0f - u - v) +
-                              geometry.verts[1] * u +
-                              geometry.verts[2] * v;
-    const float3 dir_ds = normalize(spec_point - sd.P);
-    float tmp_distance = 0.0f;
-    float3 dir_sl;
-    compute_light_sample_direction(seed.light_sample, spec_point, dir_sl, tmp_distance);
-    const float3 incident = -dir_ds;
-    const float3 outgoing = dir_sl;
-    const float s = dot(params.microfacet.N, incident) * dot(params.microfacet.N, outgoing);
-    const bool bad_refraction = params.is_refraction ? (s > 0.0f) : false;
-    const bool bad_reflection = !params.is_refraction ? (s < 0.0f) : false;
-    if (bad_refraction || bad_reflection) {
-      params.microfacet.N = -params.microfacet.N;
-      /* Update params.normal to match flipped microfacet.N */
-      if (params.has_normal && !is_zero(params.microfacet.N)) {
-        params.normal = params.microfacet.N;
-      }
-    }
-  }
-  /* Fallback to geometric_normal if still no normal (should not happen with microfacet) */
+
+  /* Per Codex: Do NOT flip microfacet.N based on incident/outgoing directions.
+   * Mitsuba only flips geometric normal to match BSDF frame (done above).
+   * The extra bad_refraction/bad_reflection flip diverges from Mitsuba and causes
+   * conflicting entering/exiting classification when the BSDF frame becomes
+   * inverted relative to the geometric normal. REMOVED. */
+
+  /* Fallback to aligned_geometric_normal if still no normal (should not happen with microfacet) */
   if (!params.has_normal && has_geometric_normal) {
-    params.normal = geometric_normal;
+    params.normal = aligned_geometric_normal;
     params.has_normal = true;
   }
   /* Store backfacing flag for robust entering/exiting determination.
