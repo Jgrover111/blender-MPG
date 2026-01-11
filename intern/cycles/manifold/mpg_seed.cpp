@@ -1076,32 +1076,36 @@ if constexpr (MPG_DEBUG::SEED) {
       surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
           kg, integrator_state, &hit_sd, nullptr, PATH_RAY_CAMERA, true);
 
-      /* Determine if the hit surface actually supports refraction */
+      /* Determine if the hit surface actually supports refraction.
+       * Check for glass (both reflection+transmission) or pure transmission closures. */
       bool surface_has_refraction = false;
-      bool surface_has_reflection = false;
+      bool surface_has_reflection_only = false;
 
       for (int i = 0; i < hit_sd.num_closure; ++i) {
         const ShaderClosure *closure = &hit_sd.closure[i];
         if (CLOSURE_IS_BSDF(closure->type)) {
           if (CLOSURE_IS_BSDF_SINGULAR(closure->type) || CLOSURE_IS_BSDF_MICROFACET(closure->type)) {
+            /* Check if this closure supports transmission/refraction */
             if (CLOSURE_IS_GLASS(closure->type) || CLOSURE_IS_BSDF_TRANSMISSION(closure->type)) {
               surface_has_refraction = true;
             }
-            if (CLOSURE_IS_BSDF_REFLECTION(closure->type) || CLOSURE_IS_GLASS(closure->type)) {
-              surface_has_reflection = true;
+            /* Glass supports both, but pure glossy/diffuse are reflection only.
+             * If it's not transmission and not glass, it's reflection only. */
+            else {
+              surface_has_reflection_only = true;
             }
           }
         }
       }
 
-      /* Use actual surface capability, falling back to scatter_branch proposal if both are possible */
+      /* Determine actual scatter type based on what the surface supports */
       bool is_refraction = (scatter_branch == MPG_SEED_SCATTER_REFRACTION);
-      if (surface_has_refraction && !surface_has_reflection) {
-        /* Surface only supports refraction */
+      if (surface_has_refraction && !surface_has_reflection_only) {
+        /* Surface only supports refraction (pure transmission or glass with no other closures) */
         is_refraction = true;
       }
-      else if (surface_has_reflection && !surface_has_refraction) {
-        /* Surface only supports reflection */
+      else if (surface_has_reflection_only && !surface_has_refraction) {
+        /* Surface only supports reflection (no transmission) */
         is_refraction = false;
       }
 
