@@ -2835,16 +2835,40 @@ if (MPG_DEBUG::NEWTON_DETAIL() && isect1.prim != expected_primary_prim) {
   SpecularSurfaceGeometry actual_primary_geometry = primary_geometry;
   if (hit_primary_prim != expected_primary_prim) {
     /* Load geometry for the NEW triangle we actually hit */
-    MpgSeedRay temp_seed;
-    temp_seed.object = hit_primary_object;
-    temp_seed.prim = hit_primary_prim;
-    temp_seed.use_smooth_normals = (primary_params.has_normal ||
-                                     !is_zero(primary_geometry.normals[0]));
+    const int object = hit_primary_object;
+    const int prim = hit_primary_prim;
+    const int object_flag = kernel_data_fetch(object_flag, object);
 
-    if (!load_surface_geometry(kg, temp_seed, actual_primary_geometry)) {
-      /* Failed to load new geometry - abort */
-      return false;
+    /* Load vertices and normals (with motion blur support) */
+    if (object_flag & SD_OBJECT_MOTION) {
+      motion_triangle_vertices_and_normals(kg, object, prim, ray_time,
+                                          actual_primary_geometry.verts,
+                                          actual_primary_geometry.normals);
     }
+    else {
+      triangle_vertices_and_normals(kg, prim,
+                                    actual_primary_geometry.verts,
+                                    actual_primary_geometry.normals);
+    }
+
+    /* Apply object transforms if needed */
+    if (!(object_flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+      ShaderData temp_sd = {};
+      temp_sd.object = object;
+      temp_sd.object_flag = object_flag;
+      shader_setup_object_transforms(kg, &temp_sd, ray_time);
+
+      object_position_transform_auto(kg, &temp_sd, &actual_primary_geometry.verts[0]);
+      object_position_transform_auto(kg, &temp_sd, &actual_primary_geometry.verts[1]);
+      object_position_transform_auto(kg, &temp_sd, &actual_primary_geometry.verts[2]);
+      object_normal_transform_auto(kg, &temp_sd, &actual_primary_geometry.normals[0]);
+      object_normal_transform_auto(kg, &temp_sd, &actual_primary_geometry.normals[1]);
+      object_normal_transform_auto(kg, &temp_sd, &actual_primary_geometry.normals[2]);
+    }
+
+    /* Compute surface derivatives */
+    actual_primary_geometry.dPdu = actual_primary_geometry.verts[1] - actual_primary_geometry.verts[0];
+    actual_primary_geometry.dPdv = actual_primary_geometry.verts[2] - actual_primary_geometry.verts[0];
   }
 
   /* Compute actual hit primary 3D position from ACTUAL geometry */
