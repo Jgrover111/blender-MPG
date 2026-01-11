@@ -3308,10 +3308,13 @@ if (MPG_DEBUG::PARAMS()) {
 
   /* Mitsuba's 2D constraint: C = H - N
    * where H is the projected half-vector and N is the offset normal.
-   * For perfect specular (roughness=0): N = 0, so C = H
-   * For glossy (roughness>0): N sampled from microfacet distribution
-   * TODO: Implement microfacet-based offset sampling for glossy surfaces */
-  const float2 offset_2d = make_float2(0.0f, 0.0f);  /* Zero offset for perfect specular */
+   *
+   * Per Codex Pass 2 #1: Apply guided offset normal when path guiding provides direction.
+   * Without this, Newton pursues perfect specular solution even when guide suggests
+   * a different target, causing convergence failure on guided paths.
+   *
+   * For glossy (roughness>0): N sampled from microfacet distribution (TODO) */
+  const float2 offset_2d = compute_guide_offset_normal(guide, tangent_u, tangent_v, eval.normal);
 
   /* Project half-vector onto tangent plane to get 2D constraint.
    * This removes any normal component that might arise from numerical error. */
@@ -3474,8 +3477,8 @@ if (MPG_DEBUG::PARAMS()) {
       continue;
     }
 
-    /* Use zero offset for perfect specular (matches Mitsuba for roughness=0) */
-    const float2 new_offset_2d = make_float2(0.0f, 0.0f);
+    /* Per Codex Pass 2 #1: Apply guided offset normal */
+    const float2 new_offset_2d = compute_guide_offset_normal(guide, new_tangent_u, new_tangent_v, new_eval.normal);
 
     /* Project half-vector onto tangent plane before computing constraint */
     const float new_h_normal_component = dot(new_eval.normal, new_h);
