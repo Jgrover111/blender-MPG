@@ -1711,26 +1711,35 @@ bool trace_secondary_seed(KernelGlobals kg,
 {
   const float3 primary_point = surface_point_from_barycentric(primary_geometry, primary_u, primary_v);
 
-  /* Get primary normal respecting flat vs smooth shading.
-   * Use mesh normals directly without flipping - entering/exiting is determined by
-   * dot(normal, ray) in compute_specular(), which works correctly with actual mesh normals. */
-  float3 primary_normal;
-  if (seed.use_smooth_normals) {
-    primary_normal = combine_vertex_normals(primary_geometry, primary_u, primary_v);
+  /* Per Codex finding: Use BSDF frame normal for refraction, NOT geometric/vertex normals.
+   * Mitsuba and specular_parameters_from_surface use the BSDF frame normal (microfacet->N)
+   * for Snell's law. Using geometric normals can send the refracted ray in the wrong
+   * direction, hitting diffuse surfaces instead of the expected exit surface. */
+  float3 specular_normal;
+  if (primary_params.has_normal) {
+    /* Use BSDF frame normal from primary_params - highest priority */
+    specular_normal = primary_params.normal;
   }
   else {
-    primary_normal = primary_geometry.normals[0];
+    /* Fallback to geometric normal if BSDF frame not available */
+    float3 primary_normal;
+    if (seed.use_smooth_normals) {
+      primary_normal = combine_vertex_normals(primary_geometry, primary_u, primary_v);
+    }
+    else {
+      primary_normal = primary_geometry.normals[0];
+    }
+
+    if (!is_zero(primary_normal)) {
+      specular_normal = safe_normalize(primary_normal);
+    }
+    else {
+      /* Last resort: geometric normal from cross product */
+      specular_normal = safe_normalize(cross(primary_geometry.dPdu, primary_geometry.dPdv));
+    }
   }
 
-  if (!is_zero(primary_normal)) {
-    primary_normal = safe_normalize(primary_normal);
-  }
-  else {
-    /* Fallback to geometric normal only if mesh normal is degenerate */
-    primary_normal = safe_normalize(cross(primary_geometry.dPdu, primary_geometry.dPdv));
-  }
-
-  if (is_zero(primary_normal)) {
+  if (is_zero(specular_normal)) {
     return false;
   }
 
@@ -1752,9 +1761,8 @@ bool trace_secondary_seed(KernelGlobals kg,
   }
   dir_ds /= distance_ds;
 
-  /* Use primary normal as-is for refraction calculation - no flipping based on ray direction.
+  /* specular_normal already computed from BSDF frame above - use it as-is.
    * The entering/exiting determination happens in compute_specular() using dot(normal, ray). */
-  float3 specular_normal = primary_normal;
 
 if (MPG_DEBUG::PARAMS()) {
   printf("----------------------------------------\n");
