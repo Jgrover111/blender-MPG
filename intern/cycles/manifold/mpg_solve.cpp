@@ -1749,7 +1749,7 @@ bool solve_step(const float3 &J0,
  *   [dC0/du  dC0/dv] [delta.x]   [C0]
  *   [dC1/du  dC1/dv] [delta.y] = [C1]
  */
-bool solve_direct_2x2(const float3 &J_cols[2],
+bool solve_direct_2x2(const float3 J_cols[2],
                       const float3 &residual,
                       float2 &delta)
 {
@@ -3016,10 +3016,18 @@ if (MPG_DEBUG::NEWTON_DETAIL() && isect1.prim != expected_primary_prim) {
     /* Compute surface derivatives */
     actual_primary_geometry.dPdu = actual_primary_geometry.verts[1] - actual_primary_geometry.verts[0];
     actual_primary_geometry.dPdv = actual_primary_geometry.verts[2] - actual_primary_geometry.verts[0];
+  }
 
-    /* Per Codex Pass 1 #2 and Pass 4 #2: When Newton walks to adjacent triangle, BSDF parameters
-     * become stale. The most critical is the backfacing flag which determines entering/exiting.
-     * Recompute backfacing using the NEW geometry's normal and the ray direction.
+  /* Compute actual hit primary 3D position from ACTUAL geometry */
+  const float w1_hit = 1.0f - hit_primary_u - hit_primary_v;
+  const float3 hit_primary_point = actual_primary_geometry.verts[0] * w1_hit +
+                                    actual_primary_geometry.verts[1] * hit_primary_u +
+                                    actual_primary_geometry.verts[2] * hit_primary_v;
+
+  /* Per Codex Pass 1 #2 and Pass 4 #2: When Newton walks to adjacent triangle, update backfacing.
+   * The backfacing flag is critical for entering/exiting determination and must match NEW geometry. */
+  if (hit_primary_prim != expected_primary_prim) {
+    /* Recompute backfacing using the NEW geometry's normal and the ray direction.
      * Per shader_setup_from_ray: backfacing = dot(Ng, ray.D) < 0 */
     const float3 actual_gn = safe_normalize(cross(actual_primary_geometry.dPdu, actual_primary_geometry.dPdv));
     const float3 ray_to_primary = safe_normalize(hit_primary_point - receiver.position);
@@ -3030,12 +3038,6 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
            primary_params.backfacing ? "TRUE" : "FALSE", expected_primary_prim, hit_primary_prim);
 }
   }
-
-  /* Compute actual hit primary 3D position from ACTUAL geometry */
-  const float w1_hit = 1.0f - hit_primary_u - hit_primary_v;
-  const float3 hit_primary_point = actual_primary_geometry.verts[0] * w1_hit +
-                                    actual_primary_geometry.verts[1] * hit_primary_u +
-                                    actual_primary_geometry.verts[2] * hit_primary_v;
 
   /* Get primary vertex normal for scattering from ACTUAL geometry.
    * Use smooth shading if available, otherwise face normal. */
