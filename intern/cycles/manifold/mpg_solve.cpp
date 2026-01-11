@@ -2822,7 +2822,7 @@ if (MPG_DEBUG::NEWTON_DETAIL() && isect1.prim != expected_primary_prim) {
 }
 
   /* Extract primary hit information: object, primitive, and barycentric coordinates.
-   * If we walked to a different triangle, caller must reload geometry for the new prim. */
+   * If we walked to a different triangle, we must reload geometry for the new prim! */
   hit_primary_object = isect1.object;
   hit_primary_prim = isect1.prim;
   hit_primary_u = isect1.u;
@@ -2830,24 +2830,65 @@ if (MPG_DEBUG::NEWTON_DETAIL() && isect1.prim != expected_primary_prim) {
 
   /* === SECOND SEGMENT: Apply specular scattering at primary, trace scattered ray === */
 
-  /* Compute actual hit primary 3D position and normal */
-  const float w1_hit = 1.0f - hit_primary_u - hit_primary_v;
-  const float3 hit_primary_point = primary_geometry.verts[0] * w1_hit +
-                                    primary_geometry.verts[1] * hit_primary_u +
-                                    primary_geometry.verts[2] * hit_primary_v;
+  /* Per Codex: If Newton walked to adjacent triangle, reload geometry from actual hit.
+   * Using stale geometry corrupts position/normal/scattering direction! */
+  SpecularSurfaceGeometry actual_primary_geometry = primary_geometry;
+  if (hit_primary_prim != expected_primary_prim) {
+    /* Load geometry for the NEW triangle we actually hit */
+    const int object = hit_primary_object;
+    const int prim = hit_primary_prim;
+    const int object_flag = kernel_data_fetch(object_flag, object);
 
-  /* Get primary vertex normal for scattering.
+    /* Load vertices and normals (with motion blur support) */
+    if (object_flag & SD_OBJECT_MOTION) {
+      motion_triangle_vertices_and_normals(kg, object, prim, ray_time,
+                                          actual_primary_geometry.verts,
+                                          actual_primary_geometry.normals);
+    }
+    else {
+      triangle_vertices_and_normals(kg, prim,
+                                    actual_primary_geometry.verts,
+                                    actual_primary_geometry.normals);
+    }
+
+    /* Apply object transforms if needed */
+    if (!(object_flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+      ShaderData temp_sd = {};
+      temp_sd.object = object;
+      temp_sd.object_flag = object_flag;
+      shader_setup_object_transforms(kg, &temp_sd, ray_time);
+
+      object_position_transform_auto(kg, &temp_sd, &actual_primary_geometry.verts[0]);
+      object_position_transform_auto(kg, &temp_sd, &actual_primary_geometry.verts[1]);
+      object_position_transform_auto(kg, &temp_sd, &actual_primary_geometry.verts[2]);
+      object_normal_transform_auto(kg, &temp_sd, &actual_primary_geometry.normals[0]);
+      object_normal_transform_auto(kg, &temp_sd, &actual_primary_geometry.normals[1]);
+      object_normal_transform_auto(kg, &temp_sd, &actual_primary_geometry.normals[2]);
+    }
+
+    /* Compute surface derivatives */
+    actual_primary_geometry.dPdu = actual_primary_geometry.verts[1] - actual_primary_geometry.verts[0];
+    actual_primary_geometry.dPdv = actual_primary_geometry.verts[2] - actual_primary_geometry.verts[0];
+  }
+
+  /* Compute actual hit primary 3D position from ACTUAL geometry */
+  const float w1_hit = 1.0f - hit_primary_u - hit_primary_v;
+  const float3 hit_primary_point = actual_primary_geometry.verts[0] * w1_hit +
+                                    actual_primary_geometry.verts[1] * hit_primary_u +
+                                    actual_primary_geometry.verts[2] * hit_primary_v;
+
+  /* Get primary vertex normal for scattering from ACTUAL geometry.
    * Use smooth shading if available, otherwise face normal. */
   float3 primary_normal;
   if (primary_params.has_normal) {
     /* Use explicit normal from params (e.g., bump mapping) */
     primary_normal = primary_params.normal;
   } else {
-    /* Interpolate vertex normals (smooth shading) or use face normal */
-    primary_normal = combine_vertex_normals(primary_geometry, hit_primary_u, hit_primary_v);
+    /* Interpolate vertex normals (smooth shading) or use face normal from ACTUAL geometry */
+    primary_normal = combine_vertex_normals(actual_primary_geometry, hit_primary_u, hit_primary_v);
     if (is_zero(primary_normal)) {
-      /* Fallback to face normal */
-      primary_normal = primary_geometry.normals[0];
+      /* Fallback to face normal from ACTUAL geometry */
+      primary_normal = actual_primary_geometry.normals[0];
     }
   }
   primary_normal = safe_normalize(primary_normal);
@@ -3051,10 +3092,18 @@ if (MPG_DEBUG::PARAMS()) {
 
   /* Half-vector eta determination per Mitsuba reference.
    * CRITICAL: Must test dot(wi, geometric_normal) dynamically, not use precomputed flag.
+   * CRITICAL: Align geometric normal to BSDF frame before testing (Mitsuba does this).
    * Mitsuba tests dot(wi, v[i].gn) to determine entering/exiting at constraint evaluation time. */
   float h_eta = 1.0f;
   if (params.is_refraction) {
-    const float3 geometric_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+    const float3 geometric_normal_raw = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+
+    /* Align to BSDF frame (Mitsuba: masked(gn, dot(n, gn) < 0) *= -1) */
+    float3 geometric_normal = geometric_normal_raw;
+    if (dot(eval.normal, geometric_normal_raw) < 0.0f) {
+      geometric_normal = -geometric_normal_raw;
+    }
+
     const float dot_wi_gn = dot(wi, geometric_normal);
     const float base_eta = params.base_eta;
 
