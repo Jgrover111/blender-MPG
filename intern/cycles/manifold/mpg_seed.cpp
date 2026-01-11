@@ -1006,24 +1006,6 @@ bool mpg_generate_seed(KernelGlobals kg,
     out_normalized_direction = normalized_direction;
     out_tau_count = base_tau_count;
 
-    /* Full-path tau encoding: set bits for all bounces in the path.
-     * For single-bounce (base_tau_count == 1): only bit 0 is set
-     * For double-bounce (base_tau_count == 2): both bits 0 and 1 are set
-     *
-     * For thin glass double-refraction: if first bounce is refraction (air→glass),
-     * second bounce should also be refraction (glass→air). */
-    if (base_tau_count > 0) {
-      const bool is_refraction = (scatter_branch == MPG_SEED_SCATTER_REFRACTION);
-
-      /* Set bit 0 for primary bounce */
-      set_chaintype_bit(out_tau_bits, 0, is_refraction);
-
-      /* For double-bounce refraction, set bit 1 for secondary bounce */
-      if (base_tau_count >= 2 && is_refraction) {
-        set_chaintype_bit(out_tau_bits, 1, true);
-      }
-    }
-
     Ray ray;
     ray.P = mpg_surface_ray_offset(kg, sd, sd.P, normalized_direction);
     ray.D = normalized_direction;
@@ -1082,6 +1064,54 @@ if constexpr (MPG_DEBUG::SEED) {
 }
       last_failure = MPG_FAILURE_NO_SPECULAR;
       return false;
+    }
+
+    /* Per Codex finding: Set tau_bits based on ACTUAL surface BSDF type, not scatter_branch proposal.
+     * The scatter_branch is a probabilistic guess, but tau hints must encode what actually happened.
+     * Query the hit surface to determine if it's refractive or reflective. */
+    if (base_tau_count > 0) {
+      ShaderData hit_sd = {};
+      shader_setup_from_ray(kg, &hit_sd, &ray, const_cast<Intersection *>(&candidate_isect));
+      const ConstIntegratorState integrator_state = nullptr;
+      surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
+          kg, integrator_state, &hit_sd, nullptr, PATH_RAY_CAMERA, true);
+
+      /* Determine if the hit surface actually supports refraction */
+      bool surface_has_refraction = false;
+      bool surface_has_reflection = false;
+
+      for (int i = 0; i < hit_sd.num_closure; ++i) {
+        const ShaderClosure *closure = &hit_sd.closure[i];
+        if (CLOSURE_IS_BSDF(closure->type)) {
+          if (CLOSURE_IS_BSDF_SINGULAR(closure->type) || CLOSURE_IS_BSDF_MICROFACET(closure->type)) {
+            if (CLOSURE_IS_GLASS(closure->type) || CLOSURE_IS_BSDF_TRANSMISSION(closure->type)) {
+              surface_has_refraction = true;
+            }
+            if (CLOSURE_IS_BSDF_REFLECTION(closure->type) || CLOSURE_IS_GLASS(closure->type)) {
+              surface_has_reflection = true;
+            }
+          }
+        }
+      }
+
+      /* Use actual surface capability, falling back to scatter_branch proposal if both are possible */
+      bool is_refraction = (scatter_branch == MPG_SEED_SCATTER_REFRACTION);
+      if (surface_has_refraction && !surface_has_reflection) {
+        /* Surface only supports refraction */
+        is_refraction = true;
+      }
+      else if (surface_has_reflection && !surface_has_refraction) {
+        /* Surface only supports reflection */
+        is_refraction = false;
+      }
+
+      /* Set bit 0 for primary bounce based on actual surface type */
+      set_chaintype_bit(out_tau_bits, 0, is_refraction);
+
+      /* For double-bounce refraction, set bit 1 for secondary bounce */
+      if (base_tau_count >= 2 && is_refraction) {
+        set_chaintype_bit(out_tau_bits, 1, true);
+      }
     }
 
     out_isect = candidate_isect;
