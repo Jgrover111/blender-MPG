@@ -1635,6 +1635,9 @@ bool compute_residual_matrix(const ShadingPoint &D,
          isfinite_safe(matrix[1][0]) && isfinite_safe(matrix[1][1]);
 }
 
+/* DEPRECATED: Normal equations solver (Gauss-Newton style).
+ * Per Codex Pass 1 #1: This amplifies conditioning problems by computing JᵀJ.
+ * Use solve_direct_2x2() instead for single-bounce paths. */
 bool solve_step(const float3 &J0,
                 const float3 &J1,
                 const float3 &residual,
@@ -1667,6 +1670,65 @@ bool solve_step(const float3 &J0,
     delta.x = (a11 * b0 - a01 * b1) / det;
     delta.y = (a00 * b1 - a01 * b0) / det;
   }
+  return isfinite_safe(delta.x) && isfinite_safe(delta.y);
+}
+
+/* Direct 2×2 linear system solver per Mitsuba reference.
+ * Solves: J * delta = C where J is 2×2 Jacobian, C is 2D constraint.
+ *
+ * Per Codex Pass 1 #1: Mitsuba solves J * dx = C directly without forming normal equations.
+ * Normal equations (JᵀJ * dx = JᵀC) square the condition number and can amplify ill-conditioning.
+ *
+ * Input:
+ *   J_cols[0] = [dC0/du, dC1/du, 0]  (first column of Jacobian)
+ *   J_cols[1] = [dC0/dv, dC1/dv, 0]  (second column of Jacobian)
+ *   residual = [C0, C1, 0]  (constraint violations)
+ *
+ * Solves:
+ *   [dC0/du  dC0/dv] [delta.x]   [C0]
+ *   [dC1/du  dC1/dv] [delta.y] = [C1]
+ */
+bool solve_direct_2x2(const float3 &J_cols[2],
+                      const float3 &residual,
+                      float2 &delta)
+{
+  /* Extract 2×2 Jacobian matrix elements from column vectors */
+  const float j00 = J_cols[0].x;  /* dC0/du */
+  const float j10 = J_cols[0].y;  /* dC1/du */
+  const float j01 = J_cols[1].x;  /* dC0/dv */
+  const float j11 = J_cols[1].y;  /* dC1/dv */
+
+  /* Extract 2D constraint vector */
+  const float c0 = residual.x;
+  const float c1 = residual.y;
+
+  /* Compute determinant */
+  float det = j00 * j11 - j01 * j10;
+
+  /* Check for singular/near-singular Jacobian */
+  if (!(isfinite_safe(det)) || fabsf(det) < 1e-10f) {
+    /* Apply Levenberg-Marquardt damping: J_damped = J + λI */
+    const float trace = fabsf(j00) + fabsf(j11) + 1e-20f;
+    const float lambda = 1e-4f * trace;
+
+    const float j00d = j00 + lambda;
+    const float j11d = j11 + lambda;
+    det = j00d * j11d - j01 * j10;
+
+    if (!(isfinite_safe(det)) || fabsf(det) < 1e-20f) {
+      return false;
+    }
+
+    /* Solve with damped Jacobian using Cramer's rule */
+    delta.x = (j11d * c0 - j01 * c1) / det;
+    delta.y = (j00d * c1 - j10 * c0) / det;
+  }
+  else {
+    /* Solve directly using Cramer's rule */
+    delta.x = (j11 * c0 - j01 * c1) / det;
+    delta.y = (j00 * c1 - j10 * c0) / det;
+  }
+
   return isfinite_safe(delta.x) && isfinite_safe(delta.y);
 }
 
@@ -3203,10 +3265,12 @@ if (MPG_DEBUG::PARAMS()) {
       float3 J_cols[2];
       compute_halfvector_jacobian(shading_point, seed, current_geometry, eval, h, h_eta, tangent_u, tangent_v, J_cols);
 
-      /* Embed 2D constraint in 3D vector for solve_step compatibility */
+      /* Embed 2D constraint in 3D vector */
       const float3 residual_3d = make_float3(residual_2d_u, residual_2d_v, 0.0f);
 
-      if (!solve_step(J_cols[0], J_cols[1], residual_3d, delta) ||
+      /* Per Codex Pass 1 #1: Use direct 2×2 solve instead of normal equations.
+       * Mitsuba solves J * dx = C directly, avoiding JᵀJ which squares condition number. */
+      if (!solve_direct_2x2(J_cols, residual_3d, delta) ||
           !isfinite_safe(delta.x) ||
           !isfinite_safe(delta.y))
       {
