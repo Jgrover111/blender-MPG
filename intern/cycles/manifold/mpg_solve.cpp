@@ -3395,27 +3395,32 @@ if (MPG_DEBUG::PARAMS()) {
     /* If Newton walked to a different triangle, reload geometry for the new prim.
      * Per Mitsuba: allow walking across triangle boundaries on continuous surfaces. */
     SpecularSurfaceGeometry new_geometry = current_geometry;
+    MpgSeedRay current_seed = seed;  /* Track current seed (may update if triangle walk) */
     if (hit_prim != current_prim) {
-      MpgSeedRay temp_seed = seed;
-      temp_seed.object = hit_object;
-      temp_seed.prim = hit_prim;
-      if (!load_surface_geometry(kg, sd, temp_seed, new_geometry)) {
+      /* Per Codex: Update seed to reflect actual hit triangle before evaluating parameters.
+       * specular_parameters_from_surface() uses seed.prim/object to build intersection,
+       * so using stale seed causes BSDF evaluation on wrong triangle. */
+      current_seed.object = hit_object;
+      current_seed.prim = hit_prim;
+
+      if (!load_surface_geometry(kg, sd, current_seed, new_geometry)) {
         beta *= 0.5f;
         needs_step_update = false;
         continue;
       }
     }
 
-    /* Use the reprojected barycentric coordinates for subsequent evaluation */
+    /* Use the reprojected barycentric coordinates for subsequent evaluation.
+     * Per Codex: Use current_seed (updated if triangle walk) instead of original seed. */
     SpecularParameters new_params;
-    if (!specular_parameters_from_surface(kg, sd, new_geometry, seed, 0, new_u, new_v, new_params)) {
+    if (!specular_parameters_from_surface(kg, sd, new_geometry, current_seed, 0, new_u, new_v, new_params)) {
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
       continue;
     }
 
     SpecularEval new_eval;
-    evaluate_specular(shading_point, seed, new_geometry, new_params, new_u, new_v, new_eval);
+    evaluate_specular(shading_point, current_seed, new_geometry, new_params, new_u, new_v, new_eval);
     if (new_eval.tir) {
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
@@ -3534,7 +3539,13 @@ if (MPG_DEBUG::PARAMS()) {
 
   result.success = true;
   result.specular_vertex_count = 1;
-  result.visibility = compute_visibility(kg, sd, seed, eval);
+
+  /* Per Codex: Build final seed reflecting converged triangle (may differ from initial seed) */
+  MpgSeedRay final_seed = seed;
+  final_seed.object = current_object;
+  final_seed.prim = current_prim;
+
+  result.visibility = compute_visibility(kg, sd, final_seed, eval);
   result.wi = eval.dir_ds;
 
   MpgSpecularVertex &vertex = result.specular_vertices[0];
@@ -3559,8 +3570,9 @@ if (MPG_DEBUG::PARAMS()) {
   vertex.v = v;
   vertex.is_refraction = params.is_refraction;
   vertex.total_internal_reflection = eval.tir;
-  vertex.object = seed.object;
-  vertex.prim = seed.prim;
+  /* Per Codex: Store actual converged object/prim, not original seed */
+  vertex.object = current_object;
+  vertex.prim = current_prim;
 
   result.dir_ds = -vertex.dir_in;
   result.dir_sl = vertex.dir_out;
@@ -3591,8 +3603,9 @@ if (MPG_DEBUG::PARAMS()) {
   vertex.throughput = result.spec_weight;
   result.specular_throughput = result.spec_weight;
 
+  /* Per Codex: Use converged geometry/seed for residual matrix, not original */
   float residual_matrix[2][2];
-  if (!compute_residual_matrix(shading_point, seed, geometry, eval, residual_matrix)) {
+  if (!compute_residual_matrix(shading_point, final_seed, current_geometry, eval, residual_matrix)) {
 if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: Degenerate normals at compute_residual_matrix\n");
     printf("  dir_sl=[%.6f, %.6f, %.6f]\n", eval.dir_sl.x, eval.dir_sl.y, eval.dir_sl.z);
@@ -3951,13 +3964,14 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     }
 
     /* If Newton walked to different triangles, reload geometry for the new prims.
-     * Per Mitsuba: allow walking across triangle boundaries on continuous surfaces. */
+     * Per Mitsuba: allow walking across triangle boundaries on continuous surfaces.
+     * Per Codex: Update seeds to reflect actual hit triangles before evaluating parameters. */
     SpecularSurfaceGeometry new_primary_geometry = current_primary_geometry;
+    MpgSeedRay current_primary_seed = seed;
     if (hit_primary_prim != current_primary_prim) {
-      MpgSeedRay temp_seed = seed;
-      temp_seed.object = hit_primary_object;
-      temp_seed.prim = hit_primary_prim;
-      if (!load_surface_geometry(kg, sd, temp_seed, new_primary_geometry)) {
+      current_primary_seed.object = hit_primary_object;
+      current_primary_seed.prim = hit_primary_prim;
+      if (!load_surface_geometry(kg, sd, current_primary_seed, new_primary_geometry)) {
         beta *= 0.5f;
         needs_step_update = false;
         continue;
@@ -3965,21 +3979,22 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     }
 
     SpecularSurfaceGeometry new_secondary_geometry = current_secondary_geometry;
+    MpgSeedRay current_secondary_seed = secondary_seed;
     if (hit_secondary_prim != current_secondary_prim) {
-      MpgSeedRay temp_seed = secondary_seed;
-      temp_seed.object = hit_secondary_object;
-      temp_seed.prim = hit_secondary_prim;
-      if (!load_surface_geometry(kg, sd, temp_seed, new_secondary_geometry)) {
+      current_secondary_seed.object = hit_secondary_object;
+      current_secondary_seed.prim = hit_secondary_prim;
+      if (!load_surface_geometry(kg, sd, current_secondary_seed, new_secondary_geometry)) {
         beta *= 0.5f;
         needs_step_update = false;
         continue;
       }
     }
 
-    /* Use the reprojected barycentric coordinates for subsequent evaluation */
+    /* Use the reprojected barycentric coordinates for subsequent evaluation.
+     * Per Codex: Use current seeds (updated if triangle walk) instead of original seeds. */
     SpecularParameters new_primary_params;
     if (!specular_parameters_from_surface(
-            kg, sd, new_primary_geometry, seed, 0, new_primary_u, new_primary_v, new_primary_params))
+            kg, sd, new_primary_geometry, current_primary_seed, 0, new_primary_u, new_primary_v, new_primary_params))
     {
 if (MPG_DEBUG::NEWTON_DETAIL()) {
       printf("  Iter %2d: REJECT #1 - primary params extraction failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
@@ -3990,7 +4005,7 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     }
 
     ShaderData new_primary_sd;
-    if (!build_primary_shading_data(sd, new_primary_geometry, seed, new_primary_u, new_primary_v, new_primary_sd)) {
+    if (!build_primary_shading_data(sd, new_primary_geometry, current_primary_seed, new_primary_u, new_primary_v, new_primary_sd)) {
 if (MPG_DEBUG::NEWTON_DETAIL()) {
       printf("  Iter %2d: REJECT #2 - primary shading data build failed, beta %.6f→%.6f\n", iter + 1, beta, beta * 0.5f);
 }
@@ -4003,7 +4018,7 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     if (!specular_parameters_from_surface(kg,
                                           new_primary_sd,
                                           new_secondary_geometry,
-                                          secondary_seed,
+                                          current_secondary_seed,
                                           1,
                                           new_secondary_u,
                                           new_secondary_v,
@@ -4371,8 +4386,9 @@ if (MPG_DEBUG::PARAMS()) {
   primary_vertex.jacobian = jacobian_primary;
   primary_vertex.is_refraction = primary_params.is_refraction;
   primary_vertex.total_internal_reflection = eval.primary.tir;
-  primary_vertex.object = seed.object;
-  primary_vertex.prim = seed.prim;
+  /* Per Codex: Store actual converged object/prim, not original seed */
+  primary_vertex.object = current_primary_object;
+  primary_vertex.prim = current_primary_prim;
 
   MpgSpecularVertex &secondary_vertex = result.specular_vertices[1];
   secondary_vertex.position = eval.secondary.point;
@@ -4394,8 +4410,9 @@ if (MPG_DEBUG::PARAMS()) {
   secondary_vertex.jacobian = jacobian_secondary;
   secondary_vertex.is_refraction = secondary_params.is_refraction;
   secondary_vertex.total_internal_reflection = eval.secondary.tir;
-  secondary_vertex.object = secondary_seed.object;
-  secondary_vertex.prim = secondary_seed.prim;
+  /* Per Codex: Store actual converged object/prim, not original seed */
+  secondary_vertex.object = current_secondary_object;
+  secondary_vertex.prim = current_secondary_prim;
 
   result.is_refraction = secondary_vertex.is_refraction;
   result.specular_point = primary_vertex.position;
