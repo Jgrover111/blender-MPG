@@ -453,13 +453,12 @@ float3 compute_specular(const float3 &dir_ds,
                         float &cos_theta_t,
                         float &eta_used)
 {
-  /* Per Codex finding #2: Mitsuba's refract() uses dot(w, n) directly to flip the normal
-   * and swap the IOR ratio. It does NOT depend on a precomputed backface flag (SD_BACKFACING).
-   * This is critical for consistency with the BSDF frame normal used in the half-vector constraint.
-   *
-   * For refraction: dot(normal, ray) determines entering vs. exiting:
-   * - dot > 0: ray and normal point in same direction → exiting (glass→air)
-   * - dot < 0: ray and normal point in opposite directions → entering (air→glass) */
+  /* Per Codex finding: Use SD_BACKFACING flag for entering/exiting determination.
+   * The dot(normal, dir_ds) test breaks when the normal has been flipped to align with
+   * the BSDF frame, because both vectors can point in the same direction even when exiting.
+   * SD_BACKFACING is set by shader_setup_from_ray based on dot(Ng, wi) < 0 using the
+   * original geometric normal, so it's reliable regardless of BSDF frame orientation. */
+  const bool exiting = params.backfacing;
 
   const float dot_w_n = dot(normal, dir_ds);
 
@@ -469,17 +468,9 @@ if (MPG_DEBUG::PARAMS()) {
     printf("  normal: (%.6f, %.6f, %.6f)\n", normal.x, normal.y, normal.z);
     printf("  dir_ds: (%.6f, %.6f, %.6f)\n", dir_ds.x, dir_ds.y, dir_ds.z);
     printf("  dot(normal, dir_ds): %.6f\n", dot_w_n);
+    printf("  backfacing flag: %s\n", params.backfacing ? "TRUE" : "FALSE");
   }
 }
-
-  /* Per Codex finding: Mitsuba's entering/exiting logic is opposite of what we had.
-   * When w points away from surface (toward previous vertex):
-   * - dot(w, n) >= 0: w and n both point outward → ENTERING (air→glass) → eta = 1/IOR
-   * - dot(w, n) < 0: w points inward, n points outward → EXITING (glass→air) → eta = IOR
-   *
-   * Mitsuba starts with eta = 1/eta_ and only swaps when dot(w, n) < 0 (coming from inside).
-   * We had this backwards, which completely flipped refraction directions. */
-  const bool exiting = (dot_w_n < 0.0f);  // CORRECTED: was (dot_w_n > 0.0f)
 
 if (MPG_DEBUG::PARAMS()) {
   if (params.is_refraction) {
@@ -488,7 +479,7 @@ if (MPG_DEBUG::PARAMS()) {
 }
 
   /* Orient normal to point toward the medium the ray came from.
-   * Per Mitsuba: flip normal if dot(w, n) < 0 (exiting/coming from inside). */
+   * Flip normal when exiting (coming from inside glass). */
   float3 oriented_normal = exiting ? -normal : normal;
 
   if (!params.is_refraction) {
