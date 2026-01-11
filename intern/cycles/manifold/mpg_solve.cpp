@@ -687,21 +687,29 @@ if (MPG_DEBUG::PARAMS()) {
 
   /* Half-vector eta determination per Mitsuba reference.
    * CRITICAL: Must test dot(wi, geometric_normal) dynamically, not use precomputed flag.
-   * During Newton iterations, incident direction changes so we must recompute entering/exiting.
+   * CRITICAL: Align geometric normal to BSDF frame before testing, per Mitsuba.
    *
-   * Mitsuba's logic:
+   * Mitsuba's logic (manifold_path_guiding.h):
    *   Float eta = v[i].eta;  // base IOR
-   *   if (dot(wi, v[i].gn) < 0.f) {  // Test against GEOMETRIC normal
+   *   // Align gn to BSDF frame: masked(gn, dot(n, gn) < 0) *= -1
+   *   if (dot(wi, v[i].gn) < 0.f) {  // Test against ALIGNED geometric normal
    *       eta = rcp(eta);
    *   }
    *
    * The half-vector eta convention:
-   * - Entering (dot(wi, gn) >= 0): eta = base_eta (e.g., 1.5 for glass)
-   * - Exiting (dot(wi, gn) < 0): eta = 1/base_eta (e.g., 0.667 for glass)
-   * This is opposite of Snell's law eta! */
+   * - Entering (dot(wi, aligned_gn) >= 0): eta = base_eta (e.g., 1.5 for glass)
+   * - Exiting (dot(wi, aligned_gn) < 0): eta = 1/base_eta (e.g., 0.667 for glass) */
   float h_eta = 1.0f;
   if (eval.refractive) {
-    const float3 geometric_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+    /* Compute raw geometric normal from surface derivatives */
+    const float3 geometric_normal_raw = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+
+    /* Align geometric normal to BSDF frame (Mitsuba: masked(gn, dot(n, gn) < 0) *= -1) */
+    float3 geometric_normal = geometric_normal_raw;
+    if (dot(eval.normal, geometric_normal_raw) < 0.0f) {
+      geometric_normal = -geometric_normal_raw;
+    }
+
     const float dot_wi_gn = dot(wi, geometric_normal);
     const float base_eta = params.base_eta;
 
@@ -1585,9 +1593,11 @@ void compute_halfvector_jacobian(const ShadingPoint &D,
     return;
   }
 
-  /* Derivative of normalized vector: dh/dx = (dg/dx / ||g||) - h * dot(h, dg/dx) */
-  const float3 dh_du = (dg_du / g_len) - h * dot(h, dg_du);
-  const float3 dh_dv = (dg_dv / g_len) - h * dot(h, dg_dv);
+  /* Derivative of normalized vector: dh/dx = (1/||g||) * (dg/dx - h * dot(h, dg/dx))
+   * Per Codex: The 1/||g|| factor applies to BOTH terms! */
+  const float inv_g_len = 1.0f / g_len;
+  const float3 dh_du = inv_g_len * (dg_du - h * dot(h, dg_du));
+  const float3 dh_dv = inv_g_len * (dg_dv - h * dot(h, dg_dv));
 
   /* Project derivatives onto surface tangent frame to get 2D Jacobian.
    * Embed in 3D vectors with third component = 0 for compatibility with solve_step. */
@@ -2164,11 +2174,16 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
   /* Compute primary half-vector eta dynamically matching evaluate_specular() */
   float primary_h_eta = 1.0f;
   if (eval.primary.refractive) {
-    const float3 primary_gn = safe_normalize(cross(primary_geometry.dPdu, primary_geometry.dPdv));
+    const float3 primary_gn_raw = safe_normalize(cross(primary_geometry.dPdu, primary_geometry.dPdv));
+
+    /* Align geometric normal to BSDF frame (Mitsuba: masked(gn, dot(n, gn) < 0) *= -1) */
+    float3 primary_gn = primary_gn_raw;
+    if (dot(eval.primary.normal, primary_gn_raw) < 0.0f) {
+      primary_gn = -primary_gn_raw;
+    }
+
     const float primary_dot_wi_gn = dot(primary_wi, primary_gn);
-    /* Reconstruct base_eta from Snell's law eta.
-     * eval.eta is either 1/base_eta (entering) or base_eta (exiting).
-     * base_eta is whichever is >= 1.0 */
+    /* Reconstruct base_eta from Snell's law eta */
     const float primary_base_eta = (eval.primary.eta >= 1.0f) ? eval.primary.eta : (1.0f / eval.primary.eta);
 
     if (primary_dot_wi_gn < 0.0f) {
@@ -2195,7 +2210,14 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
   /* Compute secondary half-vector eta dynamically matching evaluate_specular() */
   float secondary_h_eta = 1.0f;
   if (eval.secondary.refractive) {
-    const float3 secondary_gn = safe_normalize(cross(secondary_geometry.dPdu, secondary_geometry.dPdv));
+    const float3 secondary_gn_raw = safe_normalize(cross(secondary_geometry.dPdu, secondary_geometry.dPdv));
+
+    /* Align geometric normal to BSDF frame (Mitsuba: masked(gn, dot(n, gn) < 0) *= -1) */
+    float3 secondary_gn = secondary_gn_raw;
+    if (dot(eval.secondary.normal, secondary_gn_raw) < 0.0f) {
+      secondary_gn = -secondary_gn_raw;
+    }
+
     const float secondary_dot_wi_gn = dot(secondary_wi, secondary_gn);
     /* Reconstruct base_eta from Snell's law eta */
     const float secondary_base_eta = (eval.secondary.eta >= 1.0f) ? eval.secondary.eta : (1.0f / eval.secondary.eta);
@@ -2245,9 +2267,11 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
     d_primary_g_dv1 = -d_primary_g_dv1;
   }
 
-  /* Derivative of normalized half-vector: dh/dx = (dg/dx / ||g||) - h * dot(h, dg/dx) */
-  const float3 d_primary_h_du1 = (d_primary_g_du1 / primary_g_len) - primary_h * dot(primary_h, d_primary_g_du1);
-  const float3 d_primary_h_dv1 = (d_primary_g_dv1 / primary_g_len) - primary_h * dot(primary_h, d_primary_g_dv1);
+  /* Derivative of normalized half-vector: dh/dx = (1/||g||) * (dg/dx - h * dot(h, dg/dx))
+   * Per Codex: The 1/||g|| factor applies to BOTH terms! */
+  const float inv_primary_g_len = 1.0f / primary_g_len;
+  const float3 d_primary_h_du1 = inv_primary_g_len * (d_primary_g_du1 - primary_h * dot(primary_h, d_primary_g_du1));
+  const float3 d_primary_h_dv1 = inv_primary_g_len * (d_primary_g_dv1 - primary_h * dot(primary_h, d_primary_g_dv1));
 
   /* Project onto tangent frame */
   J[0][0] = dot(primary_tangent_u, d_primary_h_du1);  // dC1/du1
@@ -2273,8 +2297,8 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
     d_primary_g_dv2 = -d_primary_g_dv2;
   }
 
-  const float3 d_primary_h_du2 = (d_primary_g_du2 / primary_g_len) - primary_h * dot(primary_h, d_primary_g_du2);
-  const float3 d_primary_h_dv2 = (d_primary_g_dv2 / primary_g_len) - primary_h * dot(primary_h, d_primary_g_dv2);
+  const float3 d_primary_h_du2 = inv_primary_g_len * (d_primary_g_du2 - primary_h * dot(primary_h, d_primary_g_du2));
+  const float3 d_primary_h_dv2 = inv_primary_g_len * (d_primary_g_dv2 - primary_h * dot(primary_h, d_primary_g_dv2));
 
   J[0][2] = dot(primary_tangent_u, d_primary_h_du2);  // dC1/du2
   J[0][3] = dot(primary_tangent_u, d_primary_h_dv2);  // dC1/dv2
@@ -2303,8 +2327,9 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
     d_secondary_g_dv1 = -d_secondary_g_dv1;
   }
 
-  const float3 d_secondary_h_du1 = (d_secondary_g_du1 / secondary_g_len) - secondary_h * dot(secondary_h, d_secondary_g_du1);
-  const float3 d_secondary_h_dv1 = (d_secondary_g_dv1 / secondary_g_len) - secondary_h * dot(secondary_h, d_secondary_g_dv1);
+  const float inv_secondary_g_len = 1.0f / secondary_g_len;
+  const float3 d_secondary_h_du1 = inv_secondary_g_len * (d_secondary_g_du1 - secondary_h * dot(secondary_h, d_secondary_g_du1));
+  const float3 d_secondary_h_dv1 = inv_secondary_g_len * (d_secondary_g_dv1 - secondary_h * dot(secondary_h, d_secondary_g_dv1));
 
   J[2][0] = dot(secondary_tangent_u, d_secondary_h_du1);  // dC3/du1
   J[2][1] = dot(secondary_tangent_u, d_secondary_h_dv1);  // dC3/dv1
@@ -2340,8 +2365,8 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
     d_secondary_g_dv2 = -d_secondary_g_dv2;
   }
 
-  const float3 d_secondary_h_du2 = (d_secondary_g_du2 / secondary_g_len) - secondary_h * dot(secondary_h, d_secondary_g_du2);
-  const float3 d_secondary_h_dv2 = (d_secondary_g_dv2 / secondary_g_len) - secondary_h * dot(secondary_h, d_secondary_g_dv2);
+  const float3 d_secondary_h_du2 = inv_secondary_g_len * (d_secondary_g_du2 - secondary_h * dot(secondary_h, d_secondary_g_du2));
+  const float3 d_secondary_h_dv2 = inv_secondary_g_len * (d_secondary_g_dv2 - secondary_h * dot(secondary_h, d_secondary_g_dv2));
 
   J[2][2] = dot(secondary_tangent_u, d_secondary_h_du2);  // dC3/du2
   J[2][3] = dot(secondary_tangent_u, d_secondary_h_dv2);  // dC3/dv2
@@ -3192,11 +3217,18 @@ if (MPG_DEBUG::PARAMS()) {
 
     const float3 new_wi = -new_eval.dir_ds;
     const float3 new_wo = new_eval.dir_sl;
-    /* Compute half-vector eta dynamically using dot(wi, gn) per Mitsuba reference.
-     * Must match evaluate_specular() logic - do NOT use precomputed backfacing flag! */
+    /* Compute half-vector eta dynamically using dot(wi, aligned_gn) per Mitsuba reference.
+     * CRITICAL: Align geometric normal to BSDF frame before testing! */
     float new_h_eta = 1.0f;
     if (new_params.is_refraction) {
-      const float3 new_geometric_normal = safe_normalize(cross(new_geometry.dPdu, new_geometry.dPdv));
+      const float3 new_geometric_normal_raw = safe_normalize(cross(new_geometry.dPdu, new_geometry.dPdv));
+
+      /* Align to BSDF frame (Mitsuba: masked(gn, dot(n, gn) < 0) *= -1) */
+      float3 new_geometric_normal = new_geometric_normal_raw;
+      if (dot(new_eval.normal, new_geometric_normal_raw) < 0.0f) {
+        new_geometric_normal = -new_geometric_normal_raw;
+      }
+
       const float new_dot_wi_gn = dot(new_wi, new_geometric_normal);
       const float new_base_eta = new_params.base_eta;
 
