@@ -2595,6 +2595,7 @@ ccl_device_inline bool reproject_single_bounce(KernelGlobals kg,
                                                float proposed_v,
                                                int expected_object,
                                                int expected_prim,
+                                               float ray_time,
                                                int &hit_object,
                                                int &hit_prim,
                                                float &hit_u,
@@ -2634,7 +2635,7 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
   ray.D = direction / distance;
   ray.tmin = 0.0f;
   ray.tmax = FLT_MAX;  /* Don't limit - let it find whatever it hits */
-  ray.time = 0.5f;  /* Mid-shutter time */
+  ray.time = ray_time;  /* Use shading time for motion blur consistency */
   ray.dP = differential_zero_compact();
   ray.dD = differential_zero_compact();
 
@@ -2713,6 +2714,7 @@ ccl_device_inline bool reproject_double_bounce(KernelGlobals kg,
                                                float proposed_primary_v,
                                                int expected_primary_object,
                                                int expected_primary_prim,
+                                               float ray_time,
                                                int &hit_primary_object,
                                                int &hit_primary_prim,
                                                float &hit_primary_u,
@@ -2760,7 +2762,7 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
   ray1.D = direction1 / distance1;
   ray1.tmin = 0.0f;
   ray1.tmax = FLT_MAX;  /* Don't limit - let it find whatever it hits */
-  ray1.time = 0.5f;
+  ray1.time = ray_time;  /* Use shading time for motion blur consistency */
   ray1.dP = differential_zero_compact();
   ray1.dD = differential_zero_compact();
   /* Configure ray to skip the receiver surface - critical to avoid self-intersection */
@@ -2858,7 +2860,7 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
   ray2.D = scattered_direction;  // Use physics-correct scattered direction!
   ray2.tmin = 1e-4f;  // Small offset to avoid self-intersection
   ray2.tmax = FLT_MAX;
-  ray2.time = 0.5f;
+  ray2.time = ray_time;  /* Use shading time for motion blur consistency */
   ray2.dP = differential_zero_compact();
   ray2.dD = differential_zero_compact();
   /* Skip primary surface to avoid self-intersection */
@@ -3142,7 +3144,7 @@ if (MPG_DEBUG::PARAMS()) {
     float new_u, new_v;
     if (!reproject_single_bounce(kg, shading_point, sd.object, sd.prim,
                                   current_geometry, params, proposed_u, proposed_v,
-                                  current_object, current_prim,
+                                  current_object, current_prim, sd.time,
                                   hit_object, hit_prim, new_u, new_v)) {
       beta *= 0.5f;
       needs_step_update = false;  /* Reuse Jacobian with smaller beta */
@@ -3190,11 +3192,21 @@ if (MPG_DEBUG::PARAMS()) {
 
     const float3 new_wi = -new_eval.dir_ds;
     const float3 new_wo = new_eval.dir_sl;
-    float new_h_eta = new_params.is_refraction ? new_params.base_eta : 1.0f;
+    /* Compute half-vector eta dynamically using dot(wi, gn) per Mitsuba reference.
+     * Must match evaluate_specular() logic - do NOT use precomputed backfacing flag! */
+    float new_h_eta = 1.0f;
     if (new_params.is_refraction) {
-      /* Use backfacing flag for entering/exiting - see lines 2426-2441. */
-      if (new_params.backfacing) {
-        new_h_eta = 1.0f / fmaxf(new_h_eta, 1e-6f);
+      const float3 new_geometric_normal = safe_normalize(cross(new_geometry.dPdu, new_geometry.dPdv));
+      const float new_dot_wi_gn = dot(new_wi, new_geometric_normal);
+      const float new_base_eta = new_params.base_eta;
+
+      if (new_dot_wi_gn < 0.0f) {
+        /* Exiting (coming from inside): eta = 1/base_eta */
+        new_h_eta = 1.0f / fmaxf(new_base_eta, 1e-6f);
+      }
+      else {
+        /* Entering (arriving from outside): eta = base_eta */
+        new_h_eta = new_base_eta;
       }
     }
 
@@ -3677,7 +3689,7 @@ if (MPG_DEBUG::NEWTON_DETAIL()) {
     float new_primary_u, new_primary_v, new_secondary_u, new_secondary_v;
     if (!reproject_double_bounce(kg, receiver, sd.object, sd.prim,
                                   current_primary_geometry, primary_params, proposed_primary_u, proposed_primary_v,
-                                  current_primary_object, current_primary_prim,
+                                  current_primary_object, current_primary_prim, sd.time,
                                   hit_primary_object, hit_primary_prim, new_primary_u, new_primary_v,
                                   current_secondary_geometry, secondary_params, proposed_secondary_u, proposed_secondary_v,
                                   current_secondary_object, current_secondary_prim,
