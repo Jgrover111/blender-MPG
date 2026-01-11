@@ -1915,20 +1915,46 @@ if (MPG_DEBUG::PARAMS()) {
    * Without this check, we accept non-specular (diffuse) hits, which later fail in
    * specular_parameters_from_surface with MPG_FAILURE_NO_SPECULAR, blocking the intended
    * fallback to single-bounce. Check if the surface has specular BSDFs. */
-  Ray validation_ray;
-  validation_ray.P = ray.P;
-  validation_ray.D = ray.D;
-  validation_ray.tmin = 0.0f;
-  validation_ray.tmax = isect.t + 1e-4f;
-  validation_ray.time = sd.time;
+  {
+    ShaderData check_sd = {};
+    shader_setup_from_ray(kg, &check_sd, &ray, const_cast<Intersection *>(&isect));
+    const ConstIntegratorState integrator_state = nullptr;
+    surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
+        kg, integrator_state, &check_sd, nullptr, PATH_RAY_CAMERA, true);
 
-  bool has_smooth_normals = false;
-  if (!has_specular_bsdf_at_hit(kg, validation_ray, isect, has_smooth_normals)) {
+    bool has_specular = false;
+    for (int i = 0; i < check_sd.num_closure; ++i) {
+      const ShaderClosure *c = &check_sd.closure[i];
+      if (!CLOSURE_IS_BSDF(c->type)) {
+        continue;
+      }
+      const bool is_micro = CLOSURE_IS_BSDF_MICROFACET(c->type);
+      const bool is_singular = CLOSURE_IS_BSDF_SINGULAR(c->type);
+      const bool is_glass = CLOSURE_IS_GLASS(c->type);
+
+      /* Glass BSDFs are specular surfaces that MPG can use as intermediate vertices */
+      if (is_singular || is_glass) {
+        has_specular = true;
+        break;
+      }
+      if (is_micro) {
+        const MicrofacetBsdf *mf = reinterpret_cast<const MicrofacetBsdf *>(c);
+        const float a = fmaxf(mf->alpha_x, mf->alpha_y);
+        /* Match solver threshold (1e-6) - only near-delta microfacets are specular */
+        if (a <= 1e-6f) {
+          has_specular = true;
+          break;
+        }
+      }
+    }
+
+    if (!has_specular) {
 if (MPG_DEBUG::PARAMS()) {
-    printf("  trace_secondary_seed: Hit surface is NOT specular (diffuse/non-specular)\n");
-    printf("  Rejecting to allow single-bounce fallback\n");
+      printf("  trace_secondary_seed: Hit surface is NOT specular (diffuse/non-specular)\n");
+      printf("  Rejecting to allow single-bounce fallback\n");
 }
-    return false;
+      return false;
+    }
   }
 
   /* Mitsuba approach: Accept ray-traced secondary vertices that have specular BSDFs.
