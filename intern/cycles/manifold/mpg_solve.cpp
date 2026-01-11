@@ -613,10 +613,25 @@ if (MPG_DEBUG::PARAMS()) {
     printf("  params.normal: (%.6f, %.6f, %.6f)\n",
            params.normal.x, params.normal.y, params.normal.z);
 }
-    /* For BSDF frame normals, derivatives are zero (normal is constant across surface).
-     * Mitsuba uses frame->s and frame->t which are orthogonal to frame->n. */
-    eval.dNdu = zero_float3();
-    eval.dNdv = zero_float3();
+    /* Per Codex: Propagate frame derivatives when BSDF frame varies across surface.
+     * - For microfacet BSDF frames (constant): derivatives are zero
+     * - For BSDF frames from smooth shading (varying): compute derivatives from geometry
+     * Mitsuba's ManifoldVertex propagates frame derivatives; we need to match this. */
+    if (params.has_microfacet && !is_zero(params.microfacet.N)) {
+      /* Microfacet BSDF frame is constant across surface - zero derivatives correct */
+      eval.dNdu = zero_float3();
+      eval.dNdv = zero_float3();
+    }
+    else if (seed.use_smooth_normals) {
+      /* BSDF frame from smooth-shaded geometry - compute derivatives to match Mitsuba */
+      eval.dNdu = compute_normal_derivative(geometry, u, v, eval.normal, true);
+      eval.dNdv = compute_normal_derivative(geometry, u, v, eval.normal, false);
+    }
+    else {
+      /* Flat shading - normal is constant across face */
+      eval.dNdu = zero_float3();
+      eval.dNdv = zero_float3();
+    }
   }
   else if (seed.use_smooth_normals) {
     /* Fallback to interpolated vertex normals */
