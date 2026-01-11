@@ -685,15 +685,35 @@ if (MPG_DEBUG::PARAMS()) {
   const float3 wi = -eval.dir_ds;  /* Incident direction away from surface (X→C) */
   const float3 wo = eval.dir_sl;    /* Outgoing direction away from surface (X→L) */
 
-  /* Half-vector eta convention is opposite of Snell's law eta!
-   * - Snell's law (compute_specular): eta = n_from / n_to
-   *   - Entering glass: eta = 1/1.5 = 0.6667
-   *   - Exiting glass: eta = 1.5/1 = 1.5
-   * - Half-vector (Mitsuba): eta = n_to / n_from
-   *   - Entering glass: eta = 1.5/1 = 1.5
-   *   - Exiting glass: eta = 1/1.5 = 0.6667
-   * Therefore we use the reciprocal of eval.eta for the half-vector. */
-  const float h_eta = eval.refractive ? (1.0f / eval.eta) : 1.0f;
+  /* Half-vector eta determination per Mitsuba reference.
+   * CRITICAL: Must test dot(wi, geometric_normal) dynamically, not use precomputed flag.
+   * During Newton iterations, incident direction changes so we must recompute entering/exiting.
+   *
+   * Mitsuba's logic:
+   *   Float eta = v[i].eta;  // base IOR
+   *   if (dot(wi, v[i].gn) < 0.f) {  // Test against GEOMETRIC normal
+   *       eta = rcp(eta);
+   *   }
+   *
+   * The half-vector eta convention:
+   * - Entering (dot(wi, gn) >= 0): eta = base_eta (e.g., 1.5 for glass)
+   * - Exiting (dot(wi, gn) < 0): eta = 1/base_eta (e.g., 0.667 for glass)
+   * This is opposite of Snell's law eta! */
+  float h_eta = 1.0f;
+  if (eval.refractive) {
+    const float3 geometric_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+    const float dot_wi_gn = dot(wi, geometric_normal);
+    const float base_eta = params.base_eta;
+
+    if (dot_wi_gn < 0.0f) {
+      /* Exiting (coming from inside): eta = 1/base_eta */
+      h_eta = 1.0f / fmaxf(base_eta, 1e-6f);
+    }
+    else {
+      /* Entering (arriving from outside): eta = base_eta */
+      h_eta = base_eta;
+    }
+  }
 
   /* Generalized half-vector: h = normalize(wi + eta * wo), negated for refraction */
   float3 h = wi + h_eta * wo;
@@ -2969,21 +2989,24 @@ if (MPG_DEBUG::PARAMS()) {
   /* Compute generalized half-vector (matching Mitsuba) */
   const float3 wi = -eval.dir_ds;
   const float3 wo = eval.dir_sl;
-  float h_eta = params.is_refraction ? params.base_eta : 1.0f;
+
+  /* Half-vector eta determination per Mitsuba reference.
+   * CRITICAL: Must test dot(wi, geometric_normal) dynamically, not use precomputed flag.
+   * Mitsuba tests dot(wi, v[i].gn) to determine entering/exiting at constraint evaluation time. */
+  float h_eta = 1.0f;
   if (params.is_refraction) {
-    /* Use backfacing flag from params for entering/exiting determination.
-     * This matches compute_specular() and is robust for thin geometry.
-     *
-     * CRITICAL: Half-vector eta is INVERSE of Snell's law eta!
-     * - Snell's law: entering = 1/IOR, exiting = IOR
-     * - Half-vector: entering = IOR, exiting = 1/IOR
-     *
-     * Therefore, invert when exiting (backfacing). */
-    if (params.backfacing) {
-      /* Exiting (backfacing): use inverse IOR for half-vector */
-      h_eta = 1.0f / fmaxf(h_eta, 1e-6f);
+    const float3 geometric_normal = safe_normalize(cross(geometry.dPdu, geometry.dPdv));
+    const float dot_wi_gn = dot(wi, geometric_normal);
+    const float base_eta = params.base_eta;
+
+    if (dot_wi_gn < 0.0f) {
+      /* Exiting (coming from inside): eta = 1/base_eta */
+      h_eta = 1.0f / fmaxf(base_eta, 1e-6f);
     }
-    /* Entering (!backfacing): keep h_eta = base_eta */
+    else {
+      /* Entering (arriving from outside): eta = base_eta */
+      h_eta = base_eta;
+    }
   }
 
   /* Generalized half-vector: h = normalize(wi + eta * wo), negated for refraction.
