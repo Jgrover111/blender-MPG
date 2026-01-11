@@ -114,6 +114,10 @@ struct SpecularEval {
   bool tir = false;
   bool refractive = false;
   LightSample light_sample = {};  /* Stored for analytical Jacobian computation */
+  /* Per Codex: BSDF frame tangents (orthogonal to BSDF frame normal).
+   * Mitsuba uses frame.s and frame.t, not geometric dPdu/dPdv. */
+  float3 tangent_u = zero_float3();
+  float3 tangent_v = zero_float3();
 };
 
 float3 surface_point_from_barycentric(const SpecularSurfaceGeometry &geometry, const float u, const float v);
@@ -643,11 +647,20 @@ if (MPG_DEBUG::PARAMS()) {
     /* Use geometric normals as-is from mesh. No flipping based on BSDF or ray direction.
      * The entering/exiting determination in compute_specular() uses dot(normal, ray) which
      * works correctly with the actual geometric normals from the mesh. */
+
+    /* Per Codex: Construct BSDF frame tangents orthogonal to BSDF frame normal.
+     * Mitsuba uses frame.s and frame.t (orthogonal to frame.n), not geometric dPdu/dPdv.
+     * This ensures the half-vector constraint projection matches Mitsuba when the BSDF
+     * frame normal differs from the geometric normal. */
+    make_orthonormals(eval.normal, &eval.tangent_u, &eval.tangent_v);
   }
 
+  /* Per Codex: Mitsuba's refract(w, n, eta) expects w to be the direction AWAY from
+   * the surface (wi = x_prev - x_cur), but dir_ds is x_cur - x_prev (toward surface).
+   * Pass -dir_ds to match Mitsuba's convention for entering/exiting determination. */
   float cos_theta_i = 0.0f, cos_theta_t = 0.0f, eta = 1.0f;
   const float3 spec_dir = compute_specular(
-      eval.dir_ds, eval.normal, params, eval.tir, cos_theta_i, cos_theta_t, eta);
+      -eval.dir_ds, eval.normal, params, eval.tir, cos_theta_i, cos_theta_t, eta);
   eval.refractive = params.is_refraction;
   eval.eta = eta;
   eval.cos_theta_i = cos_theta_i;
@@ -1760,12 +1773,14 @@ if (MPG_DEBUG::PARAMS()) {
   printf("\n");
 }
 
+  /* Per Codex: Mitsuba expects direction AWAY from surface (wi = x_prev - x_cur).
+   * dir_ds is receiver → primary (toward surface), so negate it. */
   bool tir = false;
   float cos_theta_i = 0.0f;
   float cos_theta_t = 0.0f;
   float eta_used = 1.0f;
   const float3 dir_sl = compute_specular(
-      dir_ds, specular_normal, primary_params, tir, cos_theta_i, cos_theta_t, eta_used);
+      -dir_ds, specular_normal, primary_params, tir, cos_theta_i, cos_theta_t, eta_used);
 
 if (MPG_DEBUG::PARAMS()) {
   printf("REFRACTION at primary vertex:\n");
@@ -1982,24 +1997,25 @@ if (MPG_DEBUG::EVAL_FAIL()) {
     return false;
   }
 
-  float3 tangent_u, tangent_v;
-  if (!build_tangent_basis(eval.primary.dXdu, eval.primary.dXdv, tangent_u, tangent_v)) {
+  /* Per Codex: Use BSDF frame tangents (from eval.tangent_u/v), not geometric tangents.
+   * Mitsuba projects onto frame.s and frame.t (orthogonal to BSDF frame normal). */
+  if (is_zero(eval.primary.tangent_u) || is_zero(eval.primary.tangent_v)) {
 if (MPG_DEBUG::EVAL_FAIL()) {
-    printf("  evaluate_double_bounce FAIL: Primary tangent basis failed\n");
+    printf("  evaluate_double_bounce FAIL: Primary BSDF frame tangents not initialized\n");
 }
     return false;
   }
-  eval.residual[0] = dot(eval.primary.residual, tangent_u);
-  eval.residual[1] = dot(eval.primary.residual, tangent_v);
+  eval.residual[0] = dot(eval.primary.residual, eval.primary.tangent_u);
+  eval.residual[1] = dot(eval.primary.residual, eval.primary.tangent_v);
 
-  if (!build_tangent_basis(eval.secondary.dXdu, eval.secondary.dXdv, tangent_u, tangent_v)) {
+  if (is_zero(eval.secondary.tangent_u) || is_zero(eval.secondary.tangent_v)) {
 if (MPG_DEBUG::EVAL_FAIL()) {
-    printf("  evaluate_double_bounce FAIL: Secondary tangent basis failed\n");
+    printf("  evaluate_double_bounce FAIL: Secondary BSDF frame tangents not initialized\n");
 }
     return false;
   }
-  eval.residual[2] = dot(eval.secondary.residual, tangent_u);
-  eval.residual[3] = dot(eval.secondary.residual, tangent_v);
+  eval.residual[2] = dot(eval.secondary.residual, eval.secondary.tangent_u);
+  eval.residual[3] = dot(eval.secondary.residual, eval.secondary.tangent_v);
 
 if (MPG_DEBUG::NEWTON_DETAIL()) {
   const float norm = sqrtf(eval.residual[0]*eval.residual[0] + eval.residual[1]*eval.residual[1] +
@@ -2040,14 +2056,18 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
    * - J[2:4, 2:4]: Secondary constraint w.r.t. secondary params (diagonal block)
    */
 
-  /* === Build tangent frames for both vertices === */
-  float3 primary_tangent_u, primary_tangent_v;
-  if (!build_tangent_basis(eval.primary.dXdu, eval.primary.dXdv, primary_tangent_u, primary_tangent_v)) {
+  /* === Use BSDF frame tangent frames (not geometric tangents) === */
+  /* Per Codex: Mitsuba uses frame.s and frame.t (orthogonal to BSDF frame normal).
+   * These are already computed in evaluate_specular(). */
+  const float3 primary_tangent_u = eval.primary.tangent_u;
+  const float3 primary_tangent_v = eval.primary.tangent_v;
+  if (is_zero(primary_tangent_u) || is_zero(primary_tangent_v)) {
     return false;
   }
 
-  float3 secondary_tangent_u, secondary_tangent_v;
-  if (!build_tangent_basis(eval.secondary.dXdu, eval.secondary.dXdv, secondary_tangent_u, secondary_tangent_v)) {
+  const float3 secondary_tangent_u = eval.secondary.tangent_u;
+  const float3 secondary_tangent_v = eval.secondary.tangent_v;
+  if (is_zero(secondary_tangent_u) || is_zero(secondary_tangent_v)) {
     return false;
   }
 
@@ -2691,11 +2711,12 @@ if (MPG_DEBUG::NEWTON_DETAIL() && isect1.prim != expected_primary_prim) {
 
   /* CRITICAL: Apply specular scattering (refraction/reflection) at primary vertex.
    * This is the key difference from geometric-only reproject - we validate physics!
-   * Per Mitsuba: compute_specular() determines the scattered direction using Snell's law. */
+   * Per Mitsuba: compute_specular() determines the scattered direction using Snell's law.
+   * Per Codex: Mitsuba expects direction AWAY from surface, so negate ray1.D. */
   bool tir_at_primary = false;
   float cos_theta_i, cos_theta_t, eta_used;
   const float3 scattered_direction = compute_specular(
-      ray1.D,              // Incoming direction (receiver → primary)
+      -ray1.D,             // Direction away from primary (Mitsuba convention: wi = x_prev - x_cur)
       primary_normal,      // Primary vertex normal
       primary_params,      // Primary material (IOR, is_refraction, backfacing, etc.)
       tir_at_primary,      // Output: did total internal reflection occur?
@@ -2866,15 +2887,16 @@ if (MPG_DEBUG::PARAMS()) {
     return false;
   }
 
-  /* Mitsuba's half-vector constraint: project half-vector onto surface tangent frame.
-   * C = [dot(s, h), dot(t, h)] where s,t are surface tangents.
+  /* Per Codex: Use BSDF frame tangents (frame.s, frame.t orthogonal to BSDF frame normal).
+   * Mitsuba's half-vector constraint: C = [dot(s, h), dot(t, h)] where s,t are BSDF tangents.
    * This formulation is proven to converge to 1e-4 in Mitsuba. */
-  float3 tangent_u, tangent_v;
-  if (!build_tangent_basis(eval.dXdu, eval.dXdv, tangent_u, tangent_v)) {
+  float3 tangent_u = eval.tangent_u;
+  float3 tangent_v = eval.tangent_v;
+  if (is_zero(tangent_u) || is_zero(tangent_v)) {
 if (MPG_DEBUG::PARAMS()) {
-    printf("MPG FAILURE: Degenerate normals at build_tangent_basis\n");
-    printf("  dXdu=[%.6f, %.6f, %.6f] len=%.9f\n", eval.dXdu.x, eval.dXdu.y, eval.dXdu.z, len(eval.dXdu));
-    printf("  dXdv=[%.6f, %.6f, %.6f] len=%.9f\n", eval.dXdv.x, eval.dXdv.y, eval.dXdv.z, len(eval.dXdv));
+    printf("MPG FAILURE: BSDF frame tangents not initialized\n");
+    printf("  tangent_u=[%.6f, %.6f, %.6f] len=%.9f\n", tangent_u.x, tangent_u.y, tangent_u.z, len(tangent_u));
+    printf("  tangent_v=[%.6f, %.6f, %.6f] len=%.9f\n", tangent_v.x, tangent_v.y, tangent_v.z, len(tangent_v));
 }
     failure_code = MPG_FAILURE_DEGENERATE_NORMALS;
     return false;
@@ -3038,9 +3060,10 @@ if (MPG_DEBUG::PARAMS()) {
       continue;
     }
 
-    /* Compute Mitsuba's half-vector constraint for new evaluation */
-    float3 new_tangent_u, new_tangent_v;
-    if (!build_tangent_basis(new_eval.dXdu, new_eval.dXdv, new_tangent_u, new_tangent_v)) {
+    /* Per Codex: Use BSDF frame tangents from new_eval */
+    const float3 new_tangent_u = new_eval.tangent_u;
+    const float3 new_tangent_v = new_eval.tangent_v;
+    if (is_zero(new_tangent_u) || is_zero(new_tangent_v)) {
       beta *= 0.5f;
       needs_step_update = false;
       continue;
