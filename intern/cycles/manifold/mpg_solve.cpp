@@ -1911,7 +1911,27 @@ if (MPG_DEBUG::PARAMS()) {
    * to the geometric tangent basis, causing Newton solver divergence. */
   secondary_seed.use_smooth_normals = false;
 
-  /* Mitsuba approach: Accept all ray-traced secondary vertices without pre-validation.
+  /* Per Codex finding: Validate that the hit surface is actually specular before accepting.
+   * Without this check, we accept non-specular (diffuse) hits, which later fail in
+   * specular_parameters_from_surface with MPG_FAILURE_NO_SPECULAR, blocking the intended
+   * fallback to single-bounce. Check if the surface has specular BSDFs. */
+  Ray validation_ray;
+  validation_ray.P = ray.P;
+  validation_ray.D = ray.D;
+  validation_ray.tmin = 0.0f;
+  validation_ray.tmax = isect.t + 1e-4f;
+  validation_ray.time = sd.time;
+
+  bool has_smooth_normals = false;
+  if (!has_specular_bsdf_at_hit(kg, validation_ray, isect, has_smooth_normals)) {
+if (MPG_DEBUG::PARAMS()) {
+    printf("  trace_secondary_seed: Hit surface is NOT specular (diffuse/non-specular)\n");
+    printf("  Rejecting to allow single-bounce fallback\n");
+}
+    return false;
+  }
+
+  /* Mitsuba approach: Accept ray-traced secondary vertices that have specular BSDFs.
    * Let the Newton solver naturally reject infeasible seeds through convergence failure.
    * This matches the reference implementation which traces rays iteratively for multi-bounce
    * paths and relies on Newton's constraint evaluation to filter invalid configurations. */

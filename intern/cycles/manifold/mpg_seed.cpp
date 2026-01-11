@@ -335,8 +335,11 @@ static inline bool has_specular_bsdf_at_hit(KernelGlobals kg,
     if (is_micro) {
       const MicrofacetBsdf *mf = reinterpret_cast<const MicrofacetBsdf *>(c);
       const float a = fmaxf(mf->alpha_x, mf->alpha_y);
-      if (a <= 0.02f) {
-        return true; /* razor-sharp microfacet behaves like specular for MPG v1 */
+      /* Per Codex finding: Match solver threshold (1e-6) to avoid accepting seeds
+       * that will later be rejected. The solver only supports near-delta microfacets,
+       * so seed generation must use the same criterion. */
+      if (a <= 1e-6f) {
+        return true; /* near-delta microfacet behaves like perfect specular */
       }
     }
   }
