@@ -2156,10 +2156,28 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
   }
 
   /* === Compute half-vectors for both vertices === */
+  /* CRITICAL: Must compute eta dynamically using dot(wi, gn) like in evaluate_specular().
+   * Using eval.primary.eta (from params.backfacing) causes Jacobian/constraint mismatch! */
   const float3 primary_wi = -eval.primary.dir_ds;
   const float3 primary_wo = eval.primary.dir_sl;
-  /* Use reciprocal of Snell's law eta for half-vector (see evaluate_specular) */
-  const float primary_h_eta = eval.primary.refractive ? (1.0f / eval.primary.eta) : 1.0f;
+
+  /* Compute primary half-vector eta dynamically matching evaluate_specular() */
+  float primary_h_eta = 1.0f;
+  if (eval.primary.refractive) {
+    const float3 primary_gn = safe_normalize(cross(primary_geometry.dPdu, primary_geometry.dPdv));
+    const float primary_dot_wi_gn = dot(primary_wi, primary_gn);
+    /* Reconstruct base_eta from Snell's law eta.
+     * eval.eta is either 1/base_eta (entering) or base_eta (exiting).
+     * base_eta is whichever is >= 1.0 */
+    const float primary_base_eta = (eval.primary.eta >= 1.0f) ? eval.primary.eta : (1.0f / eval.primary.eta);
+
+    if (primary_dot_wi_gn < 0.0f) {
+      primary_h_eta = 1.0f / fmaxf(primary_base_eta, 1e-6f);  /* Exiting */
+    }
+    else {
+      primary_h_eta = primary_base_eta;  /* Entering */
+    }
+  }
 
   float3 primary_g = primary_wi + primary_h_eta * primary_wo;
   if (eval.primary.refractive) {
@@ -2173,8 +2191,22 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
 
   const float3 secondary_wi = -eval.secondary.dir_ds;
   const float3 secondary_wo = eval.secondary.dir_sl;
-  /* Use reciprocal of Snell's law eta for half-vector (see evaluate_specular) */
-  const float secondary_h_eta = eval.secondary.refractive ? (1.0f / eval.secondary.eta) : 1.0f;
+
+  /* Compute secondary half-vector eta dynamically matching evaluate_specular() */
+  float secondary_h_eta = 1.0f;
+  if (eval.secondary.refractive) {
+    const float3 secondary_gn = safe_normalize(cross(secondary_geometry.dPdu, secondary_geometry.dPdv));
+    const float secondary_dot_wi_gn = dot(secondary_wi, secondary_gn);
+    /* Reconstruct base_eta from Snell's law eta */
+    const float secondary_base_eta = (eval.secondary.eta >= 1.0f) ? eval.secondary.eta : (1.0f / eval.secondary.eta);
+
+    if (secondary_dot_wi_gn < 0.0f) {
+      secondary_h_eta = 1.0f / fmaxf(secondary_base_eta, 1e-6f);  /* Exiting */
+    }
+    else {
+      secondary_h_eta = secondary_base_eta;  /* Entering */
+    }
+  }
 
   float3 secondary_g = secondary_wi + secondary_h_eta * secondary_wo;
   if (eval.secondary.refractive) {
