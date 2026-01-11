@@ -2890,8 +2890,8 @@ if (MPG_DEBUG::PARAMS()) {
   /* Per Codex: Use BSDF frame tangents (frame.s, frame.t orthogonal to BSDF frame normal).
    * Mitsuba's half-vector constraint: C = [dot(s, h), dot(t, h)] where s,t are BSDF tangents.
    * This formulation is proven to converge to 1e-4 in Mitsuba. */
-  const float3 tangent_u = eval.tangent_u;
-  const float3 tangent_v = eval.tangent_v;
+  float3 tangent_u = eval.tangent_u;
+  float3 tangent_v = eval.tangent_v;
   if (is_zero(tangent_u) || is_zero(tangent_v)) {
 if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: BSDF frame tangents not initialized\n");
