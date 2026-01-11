@@ -472,10 +472,14 @@ if (MPG_DEBUG::PARAMS()) {
   }
 }
 
-  /* Determine entering/exiting using dot product per Mitsuba's approach.
-   * This is computed dynamically from the actual normal being used (BSDF frame),
-   * not from a precomputed flag that may be inconsistent. */
-  const bool exiting = (dot_w_n > 0.0f);
+  /* Per Codex finding: Mitsuba's entering/exiting logic is opposite of what we had.
+   * When w points away from surface (toward previous vertex):
+   * - dot(w, n) >= 0: w and n both point outward → ENTERING (air→glass) → eta = 1/IOR
+   * - dot(w, n) < 0: w points inward, n points outward → EXITING (glass→air) → eta = IOR
+   *
+   * Mitsuba starts with eta = 1/eta_ and only swaps when dot(w, n) < 0 (coming from inside).
+   * We had this backwards, which completely flipped refraction directions. */
+  const bool exiting = (dot_w_n < 0.0f);  // CORRECTED: was (dot_w_n > 0.0f)
 
 if (MPG_DEBUG::PARAMS()) {
   if (params.is_refraction) {
@@ -484,7 +488,7 @@ if (MPG_DEBUG::PARAMS()) {
 }
 
   /* Orient normal to point toward the medium the ray came from.
-   * Per Mitsuba: flip normal if dot(w, n) > 0 (exiting case). */
+   * Per Mitsuba: flip normal if dot(w, n) < 0 (exiting/coming from inside). */
   float3 oriented_normal = exiting ? -normal : normal;
 
   if (!params.is_refraction) {
