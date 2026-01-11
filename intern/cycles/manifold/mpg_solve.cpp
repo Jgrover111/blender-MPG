@@ -2734,7 +2734,7 @@ ccl_device_inline bool reproject_double_bounce(KernelGlobals kg,
                                                int receiver_object,
                                                int receiver_prim,
                                                const SpecularSurfaceGeometry &primary_geometry,
-                                               const SpecularParameters &primary_params,
+                                               SpecularParameters primary_params,  /* Pass by value so we can update on triangle walk */
                                                float proposed_primary_u,
                                                float proposed_primary_v,
                                                int expected_primary_object,
@@ -2745,7 +2745,7 @@ ccl_device_inline bool reproject_double_bounce(KernelGlobals kg,
                                                float &hit_primary_u,
                                                float &hit_primary_v,
                                                const SpecularSurfaceGeometry &secondary_geometry,
-                                               const SpecularParameters &secondary_params,
+                                               SpecularParameters secondary_params,  /* Pass by value so we can update on triangle walk */
                                                float proposed_secondary_u,
                                                float proposed_secondary_v,
                                                int expected_secondary_object,
@@ -2869,6 +2869,19 @@ if (MPG_DEBUG::NEWTON_DETAIL() && isect1.prim != expected_primary_prim) {
     /* Compute surface derivatives */
     actual_primary_geometry.dPdu = actual_primary_geometry.verts[1] - actual_primary_geometry.verts[0];
     actual_primary_geometry.dPdv = actual_primary_geometry.verts[2] - actual_primary_geometry.verts[0];
+
+    /* Per Codex Pass 1 #2 and Pass 4 #2: When Newton walks to adjacent triangle, BSDF parameters
+     * become stale. The most critical is the backfacing flag which determines entering/exiting.
+     * Recompute backfacing using the NEW geometry's normal and the ray direction.
+     * Per shader_setup_from_ray: backfacing = dot(Ng, ray.D) < 0 */
+    const float3 actual_gn = safe_normalize(cross(actual_primary_geometry.dPdu, actual_primary_geometry.dPdv));
+    const float3 ray_to_primary = safe_normalize(hit_primary_point - receiver.position);
+    primary_params.backfacing = (dot(actual_gn, ray_to_primary) < 0.0f);
+
+if (MPG_DEBUG::NEWTON_DETAIL()) {
+    printf("    reproject_double: Updated primary backfacing=%s for new triangle (prim %d → %d)\n",
+           primary_params.backfacing ? "TRUE" : "FALSE", expected_primary_prim, hit_primary_prim);
+}
   }
 
   /* Compute actual hit primary 3D position from ACTUAL geometry */
