@@ -335,8 +335,11 @@ static inline bool has_specular_bsdf_at_hit(KernelGlobals kg,
     if (is_micro) {
       const MicrofacetBsdf *mf = reinterpret_cast<const MicrofacetBsdf *>(c);
       const float a = fmaxf(mf->alpha_x, mf->alpha_y);
-      if (a <= 0.02f) {
-        return true; /* razor-sharp microfacet behaves like specular for MPG v1 */
+      /* Per Codex finding: Match solver threshold (1e-6) to avoid accepting seeds
+       * that will later be rejected. The solver only supports near-delta microfacets,
+       * so seed generation must use the same criterion. */
+      if (a <= 1e-6f) {
+        return true; /* near-delta microfacet behaves like perfect specular */
       }
     }
   }
@@ -1006,24 +1009,6 @@ bool mpg_generate_seed(KernelGlobals kg,
     out_normalized_direction = normalized_direction;
     out_tau_count = base_tau_count;
 
-    /* Full-path tau encoding: set bits for all bounces in the path.
-     * For single-bounce (base_tau_count == 1): only bit 0 is set
-     * For double-bounce (base_tau_count == 2): both bits 0 and 1 are set
-     *
-     * For thin glass double-refraction: if first bounce is refraction (air→glass),
-     * second bounce should also be refraction (glass→air). */
-    if (base_tau_count > 0) {
-      const bool is_refraction = (scatter_branch == MPG_SEED_SCATTER_REFRACTION);
-
-      /* Set bit 0 for primary bounce */
-      set_chaintype_bit(out_tau_bits, 0, is_refraction);
-
-      /* For double-bounce refraction, set bit 1 for secondary bounce */
-      if (base_tau_count >= 2 && is_refraction) {
-        set_chaintype_bit(out_tau_bits, 1, true);
-      }
-    }
-
     Ray ray;
     ray.P = mpg_surface_ray_offset(kg, sd, sd.P, normalized_direction);
     ray.D = normalized_direction;
@@ -1084,6 +1069,58 @@ if constexpr (MPG_DEBUG::SEED) {
       return false;
     }
 
+    /* Per Codex finding: Set tau_bits based on ACTUAL surface BSDF type, not scatter_branch proposal.
+     * The scatter_branch is a probabilistic guess, but tau hints must encode what actually happened.
+     * Query the hit surface to determine if it's refractive or reflective. */
+    if (base_tau_count > 0) {
+      ShaderData hit_sd = {};
+      shader_setup_from_ray(kg, &hit_sd, &ray, const_cast<Intersection *>(&candidate_isect));
+      const ConstIntegratorState integrator_state = nullptr;
+      surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
+          kg, integrator_state, &hit_sd, nullptr, PATH_RAY_CAMERA, true);
+
+      /* Determine if the hit surface actually supports refraction.
+       * Check for glass (both reflection+transmission) or pure transmission closures. */
+      bool surface_has_refraction = false;
+      bool surface_has_reflection_only = false;
+
+      for (int i = 0; i < hit_sd.num_closure; ++i) {
+        const ShaderClosure *closure = &hit_sd.closure[i];
+        if (CLOSURE_IS_BSDF(closure->type)) {
+          if (CLOSURE_IS_BSDF_SINGULAR(closure->type) || CLOSURE_IS_BSDF_MICROFACET(closure->type)) {
+            /* Check if this closure supports transmission/refraction */
+            if (CLOSURE_IS_GLASS(closure->type) || CLOSURE_IS_BSDF_TRANSMISSION(closure->type)) {
+              surface_has_refraction = true;
+            }
+            /* Glass supports both, but pure glossy/diffuse are reflection only.
+             * If it's not transmission and not glass, it's reflection only. */
+            else {
+              surface_has_reflection_only = true;
+            }
+          }
+        }
+      }
+
+      /* Determine actual scatter type based on what the surface supports */
+      bool is_refraction = (scatter_branch == MPG_SEED_SCATTER_REFRACTION);
+      if (surface_has_refraction && !surface_has_reflection_only) {
+        /* Surface only supports refraction (pure transmission or glass with no other closures) */
+        is_refraction = true;
+      }
+      else if (surface_has_reflection_only && !surface_has_refraction) {
+        /* Surface only supports reflection (no transmission) */
+        is_refraction = false;
+      }
+
+      /* Set bit 0 for primary bounce based on actual surface type */
+      set_chaintype_bit(out_tau_bits, 0, is_refraction);
+
+      /* For double-bounce refraction, set bit 1 for secondary bounce */
+      if (base_tau_count >= 2 && is_refraction) {
+        set_chaintype_bit(out_tau_bits, 1, true);
+      }
+    }
+
     out_isect = candidate_isect;
     if (record_accept) {
 if constexpr (MPG_DEBUG::SEED) {
@@ -1102,6 +1139,10 @@ if constexpr (MPG_DEBUG::SEED) {
       accepted_branch_pdf = candidate_branch_pdf;
       accepted_direction_pdf = candidate_direction_pdf;
       accepted_scatter_pdf = candidate_scatter_pdf;
+      /* Force flat shading for ALL MPG paths to ensure tangent basis orthogonality.
+       * For smooth normals, the interpolated normal may not be orthogonal to the
+       * geometric tangent basis (dXdu, dXdv), causing Newton solver divergence.
+       * Mitsuba MPG uses geometric normals for manifold constraints. */
       seed.use_smooth_normals = false;
       successful_branch = branch;
       successful_scatter_branch = scatter_branch;
