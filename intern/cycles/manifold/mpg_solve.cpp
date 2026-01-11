@@ -1543,8 +1543,43 @@ void compute_jacobian(const ShadingPoint &D,
   J[1] = d_dir_sl_dv - d_spec_dv;
 }
 
+/* Compute derivatives of tangent frame when BSDF frame normal varies across surface.
+ * Per Codex Pass 2 #2, Pass 3 #1, Pass 4 #1: When BSDF frame varies (smooth normals),
+ * tangent basis also varies and contributes to Jacobian via product rule.
+ *
+ * For orthonormal frame {s, t, N}, when N rotates the tangents rotate with it.
+ * Angular velocity: ω = N × (dN/dx)
+ * Tangent derivatives: ds/dx = ω × s, dt/dx = ω × t
+ *
+ * Reference: Differential geometry of curves and surfaces (do Carmo) */
+ccl_device_inline void compute_tangent_frame_derivatives(
+    const float3 &normal,
+    const float3 &tangent_s,
+    const float3 &tangent_t,
+    const float3 &dN_du,
+    const float3 &dN_dv,
+    float3 &ds_du,
+    float3 &ds_dv,
+    float3 &dt_du,
+    float3 &dt_dv)
+{
+  /* Angular velocity vectors for frame rotation */
+  const float3 omega_u = cross(normal, dN_du);
+  const float3 omega_v = cross(normal, dN_dv);
+
+  /* Tangent derivatives from rotating frame: d(tangent)/dx = ω_x × tangent */
+  ds_du = cross(omega_u, tangent_s);
+  ds_dv = cross(omega_v, tangent_s);
+  dt_du = cross(omega_u, tangent_t);
+  dt_dv = cross(omega_v, tangent_t);
+}
+
 /* Compute Jacobian for Mitsuba's half-vector constraint formulation.
  * Constraint: C = [dot(s, h), dot(t, h)] where h = normalize(wi + eta * wo)
+ *
+ * Per Codex: Full Jacobian includes both half-vector and tangent-frame derivatives:
+ *   dC/du = [dot(ds/du, h) + dot(s, dh/du), dot(dt/du, h) + dot(t, dh/du)]
+ *
  * Returns 2D Jacobian embedded in 3D vectors (third component is zero). */
 void compute_halfvector_jacobian(const ShadingPoint &D,
                                   const MpgSeedRay &seed,
@@ -1599,10 +1634,36 @@ void compute_halfvector_jacobian(const ShadingPoint &D,
   const float3 dh_du = inv_g_len * (dg_du - h * dot(h, dg_du));
   const float3 dh_dv = inv_g_len * (dg_dv - h * dot(h, dg_dv));
 
-  /* Project derivatives onto surface tangent frame to get 2D Jacobian.
-   * Embed in 3D vectors with third component = 0 for compatibility with solve_step. */
-  J[0] = make_float3(dot(tangent_u, dh_du), dot(tangent_v, dh_du), 0.0f);
-  J[1] = make_float3(dot(tangent_u, dh_dv), dot(tangent_v, dh_dv), 0.0f);
+  /* Per Codex Pass 2 #2, Pass 3 #1, Pass 4 #1: Include tangent-frame derivatives.
+   * Constraint: C = [dot(s, h), dot(t, h)]
+   * Full derivative: dC/du = [dot(ds/du, h) + dot(s, dh/du), dot(dt/du, h) + dot(t, dh/du)]
+   *
+   * Mitsuba's compute_step_halfvector includes dot(ds_du, h) and dot(dt_du, h) terms,
+   * which are essential when BSDF frame varies across surface (smooth normals, bump maps). */
+
+  float3 ds_du = zero_float3(), ds_dv = zero_float3();
+  float3 dt_du = zero_float3(), dt_dv = zero_float3();
+
+  const bool frame_varies = !is_zero(eval.dNdu) || !is_zero(eval.dNdv);
+  if (frame_varies) {
+    /* BSDF frame varies across surface - compute tangent frame derivatives */
+    compute_tangent_frame_derivatives(eval.normal, tangent_u, tangent_v,
+                                     eval.dNdu, eval.dNdv,
+                                     ds_du, ds_dv, dt_du, dt_dv);
+  }
+  /* else: Frame constant (microfacet with constant normal) - derivatives are zero */
+
+  /* Compute full Jacobian including both half-vector and frame derivatives.
+   * J[0] = dC/du, J[1] = dC/dv
+   * Each row is one constraint: C0 = dot(s, h), C1 = dot(t, h) */
+  const float dC0_du = dot(ds_du, h) + dot(tangent_u, dh_du);
+  const float dC1_du = dot(dt_du, h) + dot(tangent_v, dh_du);
+  const float dC0_dv = dot(ds_dv, h) + dot(tangent_u, dh_dv);
+  const float dC1_dv = dot(dt_dv, h) + dot(tangent_v, dh_dv);
+
+  /* Embed in 3D vectors with third component = 0 */
+  J[0] = make_float3(dC0_du, dC1_du, 0.0f);
+  J[1] = make_float3(dC0_dv, dC1_dv, 0.0f);
 }
 
 bool compute_residual_matrix(const ShadingPoint &D,
@@ -2335,11 +2396,23 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
   const float3 d_primary_h_du1 = inv_primary_g_len * (d_primary_g_du1 - primary_h * dot(primary_h, d_primary_g_du1));
   const float3 d_primary_h_dv1 = inv_primary_g_len * (d_primary_g_dv1 - primary_h * dot(primary_h, d_primary_g_dv1));
 
-  /* Project onto tangent frame */
-  J[0][0] = dot(primary_tangent_u, d_primary_h_du1);  // dC1/du1
-  J[0][1] = dot(primary_tangent_u, d_primary_h_dv1);  // dC1/dv1
-  J[1][0] = dot(primary_tangent_v, d_primary_h_du1);  // dC2/du1
-  J[1][1] = dot(primary_tangent_v, d_primary_h_dv1);  // dC2/dv1
+  /* Per Codex Pass 2 #2, Pass 3 #1, Pass 4 #1: Include tangent-frame derivatives */
+  float3 d_primary_s_du1 = zero_float3(), d_primary_s_dv1 = zero_float3();
+  float3 d_primary_t_du1 = zero_float3(), d_primary_t_dv1 = zero_float3();
+
+  const bool primary_frame_varies = !is_zero(eval.primary.dNdu) || !is_zero(eval.primary.dNdv);
+  if (primary_frame_varies) {
+    compute_tangent_frame_derivatives(eval.primary.normal, primary_tangent_u, primary_tangent_v,
+                                     eval.primary.dNdu, eval.primary.dNdv,
+                                     d_primary_s_du1, d_primary_s_dv1,
+                                     d_primary_t_du1, d_primary_t_dv1);
+  }
+
+  /* Project onto tangent frame with full derivative including frame variation */
+  J[0][0] = dot(d_primary_s_du1, primary_h) + dot(primary_tangent_u, d_primary_h_du1);  // dC1/du1
+  J[0][1] = dot(d_primary_s_dv1, primary_h) + dot(primary_tangent_u, d_primary_h_dv1);  // dC1/dv1
+  J[1][0] = dot(d_primary_t_du1, primary_h) + dot(primary_tangent_v, d_primary_h_du1);  // dC2/du1
+  J[1][1] = dot(d_primary_t_dv1, primary_h) + dot(primary_tangent_v, d_primary_h_dv1);  // dC2/dv1
 
   /* === COUPLING BLOCK 1: J[0:2, 2:4] - Primary constraint w.r.t. secondary params === */
   /*
@@ -2430,10 +2503,22 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
   const float3 d_secondary_h_du2 = inv_secondary_g_len * (d_secondary_g_du2 - secondary_h * dot(secondary_h, d_secondary_g_du2));
   const float3 d_secondary_h_dv2 = inv_secondary_g_len * (d_secondary_g_dv2 - secondary_h * dot(secondary_h, d_secondary_g_dv2));
 
-  J[2][2] = dot(secondary_tangent_u, d_secondary_h_du2);  // dC3/du2
-  J[2][3] = dot(secondary_tangent_u, d_secondary_h_dv2);  // dC3/dv2
-  J[3][2] = dot(secondary_tangent_v, d_secondary_h_du2);  // dC4/du2
-  J[3][3] = dot(secondary_tangent_v, d_secondary_h_dv2);  // dC4/dv2
+  /* Per Codex Pass 2 #2, Pass 3 #1, Pass 4 #1: Include tangent-frame derivatives */
+  float3 d_secondary_s_du2 = zero_float3(), d_secondary_s_dv2 = zero_float3();
+  float3 d_secondary_t_du2 = zero_float3(), d_secondary_t_dv2 = zero_float3();
+
+  const bool secondary_frame_varies = !is_zero(eval.secondary.dNdu) || !is_zero(eval.secondary.dNdv);
+  if (secondary_frame_varies) {
+    compute_tangent_frame_derivatives(eval.secondary.normal, secondary_tangent_u, secondary_tangent_v,
+                                     eval.secondary.dNdu, eval.secondary.dNdv,
+                                     d_secondary_s_du2, d_secondary_s_dv2,
+                                     d_secondary_t_du2, d_secondary_t_dv2);
+  }
+
+  J[2][2] = dot(d_secondary_s_du2, secondary_h) + dot(secondary_tangent_u, d_secondary_h_du2);  // dC3/du2
+  J[2][3] = dot(d_secondary_s_dv2, secondary_h) + dot(secondary_tangent_u, d_secondary_h_dv2);  // dC3/dv2
+  J[3][2] = dot(d_secondary_t_du2, secondary_h) + dot(secondary_tangent_v, d_secondary_h_du2);  // dC4/du2
+  J[3][3] = dot(d_secondary_t_dv2, secondary_h) + dot(secondary_tangent_v, d_secondary_h_dv2);  // dC4/dv2
 
   return true;
 }
