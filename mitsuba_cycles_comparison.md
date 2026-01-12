@@ -1,25 +1,12 @@
-# MPG Implementation: Mitsuba Reference vs Cycles Comparison
+# MPG Implementation Differences: Mitsuba Reference vs Cycles
 
-This document details the remaining differences between the Mitsuba reference implementation (https://github.com/mollnn/manifold-path-guiding/tree/main/mitsuba/src/integrators/MPG) and the Cycles implementation after multiple rounds of fixes.
-
-## Status Summary
-
-**Fixed Issues** (implemented in Cycles):
-- ✅ Stale seed prim/object after triangle walk
-- ✅ Stale BSDF backfacing flag after triangle walk
-- ✅ Direct 2×2 solver (avoiding normal equations)
-- ✅ Tangent-frame derivatives in Jacobian
-- ✅ Guided offset normals in constraint computation
-- ✅ Post-convergence using current geometry/seeds
-- ✅ Removed hard clamping of barycentric coordinates
-- ✅ Relaxed Jacobian zero threshold (1e-30)
-- ✅ Double-bounce Jacobian using current seeds
-
-**Remaining Differences** (architectural or unimplemented):
+This document lists the remaining differences between the Mitsuba reference implementation (https://github.com/mollnn/manifold-path-guiding/tree/main/mitsuba/src/integrators/MPG) and the Cycles implementation. Each item represents work needed to bring Cycles in line with the reference.
 
 ---
 
-## 1. Constraint Formulation: Half-Vector vs Angle-Difference
+## TODO #1: Constraint Formulation - Add Angle-Difference Alternative
+
+**Priority**: High Impact, Frequent
 
 ### Mitsuba
 ```cpp
@@ -36,7 +23,7 @@ if (halfvector_constraints) {
 }
 ```
 
-### Cycles
+### Cycles (Current)
 ```cpp
 // mpg_solve.cpp lines 3268-3336
 // ONLY implements half-vector formulation
@@ -53,17 +40,71 @@ float residual_2d_u = dot(tangent_u, h_tangent) - offset_2d.x;
 float residual_2d_v = dot(tangent_v, h_tangent) - offset_2d.y;
 ```
 
-**Impact**:
-- Angle-difference formulation is more numerically stable for refractive paths
-- Half-vector can have singularities when `wi + eta*wo ≈ 0` (near grazing angles)
-- Mitsuba defaults to angle-difference for this reason
-- Cycles only has half-vector, which may explain remaining convergence issues
+### What Needs to Be Done
+- Implement `compute_angle_difference_constraint()` function
+- Implement `compute_angle_difference_jacobian()` function
+- Add runtime switch to choose between formulations
+- Default to angle-difference for stability (matching Mitsuba)
 
-**To fix**: Would require implementing `compute_step_angle_difference()` alongside `compute_halfvector_jacobian()` and adding a runtime switch.
+### Impact
+- Angle-difference formulation is more numerically stable for refractive paths
+- Half-vector has singularities when `wi + eta*wo ≈ 0` (near grazing angles)
+- Affects convergence on grazing angle refraction
 
 ---
 
-## 2. BSDF Frame vs make_orthonormals
+## TODO #2: Use Offset Normals in Reproject
+
+**Priority**: High Impact, Critical for Guided Paths
+
+### Mitsuba
+```cpp
+// reproject() in newton_solver.hpp
+Vector3f m = vertex.s * n_offset[0] +   // s component of offset
+             vertex.t * n_offset[1] +   // t component of offset
+             vertex.n * n_offset[2];    // n component of offset (usually 1.0)
+
+// Scattered direction computed using offset normal 'm' instead of 'n'
+Vector3f wo = bsdf->sample(..., m, ...);  // Uses offset normal
+
+// Validates that scattering with offset normal reaches expected target
+```
+
+### Cycles (Current)
+```cpp
+// mpg_solve.cpp line 3336 - Offset normal computed
+const float2 offset_2d = compute_guide_offset_normal(guide, tangent_u, tangent_v, eval.normal);
+
+// Used in constraint:
+float residual_2d_u = dot(tangent_u, h_tangent) - offset_2d.x;
+float residual_2d_v = dot(tangent_v, h_tangent) - offset_2d.y;
+
+// BUT reproject_single_bounce() lines 2765-2867:
+// - Does NOT use offset normals in scattering validation
+// - Computes specular direction with geometric/BSDF normal only
+// - No reference to offset_2d in reproject functions
+```
+
+### What Needs to Be Done
+1. Pass `offset_2d` parameter to `reproject_single_bounce()` and `reproject_double_bounce()`
+2. Reconstruct 3D offset normal: `m = s*offset.x + t*offset.y + n*sqrt(1 - offset.x² - offset.y²)`
+3. Pass offset normal `m` to `compute_specular()` instead of geometric normal `n`
+4. Ensure scattering validation uses same offset normal as constraint
+
+### Impact
+- **CRITICAL MISMATCH**: Newton solves for vertex satisfying constraint with offset normal, but reproject validates without it
+- Results in:
+  - Newton converges to solution that reproject rejects
+  - Infinite damping loop (beta → 0)
+  - False "no valid path" failures
+- Only affects guided paths (when path guiding provides offset normal)
+- Pure specular paths (offset = 0) unaffected
+
+---
+
+## TODO #3: Use BSDF-Aware Tangent Frame
+
+**Priority**: Medium Impact, Material-Specific
 
 ### Mitsuba
 ```cpp
@@ -80,7 +121,7 @@ Vector3f n = frame.n;  // BSDF normal (may differ from geometric)
 // - Material-specific tangent conventions
 ```
 
-### Cycles
+### Cycles (Current)
 ```cpp
 // mpg_solve.cpp lines 661-665
 // Construct arbitrary orthonormal frame from BSDF normal
@@ -90,17 +131,25 @@ make_orthonormals(eval.normal, &eval.tangent_u, &eval.tangent_v);
 // Does NOT encode anisotropy, texture rotation, or material tangent space
 ```
 
-**Impact**:
-- For isotropic materials with no normal maps: No difference
-- For anisotropic materials (brushed metal, etc.): Constraint uses wrong frame
-- For materials with rotated textures/normals: Frame misalignment causes convergence issues
-- Cycles approximation works for simple cases but breaks for complex materials
+### What Needs to Be Done
+- Extend BSDF system to expose `get_tangent_frame()` method
+- Method should return material-aware tangents that encode:
+  - Anisotropic roughness orientation
+  - Texture-space tangent rotation
+  - Normal map tangent space
+- Replace `make_orthonormals()` call with BSDF frame query
+- Fallback to `make_orthonormals()` for materials without defined tangent space
 
-**To fix**: Would require BSDF system to expose `get_tangent_frame()` method that returns material-aware tangents.
+### Impact
+- For isotropic materials with no normal maps: No difference
+- For anisotropic materials (brushed metal, etc.): Constraint uses wrong frame → convergence failure
+- For materials with rotated textures/normals: Frame misalignment causes wrong solution
 
 ---
 
-## 3. BSDF Frame Derivatives
+## TODO #4: Implement BSDF Frame Derivatives
+
+**Priority**: Medium Impact, Material-Specific
 
 ### Mitsuba
 ```cpp
@@ -115,7 +164,7 @@ auto [ds_dv, dt_dv] = si.bsdf()->frame_derivative(si, smoothing, false);
 // - Bump map effects on frame orientation
 ```
 
-### Cycles
+### Cycles (Current)
 ```cpp
 // mpg_solve.cpp lines 1555-1575, 1647-1658
 // ONLY computes derivatives from smooth normal variation
@@ -130,7 +179,17 @@ compute_tangent_frame_derivatives(eval.normal, tangent_u, tangent_v,
 // - Bump map tangent perturbation
 ```
 
-**Impact**:
+### What Needs to Be Done
+- Extend BSDF system to implement `get_frame_derivative()` method
+- Method should compute full tangent-space derivatives including:
+  - Smooth normal geometric curvature (already implemented)
+  - Normal map texture derivatives `dN/duv`
+  - Anisotropic tangent rotation from texture coordinates
+  - Bump/displacement map tangent perturbation
+- Integrate into `compute_halfvector_jacobian()` Jacobian computation
+- Requires shader system changes to expose texture-space derivatives
+
+### Impact
 - Incomplete Jacobian when normal maps or anisotropy present
 - Newton solver converges to wrong solution or diverges
 - Particularly affects surfaces with:
@@ -138,11 +197,11 @@ compute_tangent_frame_derivatives(eval.normal, tangent_u, tangent_v,
   - Anisotropic materials (brushed metal, hair, etc.)
   - Bump/displacement mapping
 
-**To fix**: Would require `bsdf()->frame_derivative()` method in shader system that computes full tangent-space derivatives including texture effects.
-
 ---
 
-## 4. Parameterization Orthonormalization
+## TODO #5: Orthonormalize Parameterization
+
+**Priority**: Low Impact, Edge Cases
 
 ### Mitsuba
 ```cpp
@@ -168,7 +227,7 @@ Spectrum make_orthonormal(SurfaceInteraction3f &si, bool smoothing) {
 }
 ```
 
-### Cycles
+### Cycles (Current)
 ```cpp
 // mpg_solve.cpp - NO equivalent function
 // Uses raw mesh parametric derivatives directly
@@ -181,8 +240,16 @@ geometry.dPdv  // Raw from mesh, NOT orthonormalized
 // - Jacobian computation
 ```
 
-**Impact**:
-- Non-orthogonal parameterization can cause:
+### What Needs to Be Done
+1. Implement `orthonormalize_parameterization()` function
+2. Apply Gram-Schmidt to `geometry.dPdu`, `geometry.dPdv`
+3. Propagate orthonormalization to `geometry.dNdu`, `geometry.dNdv` using chain rule
+4. Store orthonormalized derivatives back in geometry struct
+5. Return Jacobian determinant for area correction
+6. Call this function after loading geometry, before Newton iterations
+
+### Impact
+- Non-orthogonal parameterization causes:
   - Anisotropic Newton steps (converges slower in one direction)
   - Incorrect step scaling (doesn't account for parametric distortion)
   - Frame derivative errors (rotating frame formula assumes orthonormal basis)
@@ -191,61 +258,11 @@ geometry.dPdv  // Raw from mesh, NOT orthonormalized
   - Cylindrical/spherical parameterizations
   - Meshes with large parametric stretch
 
-**To fix**: Implement `orthonormalize_parameterization()` function that:
-1. Applies Gram-Schmidt to `dPdu`, `dPdv`
-2. Propagates to `dNdu`, `dNdv` using chain rule
-3. Stores orthonormalized derivatives in geometry struct
-4. Returns Jacobian determinant for area correction
-
 ---
 
-## 5. Offset Normals in Reproject and Scattering
+## TODO #6: Remove project_barycentrics Clamping
 
-### Mitsuba
-```cpp
-// reproject() in newton_solver.hpp
-Vector3f m = vertex.s * n_offset[0] +   // s component of offset
-             vertex.t * n_offset[1] +   // t component of offset
-             vertex.n * n_offset[2];    // n component of offset (usually 1.0)
-
-// Scattered direction computed using offset normal 'm' instead of 'n'
-Vector3f wo = bsdf->sample(..., m, ...);  // Uses offset normal
-
-// Validates that scattering with offset normal reaches expected target
-```
-
-### Cycles
-```cpp
-// mpg_solve.cpp lines 3336 - Offset normal computed
-const float2 offset_2d = compute_guide_offset_normal(guide, tangent_u, tangent_v, eval.normal);
-
-// Used in constraint:
-float residual_2d_u = dot(tangent_u, h_tangent) - offset_2d.x;
-float residual_2d_v = dot(tangent_v, h_tangent) - offset_2d.y;
-
-// BUT reproject_single_bounce() lines 2765-2867:
-// - Does NOT use offset normals in scattering validation
-// - Computes specular direction with geometric/BSDF normal only
-// - No reference to offset_2d in reproject functions
-```
-
-**Impact**:
-- **Fundamental mismatch**: Newton solves for vertex that satisfies constraint with offset normal, but reproject validates without it
-- Results in:
-  - Newton converges to solution that reproject rejects
-  - Infinite damping loop (beta → 0)
-  - False "no valid path" failures
-- Only affects guided paths (when path guiding provides offset normal)
-- Pure specular paths (offset = 0) unaffected
-
-**To fix**:
-1. Pass `offset_2d` to reproject functions
-2. Reconstruct 3D offset normal: `m = s*offset.x + t*offset.y + n*sqrt(1 - offset.x² - offset.y²)`
-3. Use `m` instead of `n` in `compute_specular()` during reproject validation
-
----
-
-## 6. project_barycentrics Still Clamps
+**Priority**: Low Impact, Edge Cases
 
 ### Mitsuba
 ```cpp
@@ -257,7 +274,7 @@ Point3f p_prop = v.p - step_scale * beta * (v.dp_du * dx[0] + v.dp_dv * dx[1]);
 // NO clamping of barycentric coordinates at any stage
 ```
 
-### Cycles
+### Cycles (Current)
 ```cpp
 // mpg_solve.cpp lines 3216-3219
 float u = seed.bary_u;  // No hard clamp (GOOD)
@@ -277,240 +294,79 @@ void project_barycentrics(float &u, float &v) {
 }
 ```
 
-**Impact**:
+### What Needs to Be Done
+- Remove call to `project_barycentrics()` at lines 3216-3219
+- Replace with simple validity check if needed (without clamping)
+- Or use barycentric coordinates directly without any projection
+
+### Impact
 - Minimal in practice (already removed hard clamps in most places)
 - Only affects initial barycentric coordinates if outside [0,1]
 - Could cause slight shift from intersection point for edge cases
 - Less critical than previous hard clamping in Newton loop
 
-**To fix**: Remove call to `project_barycentrics()` or replace with simple validity check without clamping.
-
 ---
 
-## 7. Stale BSDF Parameters Beyond Backfacing
+## Priority Summary
 
-### Current Status
-```cpp
-// mpg_solve.cpp lines 3036-3041 (double-bounce)
-if (hit_primary_prim != expected_primary_prim) {
-    // Recompute backfacing
-    primary_params.backfacing = (dot(actual_gn, ray_to_primary) < 0.0f);
-
-    // Invalidate stale BSDF normal
-    if (primary_params.has_normal) {
-        primary_params.has_normal = false;
-    }
-}
-
-// But SpecularParameters contains many other fields:
-// - base_eta, medium_eta (from shader evaluation)
-// - microfacet alpha_x, alpha_y (roughness)
-// - has_microfacet flag
-// All derived from shader evaluation on OLD triangle
-```
-
-**Impact**:
-- When Newton walks to adjacent triangle with different shader:
-  - Old shader's eta used with new geometry
-  - Old roughness values used
-  - Wrong material properties in constraint/Jacobian
-- Cycles currently only fixes `backfacing` and `has_normal`
-- Full `SpecularParameters` should be recomputed after triangle walk
-
-**Current mitigation**: Lines 3432-3437 (single-bounce) and 4018-4028 (double-bounce) call `specular_parameters_from_surface()` with NEW seed, which recomputes all parameters correctly.
-
-**Status**: ✅ Actually FIXED - Full parameter reload happens via `specular_parameters_from_surface(kg, sd, new_geometry, current_seed, ...)` calls. The lines 3036-3041 are just an optimization for early backfacing check before full reload.
-
----
-
-## 8. Additional Differences Found
-
-### 8.1 Solver Threshold and Max Iterations
-
-**Mitsuba**:
-```cpp
-float solver_threshold = 1e-4f;  // Same as Cycles
-int max_solver_iterations = 20;   // Default
-```
-
-**Cycles**:
-```cpp
-// Lines 3366, 3902
-if (residual_norm < 1e-4f) { break; }  // Same threshold ✅
-// max_iters from options (usually 20) ✅
-```
-
-**Status**: ✅ **SAME** - Both use 1e-4 threshold and ~20 iterations
-
-### 8.2 Step Scaling Strategy
-
-**Mitsuba**:
-```cpp
-float step_scale = 1.0f;  // Unit steps
-float beta = 1.0f;        // Damping factor
-// Step: p_new = p - step_scale * beta * (dp_du * dx[0] + dp_dv * dx[1])
-```
-
-**Cycles**:
-```cpp
-// Lines 3394-3395, 3954-3957
-float proposed_u = u - options.step_scale * beta * delta.x;
-// options.step_scale typically 1.0
-float beta = 1.0f;  // Initialized, halved on rejection
-```
-
-**Status**: ✅ **SAME** - Both use `step_scale * beta` damping
-
-### 8.3 Beta Damping on Rejection
-
-**Mitsuba**:
-```cpp
-if (!reproject_success) {
-    beta *= 0.5f;
-    needs_jacobian_recompute = false;
-    continue;
-}
-```
-
-**Cycles**:
-```cpp
-// Lines 3407-3410, 3984-3986
-if (!reproject_single_bounce(...)) {
-    beta *= 0.5f;
-    needs_step_update = false;  // Reuse Jacobian ✅
-    continue;
-}
-```
-
-**Status**: ✅ **SAME** - Both halve beta and reuse Jacobian
-
-### 8.4 Convergence Check Location
-
-**Mitsuba**:
-```cpp
-// Checks convergence at TOP of loop (after residual update)
-for (int iter = 0; iter < max_iters; ++iter) {
-    if (residual < threshold) break;  // Check first
-    // ... compute step ...
-}
-```
-
-**Cycles**:
-```cpp
-// Lines 3366-3368, 3901-3906
-for (int iter = 0; iter < options.max_iters; ++iter) {
-    if (residual_norm < 1e-4f) { break; }  // Check first ✅
-    // ... compute step ...
-}
-```
-
-**Status**: ✅ **SAME** - Both check convergence before computing step
-
-### 8.5 Jacobian Zero Handling
-
-**Mitsuba**:
-```cpp
-// Always normalizes and proceeds
-// Relies on condition number checks in solver
-// No explicit "Jacobian is zero" threshold
-```
-
-**Cycles**:
-```cpp
-// Lines 1627-1632
-if (!(g_len > 1e-30f) || !isfinite_safe(g_len)) {
-    J[0] = make_float3(0.0f, 0.0f, 0.0f);
-    J[1] = make_float3(0.0f, 0.0f, 0.0f);
-    return;  // Returns zero Jacobian
-}
-```
-
-**Status**: ⚠️ **DIFFERENCE** - Cycles has explicit threshold, Mitsuba always normalizes. However, 1e-30 is so small it's effectively the same (only catches true degeneracy).
-
-### 8.6 Triangle Walk Shape Consistency Check
-
-**Mitsuba**:
-```cpp
-// reproject() checks si.shape == expected_shape
-// Shape is the mesh object
-if (si.shape != v.si.shape) {
-    return false;  // Reject step - walked to different mesh
-}
-```
-
-**Cycles**:
-```cpp
-// Lines 2838-2845
-if (isect.object != expected_object) {
-    return false;  // Reject - different mesh object
-}
-// If same object but different prim: ALLOW (triangle walk)
-```
-
-**Status**: ✅ **SAME** - Both check object/shape, allow triangle walks within same object
-
----
-
-## 9. Critical Issues (Priority Order)
-
-### Priority 1: High Impact, Frequent
-1. **Half-vector vs angle-difference constraints** - Stability issues on refractive paths
-2. **Offset normals not in reproject** - Breaks guided paths, mismatch between constraint and validation
+### Priority 1: High Impact, Must Fix
+1. **TODO #2**: Offset normals in reproject - Breaks guided paths completely
+2. **TODO #1**: Angle-difference constraints - Stability issues on refractive paths
 
 ### Priority 2: Medium Impact, Material-Specific
-3. **BSDF frame vs make_orthonormals** - Wrong for anisotropic materials
-4. **Missing BSDF frame derivatives** - Wrong Jacobian with normal maps, anisotropy
+3. **TODO #3**: BSDF-aware tangent frame - Required for anisotropic materials
+4. **TODO #4**: BSDF frame derivatives - Required for normal-mapped materials
 
-### Priority 3: Low Impact, Edge Cases
-5. **Parameterization non-orthogonal** - Slower convergence on distorted UVs
-6. **project_barycentrics clamps** - Minor shift at triangle edges
-
----
-
-## 10. Verification Checklist
-
-For each difference above, tested scenarios:
-
-- ✅ Simple mirror (planar, isotropic) - Works in both
-- ✅ Simple glass (planar, isotropic) - Works in both
-- ⚠️ Curved glass (smooth normals) - Works after tangent-frame derivative fix
-- ❌ Normal-mapped glass - Needs BSDF frame derivatives (Issue #4)
-- ❌ Anisotropic metal - Needs BSDF frame (Issue #3)
-- ❌ Guided caustics - Needs offset normals in reproject (Issue #2)
-- ⚠️ Grazing angle refraction - May need angle-difference (Issue #1)
+### Priority 3: Low Impact, Polish
+5. **TODO #5**: Parameterization orthonormalization - Convergence rate improvement
+6. **TODO #6**: Remove project_barycentrics clamp - Minor edge case cleanup
 
 ---
 
-## 11. Recommended Fix Order
+## Test Coverage Matrix
 
-1. **Offset normals in reproject** (Issue #2, #5) - Highest impact for guided paths
-2. **Angle-difference constraint** (Issue #1) - Improves refraction stability
-3. **BSDF frame access** (Issue #3) - Enables anisotropic materials
-4. **BSDF frame derivatives** (Issue #4) - Enables normal-mapped materials
-5. **Parameterization orthonormalization** (Issue #7) - Polish, improves convergence rate
-6. **Remove project_barycentrics clamp** (Issue #6) - Minor cleanup
+After implementing each TODO, verify with:
+
+| Test Case | TODO #1 | TODO #2 | TODO #3 | TODO #4 | TODO #5 | TODO #6 |
+|-----------|---------|---------|---------|---------|---------|---------|
+| Simple mirror | - | - | - | - | - | - |
+| Simple glass | ✓ | - | - | - | - | - |
+| Curved glass | ✓ | - | - | - | ✓ | - |
+| Normal-mapped glass | ✓ | - | - | **✓** | - | - |
+| Anisotropic metal | - | - | **✓** | **✓** | - | - |
+| Guided caustics | - | **✓** | - | - | - | - |
+| Grazing refraction | **✓** | - | - | - | - | - |
+| UV-distorted mesh | - | - | - | - | **✓** | **✓** |
+
+Legend:
+- **✓** = This TODO is required for this test case
+- ✓ = This TODO may improve this test case
+- - = This TODO has no impact on this test case
 
 ---
 
-## 12. Summary
+## Implementation Notes
 
-**Fixed in Cycles** ✅:
-- Stale seeds after triangle walk (critical)
-- Direct 2×2 solver (condition number)
-- Tangent-frame derivatives (smooth normals)
-- Guided offset normals in constraint
-- Post-convergence validation fixes
-- Barycentric clamping removal
-- Jacobian threshold tuning
+### Dependencies Between TODOs
 
-**Remaining Architectural Differences**:
-- Constraint formulation (half-vector only, missing angle-difference)
-- BSDF frame (arbitrary frame vs material-aware frame)
-- BSDF frame derivatives (missing texture/anisotropy derivatives)
-- Parameterization orthonormalization (missing Gram-Schmidt)
-- Offset normals in reproject (mismatch between constraint and validation)
+- TODO #4 depends on TODO #3 (need BSDF frame before computing its derivative)
+- TODO #3 and #4 require shader system changes (may be large refactor)
+- TODO #1, #2, #5, #6 can be implemented independently
 
-**Estimated Impact**:
-- Current implementation: Works for simple isotropic speculars (mirrors, simple glass)
-- Remaining issues affect: Anisotropy, normal maps, guided paths, extreme refraction angles
-- Most critical remaining issue: Offset normals in reproject (breaks guided paths)
+### Recommended Implementation Order
+
+1. **TODO #2** (offset normals in reproject) - Self-contained, high impact
+2. **TODO #6** (remove clamp) - Trivial, cleanup
+3. **TODO #1** (angle-difference) - Self-contained, moderate complexity
+4. **TODO #5** (orthonormalization) - Self-contained, moderate complexity
+5. **TODO #3** (BSDF frame) - Requires shader system extension
+6. **TODO #4** (frame derivatives) - Requires shader system extension, depends on #3
+
+### Estimated Complexity
+
+- **TODO #2**: Medium (modify reproject functions, add offset normal reconstruction)
+- **TODO #6**: Trivial (remove function call)
+- **TODO #1**: Medium-High (new constraint formulation and Jacobian)
+- **TODO #5**: Medium (implement Gram-Schmidt, propagate to derivatives)
+- **TODO #3**: High (shader system API extension)
+- **TODO #4**: Very High (shader system derivative computation, texture sampling)
