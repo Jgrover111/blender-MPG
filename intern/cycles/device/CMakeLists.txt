@@ -35,6 +35,14 @@ set(SRC_CPU
   cpu/kernel_function.h
 )
 
+if(WITH_CYCLES_MANIFOLD)
+  list(APPEND SRC_CPU
+          ../manifold/manifold_path_guiding.cpp
+          ../manifold/dtree.cpp
+  )
+endif()
+
+
 set(SRC_CUDA
   cuda/device.cpp
   cuda/device.h

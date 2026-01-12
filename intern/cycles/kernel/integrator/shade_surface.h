@@ -18,6 +18,14 @@
 
 #include "kernel/integrator/mnee.h"
 
+#ifdef WITH_CYCLES_MANIFOLD
+#  include "manifold/manifold_path_guiding.h"
+#  if !defined(__KERNEL_GPU__)
+#    include "manifold/dtree.h"
+#  endif
+#endif
+
+
 #include "kernel/integrator/guiding.h"
 #include "kernel/integrator/shadow_linking.h"
 #include "kernel/integrator/subsurface.h"
