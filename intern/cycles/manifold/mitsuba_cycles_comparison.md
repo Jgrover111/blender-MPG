@@ -307,6 +307,95 @@ void project_barycentrics(float &u, float &v) {
 
 ---
 
+## TODO #7: Implement ChainDistribution-Guided Seed Sampling (Bounce/Tau/Direction)
+
+**Priority**: Medium Impact, Core Guiding Quality
+
+### Mitsuba
+```cpp
+// GuidedManifoldSampler::init() in manifold_path_guiding.cpp
+chain_distr = spatial_structure->query(si.p, ei.p);
+if (m_config.product_sampling)
+    chain_distr->init_product(distr_ctx);
+
+// sample_seed_direction_and_tau()
+tau       = chain_distr->sample_tau(sample_bounce, sampler, distr_ctx);
+guide_dir = chain_distr->sample_omega(tau, sampler, distr_ctx);
+
+// chain_distribution.h
+// - Discrete PMFs for bounce count, tau per bounce, and direction per tau
+// - Optional directional_struct (PF vs DTree)
+// - Optional product_sampling to combine spatial/directional factors
+```
+
+### Cycles (Current)
+```cpp
+// mpg_seed.cpp
+// Seed selection uses only GuideSummary (mean_dir, kappa, rbar) and heuristic PDFs.
+// Bounce count is chosen from fixed 1/2 options (no data-driven PMF).
+// No ChainDistribution, no tau PMF per bounce, no directional_struct, no product_sampling.
+```
+
+### What Needs to Be Done
+- Introduce a ChainDistribution equivalent that stores:
+    - Bounce-count PMF
+    - Tau PMF per bounce
+    - Direction sampling per tau (PF or directional tree)
+- Add spatial structure queries to fetch a distribution per (receiver, emitter)
+- Replace heuristic bounce/tau sampling with distribution-driven sampling
+- Add `product_sampling` switch for combined spatial/directional sampling
+
+### Impact
+- Missing data-driven bounce/tau selection and directional sampling reduces guiding fidelity
+- PDFs in Cycles are not derived from the same distributions as Mitsuba
+- Lower success rate for complex caustic chains where guidance is essential
+
+---
+
+## TODO #8: Support Surface/Photon Seed Initialization Modes (initial = 0/2)
+
+**Priority**: Low-Medium Impact, Initialization Quality
+
+### Mitsuba
+```cpp
+// sample_seed_direction_and_tau() in manifold_path_guiding.cpp
+if (!succeed) {
+    if (m_config.initial != 1) {
+        // Surface sampling: pick a caustic-caster shape and sample a point
+        PositionSample3f ps = shape->sample_position(...);
+        guide_dir = normalize(ps.p - x0);
+    } else {
+        // Directional sampling: uniform sphere + ray query
+        guide_dir = warp::square_to_uniform_sphere(...);
+    }
+}
+
+// External samples (initial == 2):
+guide_dir = chain_distr_ext->sample_omega(-1, sampler, distr_ctx);
+```
+
+### Cycles (Current)
+```cpp
+// mpg_seed.cpp
+// Only direction-based seeding (guided mean direction + uniform fallback).
+// No surface-position seed initialization for caustic-caster shapes.
+// No external/photon distribution for initial == 2.
+```
+
+### What Needs to Be Done
+- Add `initial` mode selection matching Mitsuba:
+    - 0 = surface sampling on caustic-caster shapes
+    - 1 = direction sampling (current behavior)
+    - 2 = external/photon distribution when available
+- Add strict-uniform shape validation (optional Mitsuba `sms_strict_uniform`)
+
+### Impact
+- Fewer successful seeds in scenes where surface sampling is key (small caustic targets)
+- No ability to bootstrap guidance from external photon distributions
+- Higher reliance on uniform direction sampling in hard caustic setups
+
+---
+
 ## Priority Summary
 
 ### Priority 1: High Impact, Must Fix
@@ -317,9 +406,13 @@ void project_barycentrics(float &u, float &v) {
 3. **TODO #3**: BSDF-aware tangent frame - Required for anisotropic materials
 4. **TODO #4**: BSDF frame derivatives - Required for normal-mapped materials
 
-### Priority 3: Low Impact, Polish
-5. **TODO #5**: Parameterization orthonormalization - Convergence rate improvement
-6. **TODO #6**: Remove project_barycentrics clamp - Minor edge case cleanup
+### Priority 3: Medium Impact, Guiding Quality
+5. **TODO #7**: ChainDistribution-guided seed sampling - Missing data-driven guidance
+
+### Priority 4: Low Impact, Polish
+6. **TODO #5**: Parameterization orthonormalization - Convergence rate improvement
+7. **TODO #6**: Remove project_barycentrics clamp - Minor edge case cleanup
+8. **TODO #8**: Surface/photon seed initialization modes - Initialization improvements
 
 ---
 
@@ -327,16 +420,16 @@ void project_barycentrics(float &u, float &v) {
 
 After implementing each TODO, verify with:
 
-| Test Case | TODO #1 | TODO #2 | TODO #3 | TODO #4 | TODO #5 | TODO #6 |
-|-----------|---------|---------|---------|---------|---------|---------|
-| Simple mirror | - | - | - | - | - | - |
-| Simple glass | ✓ | - | - | - | - | - |
-| Curved glass | ✓ | - | - | - | ✓ | - |
-| Normal-mapped glass | ✓ | - | - | **✓** | - | - |
-| Anisotropic metal | - | - | **✓** | **✓** | - | - |
-| Guided caustics | - | **✓** | - | - | - | - |
-| Grazing refraction | **✓** | - | - | - | - | - |
-| UV-distorted mesh | - | - | - | - | **✓** | **✓** |
+| Test Case | TODO #1 | TODO #2 | TODO #3 | TODO #4 | TODO #5 | TODO #6 | TODO #7 | TODO #8 |
+|-----------|---------|---------|---------|---------|---------|---------|---------|---------|
+| Simple mirror | - | - | - | - | - | - | - | - |
+| Simple glass | ✓ | - | - | - | - | - | - | - |
+| Curved glass | ✓ | - | - | - | ✓ | - | - | - |
+| Normal-mapped glass | ✓ | - | - | **✓** | - | - | - | - |
+| Anisotropic metal | - | - | **✓** | **✓** | - | - | - | - |
+| Guided caustics | - | **✓** | - | - | - | - | **✓** | **✓** |
+| Grazing refraction | **✓** | - | - | - | - | - | - | - |
+| UV-distorted mesh | - | - | - | - | **✓** | **✓** | - | - |
 
 Legend:
 - **✓** = This TODO is required for this test case
@@ -351,7 +444,7 @@ Legend:
 
 - TODO #4 depends on TODO #3 (need BSDF frame before computing its derivative)
 - TODO #3 and #4 require shader system changes (may be large refactor)
-- TODO #1, #2, #5, #6 can be implemented independently
+- TODO #1, #2, #5, #6, #7, #8 can be implemented independently
 
 ### Recommended Implementation Order
 
@@ -359,8 +452,10 @@ Legend:
 2. **TODO #6** (remove clamp) - Trivial, cleanup
 3. **TODO #1** (angle-difference) - Self-contained, moderate complexity
 4. **TODO #5** (orthonormalization) - Self-contained, moderate complexity
-5. **TODO #3** (BSDF frame) - Requires shader system extension
-6. **TODO #4** (frame derivatives) - Requires shader system extension, depends on #3
+5. **TODO #7** (ChainDistribution guidance) - Requires guiding data plumbing
+6. **TODO #8** (seed initialization modes) - Requires seed sampling extensions
+7. **TODO #3** (BSDF frame) - Requires shader system extension
+8. **TODO #4** (frame derivatives) - Requires shader system extension, depends on #3
 
 ### Estimated Complexity
 
@@ -368,5 +463,7 @@ Legend:
 - **TODO #6**: Trivial (remove function call)
 - **TODO #1**: Medium-High (new constraint formulation and Jacobian)
 - **TODO #5**: Medium (implement Gram-Schmidt, propagate to derivatives)
+- **TODO #7**: High (add chain distribution + guiding data plumbing)
+- **TODO #8**: Medium (seed initialization variants, optional strict uniform check)
 - **TODO #3**: High (shader system API extension)
 - **TODO #4**: Very High (shader system derivative computation, texture sampling)
