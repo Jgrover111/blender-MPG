@@ -1621,8 +1621,11 @@ void compute_halfvector_jacobian(const ShadingPoint &D,
   }
 
   const float g_len = len(g);
-  if (!(g_len > 1e-8f)) {
-    /* Degenerate case - set Jacobian to zero */
+  /* Per Codex Pass 1 #2: Mitsuba always normalizes h via reciprocal length and proceeds.
+   * Previous check (g_len > 1e-8f) was too strict and could reject solvable configurations.
+   * Use much smaller threshold matching typical safe_normalize checks. */
+  if (!(g_len > 1e-30f) || !isfinite_safe(g_len)) {
+    /* Truly degenerate case - set Jacobian to zero */
     J[0] = make_float3(0.0f, 0.0f, 0.0f);
     J[1] = make_float3(0.0f, 0.0f, 0.0f);
     return;
@@ -2322,7 +2325,8 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
     primary_g = -primary_g;
   }
   const float primary_g_len = len(primary_g);
-  if (!(primary_g_len > 1e-8f)) {
+  /* Per Codex Pass 1 #2: Use relaxed threshold like Mitsuba */
+  if (!(primary_g_len > 1e-30f) || !isfinite_safe(primary_g_len)) {
     return false;
   }
   const float3 primary_h = primary_g / primary_g_len;
@@ -2358,7 +2362,8 @@ bool compute_double_bounce_jacobian_analytical(const ShadingPoint &receiver,
     secondary_g = -secondary_g;
   }
   const float secondary_g_len = len(secondary_g);
-  if (!(secondary_g_len > 1e-8f)) {
+  /* Per Codex Pass 1 #2: Use relaxed threshold like Mitsuba */
+  if (!(secondary_g_len > 1e-30f) || !isfinite_safe(secondary_g_len)) {
     return false;
   }
   const float3 secondary_h = secondary_g / secondary_g_len;
@@ -3204,8 +3209,13 @@ bool mpg_solve_single_bounce(KernelGlobals kg,
     return false;
   }
 
-  float u = clamp(seed.bary_u, 1e-4f, 1.0f - 1e-4f);
-  float v = clamp(seed.bary_v, 1e-4f, 1.0f - 1e-4f);
+  /* Per Codex Pass 1 #1: Do NOT clamp initial barycentric coordinates.
+   * Mitsuba starts from actual intersection barycentrics and relies on reproject
+   * to handle out-of-bounds proposals. Hard clamping shifts the initial point off
+   * the true solution when valid specular is near triangle edge/vertex. */
+  float u = seed.bary_u;
+  float v = seed.bary_v;
+  /* Ensure valid barycentric (w = 1-u-v >= 0) using project_barycentrics */
   project_barycentrics(u, v);
 
   SpecularParameters params;
@@ -3717,8 +3727,9 @@ if (MPG_DEBUG::PARAMS()) {
     return false;
   }
 
-  float primary_u = clamp(seed.bary_u, 1.0e-4f, 1.0f - 1.0e-4f);
-  float primary_v = clamp(seed.bary_v, 1.0e-4f, 1.0f - 1.0e-4f);
+  /* Per Codex Pass 1 #1: Do NOT clamp initial barycentric coordinates */
+  float primary_u = seed.bary_u;
+  float primary_v = seed.bary_v;
   project_barycentrics(primary_u, primary_v);
 
   SpecularParameters primary_params;
@@ -3787,8 +3798,9 @@ if (MPG_DEBUG::PARAMS()) {
     return false;
   }
 
-  float secondary_u = clamp(secondary_seed.bary_u, 1.0e-4f, 1.0f - 1.0e-4f);
-  float secondary_v = clamp(secondary_seed.bary_v, 1.0e-4f, 1.0f - 1.0e-4f);
+  /* Per Codex Pass 1 #1: Do NOT clamp initial barycentric coordinates */
+  float secondary_u = secondary_seed.bary_u;
+  float secondary_v = secondary_seed.bary_v;
   project_barycentrics(secondary_u, secondary_v);
 
   ShaderData primary_sd;
@@ -4139,7 +4151,9 @@ if (MPG_DEBUG::NEWTON()) {
     return false;
   }
 
-  if (!specular_parameters_from_surface(kg, sd, primary_geometry, seed, 0, primary_u, primary_v, primary_params)) {
+  /* Per Codex Pass 3 #2: Use current geometry/seeds (may have walked) for post-convergence evaluation.
+   * If Newton converged on adjacent triangle, using original geometry would be inconsistent. */
+  if (!specular_parameters_from_surface(kg, sd, current_primary_geometry, current_primary_seed, 0, primary_u, primary_v, primary_params)) {
 if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: specular_parameters_from_surface (post-Newton, primary) (line 2518)\n");
 }
@@ -4147,7 +4161,7 @@ if (MPG_DEBUG::PARAMS()) {
     return false;
   }
 
-  if (!build_primary_shading_data(sd, primary_geometry, seed, primary_u, primary_v, primary_sd)) {
+  if (!build_primary_shading_data(sd, current_primary_geometry, current_primary_seed, primary_u, primary_v, primary_sd)) {
 if (MPG_DEBUG::PARAMS()) {
     printf("MPG FAILURE: build_primary_shading_data (post-Newton) (line 2523)\n");
 }
@@ -4157,8 +4171,8 @@ if (MPG_DEBUG::PARAMS()) {
 
   if (!specular_parameters_from_surface(kg,
                                         primary_sd,
-                                        secondary_geometry,
-                                        secondary_seed,
+                                        current_secondary_geometry,
+                                        current_secondary_seed,
                                         1,
                                         secondary_u,
                                         secondary_v,
@@ -4172,9 +4186,9 @@ if (MPG_DEBUG::PARAMS()) {
   }
 
   if (!evaluate_double_bounce(receiver,
-                              primary_geometry,
+                              current_primary_geometry,
                               primary_params,
-                              secondary_geometry,
+                              current_secondary_geometry,
                               secondary_params,
                               seed.light_sample,
                               primary_u,
