@@ -7,11 +7,18 @@
  * This file matches the structure of the Mitsuba MPG reference implementation:
  * https://github.com/mollnn/manifold-path-guiding/tree/main/mitsuba/src/integrators/MPG
  *
- * File corresponds to: manifold_path_guiding.h in the Mitsuba reference
+ * File structure corresponds to: manifold_path_guiding.h in the Mitsuba reference
+ *
+ * Organization (matching Mitsuba):
+ * 1. ManifoldPathGuidingConfig - Configuration structure
+ * 2. ManifoldVertex - Vertex on specular manifold
+ * 3. EmitterInteraction - Light source interaction
+ * 4. SpecularManifold - Static utility class for geometric operations
+ * 5. Manifold_Walk - Newton solver class
  *
  * Key differences from Mitsuba:
- * - Uses Cycles/Blender types (float3, Spectrum) instead of Mitsuba types
- * - Integrates with OpenPGL for spatial/directional distributions (see dtree.h)
+ * - Uses Cycles types (float3, Spectrum) instead of Mitsuba templates
+ * - Integrates with OpenPGL for spatial/directional distributions
  * - CPU-only implementation (no GPU kernel variants)
  */
 
@@ -32,40 +39,259 @@
 CCL_NAMESPACE_BEGIN
 
 /* ========================================================================
- * Configuration and Options
+ * Configuration Structure
+ * Corresponds to: ManifoldPathGuidingConfig in Mitsuba
  * ======================================================================== */
 
-/* Configuration structure for MPG solver and sampling
- * Corresponds to ManifoldPathGuidingConfig in Mitsuba reference */
-struct MpgOptions {
-  /* Number of specular bounces supported by the solver. */
-  int max_bounces = 2;
-  int max_iters = 20;
-  float gate_w = 0.35f;
-  float gate_kappa = 40.0f;
-  /* Newton solver step scaling factor (matches Mitsuba's m_config.step_scale).
-   * Multiplies the Newton step size: new_param = param - step_scale * beta * delta.
-   * Default 1.0 for standard Newton steps. */
-  float step_scale = 1.0f;
-  /* Angular jitter removed - Mitsuba reference uses uniform sampling without cone restrictions.
-   * Cone-based sampling is replaced with uniform sphere/hemisphere sampling to match reference. */
-  /* Enable relax_gate by default to allow bootstrap sampling when guide isn't ready yet.
-   * This prevents failure code 302 (guide not ready) from blocking MPG entirely. */
-  bool relax_gate = true;
-  /* Increased from 8 to match Mitsuba's more generous retry budget.
-   * Mitsuba allows up to 1e6 trials, we use 64 as a practical compromise. */
-  int max_seed_repeat_trials = 64;
+struct ManifoldPathGuidingConfig {
+  /* Solver parameters */
+  int max_bounces = 2;           /* Maximum specular bounces (sms_max_depth in Mitsuba) */
+  int max_iterations = 20;       /* Newton solver iterations */
+  float solver_threshold = 1e-4f;
+  float step_scale = 1.0f;       /* Newton step scaling factor */
+  bool halfvector_constraints = false;
+
+  /* Guiding parameters */
+  bool guided = true;
+  float gate_w = 0.35f;          /* Gate weight threshold */
+  float gate_kappa = 40.0f;      /* Gate concentration threshold */
+  bool relax_gate = true;        /* Allow bootstrap when guide not ready */
+
+  /* Sampling parameters */
+  int max_seed_repeat_trials = 64; /* Seed generation retry budget */
+  float prob_uniform = 0.1f;        /* Uniform sampling probability */
+
+  ManifoldPathGuidingConfig() {}
+
+  std::string to_string() const;
+};
+
+/* Convenience alias matching common usage */
+using MpgConfig = ManifoldPathGuidingConfig;
+
+/* ========================================================================
+ * ManifoldVertex Structure
+ * Corresponds to: ManifoldVertex<Float_, Spectrum_> in Mitsuba
+ * ======================================================================== */
+
+struct ManifoldVertex {
+  /* Surface point and derivatives (corresponds to p, dp_du, dp_dv) */
+  float3 p = zero_float3();
+  float3 dp_du = zero_float3();
+  float3 dp_dv = zero_float3();
+
+  /* Surface normals and derivatives (corresponds to n, gn, dn_du, dn_dv) */
+  float3 n = zero_float3();   /* Shading normal */
+  float3 gn = zero_float3();  /* Geometric normal */
+  float3 dn_du = zero_float3();
+  float3 dn_dv = zero_float3();
+
+  /* Scattering type */
+  bool is_refraction = false;
+
+  /* Tangent frame and derivatives (corresponds to s, t, ds_du, dt_du, etc) */
+  float3 s = zero_float3();
+  float3 t = zero_float3();
+  float3 ds_du = zero_float3();
+  float3 ds_dv = zero_float3();
+  float3 dt_du = zero_float3();
+  float3 dt_dv = zero_float3();
+
+  /* Material properties */
+  float eta = 1.0f;
+  float2 uv = zero_float2();
+
+  /* Shape reference */
+  int object = -1;
+  int prim = -1;
+
+  /* Newton solver data (corresponds to C, dC_dx_prev, dC_dx_cur, dC_dx_next, dx) */
+  float2 C = zero_float2();
+  float dC_dx_prev[2][2] = {{0, 0}, {0, 0}};
+  float dC_dx_cur[2][2] = {{0, 0}, {0, 0}};
+  float dC_dx_next[2][2] = {{0, 0}, {0, 0}};
+  float2 dx = zero_float2();
+
+  /* Cached path contribution data */
+  float3 wi = zero_float3();
+  float3 wo = zero_float3();
+  float dist_in = 0.0f;
+  float dist_out = 0.0f;
+  float cos_theta_in = 0.0f;
+  float cos_theta_out = 0.0f;
+  Spectrum throughput = zero_spectrum();
+
+  /* Constructors */
+  ManifoldVertex() {}
+  ManifoldVertex(const float3 &position) : p(position) {}
+
+  /* Initialize from surface interaction */
+  void from_surface_interaction(const ShaderData &sd);
+
+  /* Make tangent frame orthonormal (corresponds to make_orthonormal()) */
+  void make_orthonormal();
 };
 
 /* ========================================================================
- * Failure Codes and Status
+ * EmitterInteraction Structure
+ * Corresponds to: EmitterInteraction<Float_, Spectrum_> in Mitsuba
  * ======================================================================== */
 
-/* Length used when tracing visibility rays toward directional emitters. The value only
- * affects shadow rays and stays large enough to exit typical scene bounds without
- * perturbing the Jacobian computations that operate on normalized segments. */
-static constexpr float MPG_DISTANT_LIGHT_VISIBILITY_DISTANCE = 1.0e6f;
+struct EmitterInteraction {
+  /* Light source position and normal */
+  float3 p = zero_float3();
+  float3 n = zero_float3();
 
+  /* Direction from surface to light */
+  float3 d = zero_float3();
+
+  /* UV coordinates and derivatives */
+  float2 uv = zero_float2();
+  float3 dp_du = zero_float3();
+  float3 dp_dv = zero_float3();
+
+  /* Sampling weight and PDF */
+  Spectrum weight = zero_spectrum();
+  float pdf = 0.0f;
+
+  /* Light sample reference */
+  LightSample light_sample = {};
+
+  /* Type queries (corresponds to is_point(), is_directional(), is_area(), is_delta()) */
+  bool is_point() const;
+  bool is_directional() const;
+  bool is_area() const;
+  bool is_delta() const;
+};
+
+/* ========================================================================
+ * SpecularManifold - Static Utility Class
+ * Corresponds to: SpecularManifold<Float_, Spectrum_> in Mitsuba
+ * All methods are static geometric/sampling utilities
+ * ======================================================================== */
+
+struct SpecularManifold {
+  /* Emitter sampling and interaction methods */
+  static EmitterInteraction sample_emitter_interaction(KernelGlobals kg,
+                                                       const ShaderData &sd,
+                                                       const uint32_t path_flag,
+                                                       RNGState &rng_state);
+
+  static bool emitter_interaction_to_vertex(KernelGlobals kg,
+                                           const EmitterInteraction &ei,
+                                           const float3 &source_p,
+                                           float time,
+                                           ManifoldVertex &vertex);
+
+  static EmitterInteraction emitter_interaction(KernelGlobals kg,
+                                               const ShaderData &sd,
+                                               const ShaderData &light_sd);
+
+  /* Reflection and refraction with derivatives */
+  static bool reflect(const float3 &wi, const float3 &n, float3 &wo);
+
+  static void d_reflect(const float3 &wi,
+                       const float3 &d_wi_du,
+                       const float3 &d_wi_dv,
+                       const float3 &n,
+                       const float3 &dn_du,
+                       const float3 &dn_dv,
+                       float3 &d_wo_du,
+                       float3 &d_wo_dv);
+
+  static bool refract(const float3 &wi, const float3 &n, float eta, float3 &wo);
+
+  static void d_refract(const float3 &wi,
+                       const float3 &d_wi_du,
+                       const float3 &d_wi_dv,
+                       const float3 &n,
+                       const float3 &dn_du,
+                       const float3 &dn_dv,
+                       float eta,
+                       float3 &d_wo_du,
+                       float3 &d_wo_dv);
+
+  /* Spherical coordinate transformations with derivatives */
+  static void sphcoords(const float3 &v, float &theta, float &phi);
+
+  static void d_sphcoords(const float3 &v,
+                         const float3 &dv_du,
+                         const float3 &dv_dv,
+                         float &dtheta_du,
+                         float &dtheta_dv,
+                         float &dphi_du,
+                         float &dphi_dv);
+
+  /* Path contribution evaluation */
+  static Spectrum specular_reflectance(KernelGlobals kg,
+                                      const ShaderData &sd,
+                                      const EmitterInteraction &ei,
+                                      const std::vector<ManifoldVertex> &vertices);
+
+  static float geometric_term(const ManifoldVertex &v_prev,
+                             const ManifoldVertex &v_cur,
+                             std::vector<ManifoldVertex> &vertices);
+
+  static float invert_tridiagonal_geo(std::vector<ManifoldVertex> &vertices);
+
+  static Spectrum evaluate_path_contribution(KernelGlobals kg,
+                                            const std::vector<ManifoldVertex> &vertices,
+                                            const ShaderData &sd,
+                                            const EmitterInteraction &ei);
+};
+
+/* ========================================================================
+ * Manifold_Walk - Newton Solver Class
+ * Corresponds to: Manifold_Walk<Float, Spectrum> in Mitsuba
+ * ======================================================================== */
+
+class ManifoldWalk {
+public:
+  /* Configuration and scene reference */
+  ManifoldPathGuidingConfig config;
+  KernelGlobals kg = nullptr;
+
+  /* Constructors */
+  ManifoldWalk() {}
+  ManifoldWalk(KernelGlobals kg_, ManifoldPathGuidingConfig config_) : config(config_), kg(kg_) {}
+
+  /* Main Newton solver
+   * Corresponds to: newton_solver() in Mitsuba */
+  bool newton_solver(const ShaderData &sd,
+                    const EmitterInteraction &ei,
+                    std::vector<ManifoldVertex> &vertices,
+                    const std::vector<float3> &offset_normals);
+
+  /* Constraint computation methods
+   * Corresponds to: compute_step_halfvector() and compute_step_anglediff() */
+  bool compute_step_halfvector(const ShaderData &sd,
+                               const EmitterInteraction &ei,
+                               std::vector<ManifoldVertex> &vertices,
+                               const std::vector<float3> &offset_normals);
+
+  bool compute_step_anglediff(const ShaderData &sd,
+                             const EmitterInteraction &ei,
+                             std::vector<ManifoldVertex> &vertices,
+                             const std::vector<float3> &offset_normals);
+
+  /* Surface reprojection
+   * Corresponds to: reproject() in Mitsuba */
+  bool reproject(const ShaderData &sd,
+                const std::vector<float3> &target_positions,
+                const std::vector<ManifoldVertex> &seed_vertices,
+                const std::vector<float3> &offset_normals,
+                std::vector<ManifoldVertex> &result_vertices);
+
+  /* Tridiagonal matrix inversion for Newton step
+   * Corresponds to: invert_tridiagonal_step() in Mitsuba */
+  bool invert_tridiagonal_step(std::vector<ManifoldVertex> &vertices);
+};
+
+/* ========================================================================
+ * Helper Structures (Cycles-specific, not in Mitsuba)
+ * ======================================================================== */
+
+/* Failure codes and status enums */
 enum MpgFailureCode : int {
   MPG_FAILURE_NONE = 0,
   MPG_FAILURE_SEED = 1,
@@ -107,21 +333,7 @@ enum MpgSeedScatter : int {
   MPG_SEED_SCATTER_REFRACTION = 2,
 };
 
-/* ========================================================================
- * Vertex and Path Structures
- * Corresponds to ManifoldVertex and EmitterInteraction in Mitsuba
- * ======================================================================== */
-
-struct ShadingPoint {
-  float3 position = zero_float3();
-  float3 geometric_normal = zero_float3();
-  float3 shading_normal = zero_float3();
-  float3 wo = zero_float3();
-  float time = 0.0f;
-};
-
-/* Seed ray proposal for manifold walk
- * Combines direction sampling and light sampling */
+/* Seed ray proposal structure */
 struct MpgSeedRay {
   float3 direction = zero_float3();
   float3 direction_normalized = zero_float3();
@@ -142,7 +354,7 @@ struct MpgSeedRay {
   int accepted_trial_count = 0;
   int guided_trial_count = 0;
   int fallback_trial_count = 0;
-  float seed_resample_factor = 0.0f; /* Expected trials before re-discovering seed. */
+  float seed_resample_factor = 0.0f;
   MpgSeedBranch branch = MPG_SEED_BRANCH_NONE;
   MpgSeedScatter scatter = MPG_SEED_SCATTER_NONE;
   int bounce_count = 1;
@@ -151,37 +363,7 @@ struct MpgSeedRay {
   bool use_smooth_normals = false;
 };
 
-/* Specular vertex on the manifold
- * Corresponds to ManifoldVertex in Mitsuba */
-struct MpgSpecularVertex {
-  float3 position = zero_float3();
-  float3 normal = zero_float3();
-  float3 dir_in = zero_float3();
-  float3 dir_out = zero_float3();
-  float distance_in = 0.0f;
-  float distance_out = 0.0f;
-  float eta = 1.0f;
-  float cos_theta_in = 0.0f;
-  float cos_theta_out = 0.0f;
-  Spectrum throughput = zero_spectrum();
-  float3 dXdu = zero_float3();
-  float3 dXdv = zero_float3();
-  float3 dNdu = zero_float3();
-  float3 dNdv = zero_float3();
-  float u = 0.0f;
-  float v = 0.0f;
-  float jacobian = 0.0f;
-  bool is_refraction = false; /* True when this specular vertex is refractive. */
-  bool total_internal_reflection = false;
-  int object = -1;
-  int prim = -1;
-};
-
-/* ========================================================================
- * Solver Output
- * Corresponds to the result of manifold walk in Mitsuba
- * ======================================================================== */
-
+/* Solver output structure */
 struct MpgSolverOutput {
   bool success = false;
   int specular_vertex_count = 0;
@@ -189,7 +371,7 @@ struct MpgSolverOutput {
   float visibility = 1.0f;
   float jacobian_total = 0.0f;
   Spectrum specular_throughput = zero_spectrum();
-  float seed_resample_factor = 0.0f; /* Expected trials before re-discovering seed. */
+  float seed_resample_factor = 0.0f;
   MpgSeedBranch seed_branch = MPG_SEED_BRANCH_NONE;
   MpgSeedScatter seed_scatter = MPG_SEED_SCATTER_NONE;
   float seed_branch_pdf = 0.0f;
@@ -197,34 +379,10 @@ struct MpgSolverOutput {
   float seed_scatter_pdf = 0.0f;
   int seed_guided_trial_count = 0;
   int seed_fallback_trial_count = 0;
-  MpgSpecularVertex specular_vertices[2];
-
-  /* Legacy single-bounce fields kept for callers that have not yet
-   * transitioned to the multi-vertex representation. These mirror the
-   * contents of the first entry in `specular_vertices` when present. */
-  float3 specular_point = zero_float3();
-  float3 specular_normal = zero_float3();
-  float3 dir_ds = zero_float3();
-  float3 dir_sl = zero_float3();
-  float distance_ds = 0.0f;
-  float distance_sl = 0.0f;
-  bool is_refraction = false; /* True only when the terminal specular vertex is refractive. */
-  Spectrum spec_weight = zero_spectrum();
-  float3 dXdu = zero_float3();
-  float3 dXdv = zero_float3();
-  float3 dNdu = zero_float3();
-  float3 dNdv = zero_float3();
-  float u = 0.0f;
-  float v = 0.0f;
-  float jacobian = 0.0f;
-  int object = -1;
-  int prim = -1;
+  std::vector<ManifoldVertex> specular_vertices;
 };
 
-/* ========================================================================
- * Main Result Structure
- * ======================================================================== */
-
+/* Main result structure */
 struct MpgResult {
   bool success = false;
   float3 wi = zero_float3();
@@ -234,7 +392,7 @@ struct MpgResult {
   float jacobian_total = 0.0f;
   float seed_pdf = 0.0f;
   float seed_pdf_raw = 0.0f;
-  float seed_resample_factor = 0.0f; /* Expected trials before re-discovering seed. */
+  float seed_resample_factor = 0.0f;
   float seed_branch_pdf = 0.0f;
   float seed_direction_pdf = 0.0f;
   float seed_scatter_pdf = 0.0f;
@@ -243,12 +401,10 @@ struct MpgResult {
   uint8_t seed_tau_count = 0;
   float bounce_pdf = 1.0f;
   float bounce_pdf_raw = 1.0f;
-  /* Light pdf converted to receiver solid angle (includes jacobian_total). */
   float light_pdf = 0.0f;
   Spectrum spec_weight = zero_spectrum();
   LightSample light = {};
-  int specular_vertex_count = 0;
-  MpgSpecularVertex specular_vertices[2];
+  std::vector<ManifoldVertex> specular_vertices;
   int attempt_count = 0;
   int seed_trial_count = 0;
   int seed_accepted_trial_count = 0;
@@ -262,32 +418,25 @@ struct MpgResult {
 };
 
 /* ========================================================================
- * Main Entry Point
- * Corresponds to the main manifold sampling function in Mitsuba
+ * Top-Level Functions (Cycles integration layer)
  * ======================================================================== */
 
-/* Main entry point for Manifold Path Guiding
- * Attempts to connect a non-specular surface to a light through a specular chain
- * Returns a complete MpgResult with sampled direction, PDFs, and throughput */
+/* Main entry point for Manifold Path Guiding */
 MpgResult mpg_try_connect(KernelGlobals kg,
                           const ShaderData &sd,
                           const ShaderClosure &bsdf,
                           const GuideSummary &g,
-                          const MpgOptions &opt,
+                          const ManifoldPathGuidingConfig &config,
                           const uint32_t path_flag,
                           const int bounce,
                           RNGState &rng_state);
 
-/* ========================================================================
- * Internal Functions (for implementation, exposed for testing)
- * ======================================================================== */
-
-/* Seed generation - corresponds to emitter sampling in Mitsuba */
+/* Seed generation */
 bool mpg_generate_seed(KernelGlobals kg,
                        const ShaderData &sd,
                        const ShaderClosure &bsdf,
                        const GuideSummary &guide,
-                       const MpgOptions &options,
+                       const ManifoldPathGuidingConfig &config,
                        const uint32_t path_flag,
                        const int bounce,
                        const RNGState &rng_state,
@@ -295,13 +444,13 @@ bool mpg_generate_seed(KernelGlobals kg,
                        MpgFailureCode &failure_code,
                        const int rng_branch_offset = 0);
 
-/* Manifold walk solvers - corresponds to Manifold_Walk in Mitsuba */
+/* Manifold walk solvers */
 bool mpg_solve_single_bounce(KernelGlobals kg,
                              const ShaderData &sd,
                              const ShaderClosure &bsdf,
                              const MpgSeedRay &seed,
                              const GuideSummary &guide,
-                             const MpgOptions &options,
+                             const ManifoldPathGuidingConfig &config,
                              RNGState &rng_state,
                              MpgSolverOutput &result,
                              MpgFailureCode &failure_code);
@@ -311,7 +460,7 @@ bool mpg_solve_double_bounce(KernelGlobals kg,
                              const ShaderClosure &bsdf,
                              const MpgSeedRay &seed,
                              const GuideSummary &guide,
-                             const MpgOptions &options,
+                             const ManifoldPathGuidingConfig &config,
                              RNGState &rng_state,
                              MpgSolverOutput &result,
                              MpgFailureCode &failure_code);
@@ -328,30 +477,5 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
 float mpg_light_sample_pdf_solid(KernelGlobals kg,
                                  const ShaderData &sd,
                                  const LightSample &light_sample);
-
-float3 mpg_surface_ray_offset(KernelGlobals kg,
-                              const ShaderData &sd,
-                              const float3 ray_P,
-                              const float3 ray_D);
-
-float mpg_rebuild_seed_pdf(const MpgSeedRay &seed);
-
-float mpg_seed_branch_probability(const int guided_attempt_budget,
-                                  const int fallback_attempt_budget,
-                                  MpgSeedBranch branch);
-
-/* Visibility computation */
-float mpg_compute_segment_visibility(KernelGlobals kg,
-                                     const float3 &start_point,
-                                     const float3 &start_normal,
-                                     const float3 &end_point,
-                                     float time,
-                                     int skip_object,
-                                     int skip_prim,
-                                     int skip_light_object,
-                                     int skip_light_prim);
-
-/* Debug helper: Set current sample number for filtered debug output */
-void mpg_set_current_sample(int sample);
 
 CCL_NAMESPACE_END

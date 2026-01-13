@@ -61,12 +61,295 @@
 
 CCL_NAMESPACE_BEGIN
 
-
 /* ========================================================================
- * PDF Evaluation
- * From: mpg_pdf.cpp
+ * Configuration Class Methods
+ * Corresponds to: ManifoldPathGuidingConfig class in Mitsuba
  * ======================================================================== */
 
+std::string ManifoldPathGuidingConfig::to_string() const
+{
+  std::string result = "ManifoldPathGuidingConfig:\n";
+  result += "  max_bounces: " + std::to_string(max_bounces) + "\n";
+  result += "  max_iterations: " + std::to_string(max_iterations) + "\n";
+  result += "  solver_threshold: " + std::to_string(solver_threshold) + "\n";
+  result += "  step_scale: " + std::to_string(step_scale) + "\n";
+  result += "  halfvector_constraints: " + std::string(halfvector_constraints ? "true" : "false") + "\n";
+  result += "  guided: " + std::string(guided ? "true" : "false") + "\n";
+  result += "  gate_w: " + std::to_string(gate_w) + "\n";
+  result += "  gate_kappa: " + std::to_string(gate_kappa) + "\n";
+  result += "  relax_gate: " + std::string(relax_gate ? "true" : "false") + "\n";
+  result += "  max_seed_repeat_trials: " + std::to_string(max_seed_repeat_trials) + "\n";
+  result += "  prob_uniform: " + std::to_string(prob_uniform) + "\n";
+  return result;
+}
+
+/* ========================================================================
+ * ManifoldVertex Methods
+ * Corresponds to: ManifoldVertex class in Mitsuba
+ * ======================================================================== */
+
+void ManifoldVertex::from_surface_interaction(const ShaderData &sd)
+{
+  /* Initialize position and normals */
+  p = sd.P;
+  n = sd.N;
+  gn = sd.Ng;
+
+  /* Initialize shape reference */
+  object = sd.object;
+  prim = sd.prim;
+
+  /* Initialize UV coordinates */
+  uv = make_float2(sd.u, sd.v);
+
+  /* Compute tangent frame from differential geometry */
+  if (sd.type & PRIMITIVE_TRIANGLE) {
+    /* Use geometric derivatives for tangent frame */
+    dp_du = sd.dP.dx;
+    dp_dv = sd.dP.dy;
+  }
+  else {
+    /* Construct orthonormal basis */
+    make_orthonormal_basis(n, &dp_du, &dp_dv);
+  }
+
+  /* Initialize tangent frame (will be orthonormalized) */
+  s = dp_du;
+  t = dp_dv;
+  make_orthonormal();
+}
+
+void ManifoldVertex::make_orthonormal()
+{
+  /* Gram-Schmidt orthogonalization of tangent frame */
+  if (!is_zero(n)) {
+    /* Orthogonalize s against n */
+    s = s - dot(s, n) * n;
+    if (!is_zero(s)) {
+      s = normalize(s);
+    }
+    else {
+      /* s was parallel to n, construct new frame */
+      make_orthonormal_basis(n, &s, &t);
+      return;
+    }
+
+    /* Compute t as cross product for right-handed frame */
+    t = cross(n, s);
+    if (!is_zero(t)) {
+      t = normalize(t);
+    }
+  }
+}
+
+/* ========================================================================
+ * EmitterInteraction Methods
+ * Corresponds to: EmitterInteraction class in Mitsuba
+ * ======================================================================== */
+
+bool EmitterInteraction::is_point() const
+{
+  return light_sample.type == LIGHT_POINT;
+}
+
+bool EmitterInteraction::is_directional() const
+{
+  return light_sample.type == LIGHT_DISTANT || light_sample.t == FLT_MAX;
+}
+
+bool EmitterInteraction::is_area() const
+{
+  return light_sample.type == LIGHT_AREA;
+}
+
+bool EmitterInteraction::is_delta() const
+{
+  /* Point and directional lights are delta distributions */
+  return is_point() || is_directional();
+}
+
+/* ========================================================================
+ * SpecularManifold Static Utility Methods
+ * Corresponds to: SpecularManifold<Float_, Spectrum_> static methods in Mitsuba
+ * All methods are static geometric/sampling utilities
+ * ======================================================================== */
+
+/* Reflection with derivatives */
+bool SpecularManifold::reflect(const float3 &wi, const float3 &n, float3 &wo)
+{
+  const float cos_theta_i = dot(wi, n);
+  wo = 2.0f * cos_theta_i * n - wi;
+  return true;
+}
+
+void SpecularManifold::d_reflect(const float3 &wi,
+                                  const float3 &d_wi_du,
+                                  const float3 &d_wi_dv,
+                                  const float3 &n,
+                                  const float3 &dn_du,
+                                  const float3 &dn_dv,
+                                  float3 &d_wo_du,
+                                  float3 &d_wo_dv)
+{
+  const float cos_theta_i = dot(wi, n);
+  const float d_cos_du = dot(d_wi_du, n) + dot(wi, dn_du);
+  const float d_cos_dv = dot(d_wi_dv, n) + dot(wi, dn_dv);
+  d_wo_du = 2.0f * (d_cos_du * n + cos_theta_i * dn_du) - d_wi_du;
+  d_wo_dv = 2.0f * (d_cos_dv * n + cos_theta_i * dn_dv) - d_wi_dv;
+}
+
+/* Refraction with derivatives */
+bool SpecularManifold::refract(const float3 &wi, const float3 &n, float eta, float3 &wo)
+{
+  const float cos_theta_i = dot(wi, n);
+  const float sin2_theta_i = fmaxf(0.0f, 1.0f - cos_theta_i * cos_theta_i);
+  const float sin2_theta_t = sin2_theta_i / (eta * eta);
+
+  /* Check for total internal reflection */
+  if (sin2_theta_t >= 1.0f) {
+    return false;
+  }
+
+  const float cos_theta_t = sqrtf(fmaxf(0.0f, 1.0f - sin2_theta_t));
+  wo = -wi / eta + (cos_theta_i / eta - cos_theta_t) * n;
+  return true;
+}
+
+void SpecularManifold::d_refract(const float3 &wi,
+                                  const float3 &d_wi_du,
+                                  const float3 &d_wi_dv,
+                                  const float3 &n,
+                                  const float3 &dn_du,
+                                  const float3 &dn_dv,
+                                  float eta,
+                                  float3 &d_wo_du,
+                                  float3 &d_wo_dv)
+{
+  const float cos_theta_i = dot(wi, n);
+  const float sin2_theta_i = fmaxf(0.0f, 1.0f - cos_theta_i * cos_theta_i);
+  const float sin2_theta_t = sin2_theta_i / (eta * eta);
+  const float cos_theta_t = sqrtf(fmaxf(1e-10f, 1.0f - sin2_theta_t));
+
+  const float d_cos_i_du = dot(d_wi_du, n) + dot(wi, dn_du);
+  const float d_cos_i_dv = dot(d_wi_dv, n) + dot(wi, dn_dv);
+  const float d_cos_t_du = -(cos_theta_i * d_cos_i_du) / (eta * eta * cos_theta_t);
+  const float d_cos_t_dv = -(cos_theta_i * d_cos_i_dv) / (eta * eta * cos_theta_t);
+
+  const float k = cos_theta_i / eta - cos_theta_t;
+  const float d_k_du = d_cos_i_du / eta - d_cos_t_du;
+  const float d_k_dv = d_cos_i_dv / eta - d_cos_t_dv;
+
+  d_wo_du = -d_wi_du / eta + d_k_du * n + k * dn_du;
+  d_wo_dv = -d_wi_dv / eta + d_k_dv * n + k * dn_dv;
+}
+
+/* Spherical coordinate transformations */
+void SpecularManifold::sphcoords(const float3 &v, float &theta, float &phi)
+{
+  theta = safe_acosf(v.z);
+  phi = atan2f(v.y, v.x);
+}
+
+void SpecularManifold::d_sphcoords(const float3 &v,
+                                    const float3 &dv_du,
+                                    const float3 &dv_dv,
+                                    float &dtheta_du,
+                                    float &dtheta_dv,
+                                    float &dphi_du,
+                                    float &dphi_dv)
+{
+  const float sin_theta = sqrtf(fmaxf(1e-10f, 1.0f - v.z * v.z));
+  const float inv_sin_theta = (sin_theta > 1e-7f) ? (1.0f / sin_theta) : 0.0f;
+
+  dtheta_du = -dv_du.z * inv_sin_theta;
+  dtheta_dv = -dv_dv.z * inv_sin_theta;
+
+  const float rho2 = v.x * v.x + v.y * v.y;
+  const float inv_rho2 = (rho2 > 1e-10f) ? (1.0f / rho2) : 0.0f;
+
+  dphi_du = (v.x * dv_du.y - v.y * dv_du.x) * inv_rho2;
+  dphi_dv = (v.x * dv_dv.y - v.y * dv_dv.x) * inv_rho2;
+}
+
+/* Emitter sampling and interaction (implementations TBD - currently in top-level functions) */
+EmitterInteraction SpecularManifold::sample_emitter_interaction(KernelGlobals kg,
+                                                                const ShaderData &sd,
+                                                                const uint32_t path_flag,
+                                                                RNGState &rng_state)
+{
+  /* TODO: Extract from seed generation code */
+  return EmitterInteraction();
+}
+
+bool SpecularManifold::emitter_interaction_to_vertex(KernelGlobals kg,
+                                                      const EmitterInteraction &ei,
+                                                      const float3 &source_p,
+                                                      float time,
+                                                      ManifoldVertex &vertex)
+{
+  /* TODO: Extract conversion logic */
+  return false;
+}
+
+EmitterInteraction SpecularManifold::emitter_interaction(KernelGlobals kg,
+                                                          const ShaderData &sd,
+                                                          const ShaderData &light_sd)
+{
+  /* TODO: Extract interaction construction */
+  return EmitterInteraction();
+}
+
+Spectrum SpecularManifold::specular_reflectance(KernelGlobals kg,
+                                                 const ShaderData &sd,
+                                                 const EmitterInteraction &ei,
+                                                 const std::vector<ManifoldVertex> &vertices)
+{
+  /* TODO: Extract from solver code */
+  return zero_spectrum();
+}
+
+float SpecularManifold::geometric_term(const ManifoldVertex &v_prev,
+                                        const ManifoldVertex &v_cur,
+                                        std::vector<ManifoldVertex> &vertices)
+{
+  /* TODO: Extract from solver code */
+  return 1.0f;
+}
+
+float SpecularManifold::invert_tridiagonal_geo(std::vector<ManifoldVertex> &vertices)
+{
+  /* TODO: Extract from solver code */
+  return 1.0f;
+}
+
+Spectrum SpecularManifold::evaluate_path_contribution(KernelGlobals kg,
+                                                        const std::vector<ManifoldVertex> &vertices,
+                                                        const ShaderData &sd,
+                                                        const EmitterInteraction &ei)
+{
+  /* TODO: Extract from solver code */
+  return zero_spectrum();
+}
+
+/* ========================================================================
+ * ManifoldWalk Class Methods
+ * Corresponds to: Manifold_Walk<Float, Spectrum> class in Mitsuba
+ * Newton solver implementation
+ * ======================================================================== */
+
+/* These methods are currently implemented as standalone functions
+ * in the Newton solvers section below. They will need to be refactored
+ * to become class methods in a future refactoring pass. */
+
+/* ========================================================================
+ * Top-Level Integration Functions
+ * Cycles integration layer - main entry points
+ * ======================================================================== */
+
+/* ========================================================================
+ * PDF Evaluation Functions
+ * From: mpg_pdf.cpp
+ * ======================================================================== */
 
 float mpg_light_sample_pdf_solid(KernelGlobals kg,
                                  const ShaderData &sd,
@@ -203,8 +486,9 @@ bool mpg_evaluate_pdf(KernelGlobals kg,
 }
 
 
+
 /* ========================================================================
- * Seed Generation
+ * Seed Generation Functions
  * From: mpg_seed.cpp
  * ======================================================================== */
 
@@ -1538,7 +1822,6 @@ if constexpr (MPG_DEBUG::SEED) {
   seed.bary_v = isect.v;
   return true;
 }
-
 
 /* ========================================================================
  * Newton Manifold Solvers (Single and Double Bounce)
@@ -6000,6 +6283,7 @@ if (MPG_DEBUG::PARAMS()) {
 
   return true;
 }
+
 
 
 /* ========================================================================
