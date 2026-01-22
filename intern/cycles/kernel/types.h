@@ -455,6 +455,14 @@ enum PathRayMNEE {
   PATH_MNEE_CULL_LIGHT_CONNECTION = (1U << 2U),
 };
 
+/* Caustics Mode */
+
+enum CausticsMode {
+  CAUSTICS_OFF = 0,
+  CAUSTICS_SHADOW = 1,
+  CAUSTICS_FULL = 2,
+};
+
 /* Configure ray visibility bits for rays and objects respectively,
  * to make shadow catchers work.
  *

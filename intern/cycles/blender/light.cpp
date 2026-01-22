@@ -97,7 +97,9 @@ void BlenderSync::sync_light(BObjectInfo &b_ob_info, Light *light)
   light->set_use_mis(get_boolean(clight, "use_multiple_importance_sampling"));
 
   /* caustics light */
-  light->set_use_caustics(get_boolean(clight, "is_caustics_light"));
+  const CausticsMode caustics_mode = static_cast<CausticsMode>(
+      get_enum(clight, "caustics_mode", 3, CAUSTICS_OFF));
+  light->set_caustics_mode(caustics_mode);
 
   light->set_max_bounces(get_int(clight, "max_bounces"));
 
@@ -170,7 +172,9 @@ void BlenderSync::sync_background_light(BL::SpaceView3D &b_v3d)
       light->set_max_bounces(get_int(cworld, "max_bounces"));
 
       /* Caustic light. */
-      light->set_use_caustics(get_boolean(cworld, "is_caustics_light"));
+      const CausticsMode caustics_mode = static_cast<CausticsMode>(
+          get_enum(cworld, "caustics_mode", 3, CAUSTICS_OFF));
+      light->set_caustics_mode(caustics_mode);
 
       light->tag_update(scene);
 

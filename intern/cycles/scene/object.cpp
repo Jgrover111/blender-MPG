@@ -89,8 +89,12 @@ NODE_DEFINE(Object)
 
   SOCKET_BOOLEAN(is_shadow_catcher, "Shadow Catcher", false);
 
-  SOCKET_BOOLEAN(is_caustics_caster, "Cast Shadow Caustics", false);
-  SOCKET_BOOLEAN(is_caustics_receiver, "Receive Shadow Caustics", false);
+  static NodeEnum caustics_mode_enum;
+  caustics_mode_enum.insert("off", CAUSTICS_OFF);
+  caustics_mode_enum.insert("shadow", CAUSTICS_SHADOW);
+  caustics_mode_enum.insert("full", CAUSTICS_FULL);
+  SOCKET_ENUM(caustics_caster_mode, "Cast Caustics Mode", caustics_mode_enum, CAUSTICS_OFF);
+  SOCKET_ENUM(caustics_receiver_mode, "Receive Caustics Mode", caustics_mode_enum, CAUSTICS_OFF);
 
   SOCKET_BOOLEAN(is_bake_target, "Bake Target", false);
 
@@ -526,10 +530,10 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
   kobject.primitive_type = geom->primitive_type();
 
   /* Object shadow caustics flag */
-  if (ob->is_caustics_caster) {
+  if (ob->caustics_caster_mode != CAUSTICS_OFF) {
     flag |= SD_OBJECT_CAUSTICS_CASTER;
   }
-  if (ob->is_caustics_receiver) {
+  if (ob->caustics_receiver_mode != CAUSTICS_OFF) {
     flag |= SD_OBJECT_CAUSTICS_RECEIVER;
   }
 

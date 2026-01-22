@@ -538,10 +538,10 @@ void Scene::update_kernel_features()
   bool has_caustics_light = false;
 
   for (Object *object : objects) {
-    if (object->get_is_caustics_caster()) {
+    if (object->get_caustics_caster_mode() != CAUSTICS_OFF) {
       has_caustics_caster = true;
     }
-    else if (object->get_is_caustics_receiver()) {
+    else if (object->get_caustics_receiver_mode() != CAUSTICS_OFF) {
       has_caustics_receiver = true;
     }
     Geometry *geom = object->get_geometry();
@@ -570,7 +570,7 @@ void Scene::update_kernel_features()
     }
     else if (geom->is_light()) {
       const Light *light = static_cast<const Light *>(object->get_geometry());
-      if (light->get_use_caustics()) {
+      if (light->get_caustics_mode() != CAUSTICS_OFF) {
         has_caustics_light = true;
       }
     }

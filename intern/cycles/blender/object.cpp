@@ -282,11 +282,13 @@ Object *BlenderSync::sync_object(BL::ViewLayer &b_view_layer,
   }
   object->set_ao_distance(ao_distance);
 
-  const bool is_caustics_caster = get_boolean(cobject, "is_caustics_caster");
-  object->set_is_caustics_caster(is_caustics_caster);
+  const CausticsMode caustics_caster_mode = static_cast<CausticsMode>(
+      get_enum(cobject, "caustics_caster_mode", 3, CAUSTICS_OFF));
+  object->set_caustics_caster_mode(caustics_caster_mode);
 
-  const bool is_caustics_receiver = get_boolean(cobject, "is_caustics_receiver");
-  object->set_is_caustics_receiver(is_caustics_receiver);
+  const CausticsMode caustics_receiver_mode = static_cast<CausticsMode>(
+      get_enum(cobject, "caustics_receiver_mode", 3, CAUSTICS_OFF));
+  object->set_caustics_receiver_mode(caustics_receiver_mode);
 
   object->set_is_bake_target(b_ob_info.real_object == b_bake_target);
 

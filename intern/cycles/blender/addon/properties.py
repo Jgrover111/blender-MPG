@@ -205,6 +205,12 @@ enum_fast_gi_method = (
     ('ADD', "Add", "Add ambient occlusion to diffuse surfaces"),
 )
 
+enum_caustics_mode = (
+    ('OFF', "Off", "Do not render caustics", 0),
+    ('SHADOW', "Shadow Caustics", "Render caustics in shadow regions using Manifold Next Event Estimation (MNEE)", 1),
+    ('FULL', "Caustic Paths", "Render all caustic paths using Specular Manifold Sampling (SMS)", 2),
+)
+
 # NOTE: Identifiers are expected to be an upper case version of identifiers from  `Pass::get_type_enum()`
 enum_view3d_shading_render_pass = (
     ('', "General", ""),
@@ -1188,11 +1194,12 @@ class CyclesLightSettings(bpy.types.PropertyGroup):
         "note that this will make the light invisible",
         default=False,
     )
-    is_caustics_light: BoolProperty(
-        name="Shadow Caustics",
-        description="Generate approximate caustics in shadows of refractive surfaces. "
-        "Lights, caster and receiver objects must have shadow caustics options set to enable this",
-        default=False,
+    caustics_mode: EnumProperty(
+        name="Caustics",
+        description="Generate caustics from refractive surfaces. "
+        "Lights, caster and receiver objects must have matching caustics options set to enable this",
+        items=enum_caustics_mode,
+        default='OFF',
     )
 
     @classmethod
@@ -1211,11 +1218,12 @@ class CyclesLightSettings(bpy.types.PropertyGroup):
 class CyclesWorldSettings(bpy.types.PropertyGroup):
     __slots__ = ()
 
-    is_caustics_light: BoolProperty(
-        name="Shadow Caustics",
-        description="Generate approximate caustics in shadows of refractive surfaces. "
-        "Lights, caster and receiver objects must have shadow caustics options set to enable this",
-        default=False,
+    caustics_mode: EnumProperty(
+        name="Caustics",
+        description="Generate caustics from refractive surfaces. "
+        "Lights, caster and receiver objects must have matching caustics options set to enable this",
+        items=enum_caustics_mode,
+        default='OFF',
     )
     sampling_method: EnumProperty(
         name="Sampling Method",
@@ -1414,19 +1422,21 @@ class CyclesObjectSettings(bpy.types.PropertyGroup):
         subtype='DISTANCE',
     )
 
-    is_caustics_caster: BoolProperty(
-        name="Cast Shadow Caustics",
-        description="With refractive materials, generate approximate caustics in shadows of this object. "
+    caustics_caster_mode: EnumProperty(
+        name="Cast Caustics",
+        description="With refractive materials, generate caustics on other surfaces. "
         "Up to 10 bounces inside this object are taken into account. Lights, caster and receiver objects "
-        "must have shadow caustics options set to enable this",
-        default=False,
+        "must have matching caustics options set to enable this",
+        items=enum_caustics_mode,
+        default='OFF',
     )
 
-    is_caustics_receiver: BoolProperty(
-        name="Receive Shadow Caustics",
-        description="Receive approximate caustics from refractive materials in shadows on this object. "
-        "Lights, caster and receiver objects must have shadow caustics options set to enable this",
-        default=False,
+    caustics_receiver_mode: EnumProperty(
+        name="Receive Caustics",
+        description="Receive caustics from refractive materials on this object. "
+        "Lights, caster and receiver objects must have matching caustics options set to enable this",
+        items=enum_caustics_mode,
+        default='OFF',
     )
 
     @classmethod

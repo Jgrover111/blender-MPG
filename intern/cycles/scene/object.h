@@ -5,6 +5,7 @@
 #pragma once
 
 #include "graph/node.h"
+#include "kernel/types.h"
 
 /* included as Object::set_particle_system defined through NODE_SOCKET_API does
  * not select the right Node::set overload as it does not know that ParticleSystem
@@ -55,8 +56,8 @@ class Object : public Node {
   NODE_SOCKET_API(float, shadow_terminator_shading_offset)
   NODE_SOCKET_API(float, shadow_terminator_geometry_offset)
 
-  NODE_SOCKET_API(bool, is_caustics_caster)
-  NODE_SOCKET_API(bool, is_caustics_receiver)
+  NODE_SOCKET_API(CausticsMode, caustics_caster_mode)
+  NODE_SOCKET_API(CausticsMode, caustics_receiver_mode)
 
   NODE_SOCKET_API(bool, is_bake_target)
 

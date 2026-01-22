@@ -52,7 +52,7 @@ class Light : public Geometry {
 
   NODE_SOCKET_API(bool, cast_shadow)
   NODE_SOCKET_API(bool, use_mis)
-  NODE_SOCKET_API(bool, use_caustics)
+  NODE_SOCKET_API(CausticsMode, caustics_mode)
 
   NODE_SOCKET_API(bool, is_portal)
   NODE_SOCKET_API(bool, is_enabled)

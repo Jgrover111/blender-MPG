@@ -1357,8 +1357,8 @@ class CYCLES_OBJECT_PT_shading_caustics(CyclesButtonsPanel, Panel):
 
         ob = context.object
         cob = ob.cycles
-        col.prop(cob, "is_caustics_caster")
-        col.prop(cob, "is_caustics_receiver")
+        col.prop(cob, "caustics_caster_mode")
+        col.prop(cob, "caustics_receiver_mode")
 
 
 class CYCLES_OBJECT_PT_lightgroup(CyclesButtonsPanel, Panel):
@@ -1615,7 +1615,7 @@ class CYCLES_LIGHT_PT_settings(CyclesButtonsPanel, Panel):
         sub.prop(light, "use_shadow", text="Cast Shadow")
         sub.prop(clamp, "use_multiple_importance_sampling", text="Multiple Importance")
         if use_mnee(context):
-            sub.prop(clamp, "is_caustics_light", text="Shadow Caustics")
+            sub.prop(clamp, "caustics_mode")
 
         if light.type == 'AREA':
             col.prop(clamp, "is_portal", text="Portal")
@@ -1813,7 +1813,7 @@ class CYCLES_WORLD_PT_settings_surface(CyclesButtonsPanel, Panel):
         subsub.active = cworld.sampling_method == 'MANUAL'
         subsub.prop(cworld, "sample_map_resolution")
         sub.prop(cworld, "max_bounces")
-        sub.prop(cworld, "is_caustics_light", text="Shadow Caustics")
+        sub.prop(cworld, "caustics_mode")
 
 
 class CYCLES_WORLD_PT_settings_volume(CyclesButtonsPanel, Panel):

@@ -114,7 +114,12 @@ NODE_DEFINE(Light)
 
   SOCKET_BOOLEAN(cast_shadow, "Cast Shadow", true);
   SOCKET_BOOLEAN(use_mis, "Use Mis", false);
-  SOCKET_BOOLEAN(use_caustics, "Shadow Caustics", false);
+
+  static NodeEnum caustics_mode_enum;
+  caustics_mode_enum.insert("off", CAUSTICS_OFF);
+  caustics_mode_enum.insert("shadow", CAUSTICS_SHADOW);
+  caustics_mode_enum.insert("full", CAUSTICS_FULL);
+  SOCKET_ENUM(caustics_mode, "Caustics Mode", caustics_mode_enum, CAUSTICS_OFF);
 
   SOCKET_INT(max_bounces, "Max Bounces", 1024);
 
@@ -1394,7 +1399,7 @@ void LightManager::device_update_lights(DeviceScene *dscene, Scene *scene)
     klights[light_index].object_id = object->index;
 
     klights[light_index].max_bounces = light->max_bounces;
-    klights[light_index].use_caustics = light->use_caustics;
+    klights[light_index].use_caustics = static_cast<int>(light->caustics_mode);
 
     light_index++;
   }
