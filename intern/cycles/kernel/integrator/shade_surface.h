@@ -17,6 +17,7 @@
 #include "kernel/geom/triangle.h"
 
 #include "kernel/integrator/mnee.h"
+#include "kernel/integrator/sms.h"
 
 #include "kernel/integrator/guiding.h"
 #include "kernel/integrator/shadow_linking.h"
