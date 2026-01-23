@@ -166,6 +166,7 @@ Alternative naming considered:
 - Nested dielectrics handling
 - Volumetric scattering in SMS paths
 - Spectral caustics (wavelength-dependent)
+- **Biased SMS mode**: Add render option to switch between unbiased (Bernoulli trials with probability estimation) and biased (fixed budget with summed contributions) approaches
 
 **5.3 Quality Improvements**
 - Multiple importance sampling with standard PT
