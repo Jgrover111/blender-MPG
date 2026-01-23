@@ -354,8 +354,11 @@ ccl_device
   Ray ray ccl_optional_struct_init;
   BsdfEval bsdf_eval ccl_optional_struct_init;
 
-  int mnee_vertex_count = 0;  // NOLINT
+  int caustic_vertex_count = 0;  // NOLINT (tracks MNEE or SMS vertex count)
 #ifdef __CAUSTICS__
+  /* Try caustics rendering (MNEE or SMS) based on caustics mode.
+   * MNEE handles shadow caustics (CAUSTICS_SHADOW).
+   * SMS handles full caustic paths (CAUSTICS_FULL). */
   IF_KERNEL_FEATURE(MNEE)
   {
     if (ls.type != LIGHT_TRIANGLE) {
@@ -367,15 +370,32 @@ ccl_device
           return;
         }
 
-        /* Are we on a caustic receiver? */
+        /* Are we on a caustic receiver? Both MNEE and SMS require explicit receiver flag */
         if (!is_transmission && (sd->object_flag & SD_OBJECT_CAUSTICS_RECEIVER)) {
-          mnee_vertex_count = kernel_path_mnee_sample(
-              kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+          /* Choose caustic algorithm based on mode:
+           * CAUSTICS_SHADOW: MNEE only (shadow caustics through perfect specular)
+           * CAUSTICS_FULL: SMS only (full caustic paths including glossy) */
+          if (kernel_data.integrator.caustics_mode == CAUSTICS_SHADOW) {
+            /* MNEE for shadow caustics */
+            caustic_vertex_count = kernel_path_mnee_sample(
+                kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+          }
+          else if (kernel_data.integrator.caustics_mode == CAUSTICS_FULL) {
+            /* SMS for full caustic paths (try SMS first, fallback to MNEE if it fails) */
+            caustic_vertex_count = kernel_path_sms_sample(
+                kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+
+            /* Fallback to MNEE if SMS failed */
+            if (caustic_vertex_count == 0) {
+              caustic_vertex_count = kernel_path_mnee_sample(
+                  kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+            }
+          }
         }
       }
     }
   }
-  if (mnee_vertex_count > 0) {
+  if (caustic_vertex_count > 0) {
     /* Create shadow ray after successful manifold walk:
      * emission_sd contains the last interface intersection and
      * the light sample ls has been updated */
@@ -410,7 +430,7 @@ ccl_device
 
   /* Branch off shadow kernel. */
   IntegratorShadowState shadow_state = integrate_direct_light_shadow_init_common(
-      kg, state, &ray, bsdf_eval_sum(&bsdf_eval), ls.group, mnee_vertex_count);
+      kg, state, &ray, bsdf_eval_sum(&bsdf_eval), ls.group, caustic_vertex_count);
 
   if (is_transmission) {
 #ifdef __VOLUME__
