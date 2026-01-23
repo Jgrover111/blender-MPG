@@ -280,7 +280,7 @@ void PathTraceWorkGPU::alloc_integrator_sorting()
       }
     }
 
-    if (device_scene_->data.kernel_features & KERNEL_FEATURE_MNEE) {
+    if (device_scene_->data.kernel_features & KERNEL_FEATURE_CAUSTICS) {
       if (integrator_shader_mnee_sort_counter_.size() < sort_buckets) {
         integrator_shader_mnee_sort_counter_.alloc(sort_buckets);
         integrator_shader_mnee_sort_counter_.zero_to_device();
@@ -431,7 +431,7 @@ void PathTraceWorkGPU::enqueue_reset()
   {
     queue_->zero_to_device(integrator_shader_raytrace_sort_counter_);
   }
-  if (device_scene_->data.kernel_features & KERNEL_FEATURE_MNEE &&
+  if (device_scene_->data.kernel_features & KERNEL_FEATURE_CAUSTICS &&
       integrator_shader_mnee_sort_counter_.size() != 0)
   {
     queue_->zero_to_device(integrator_shader_mnee_sort_counter_);

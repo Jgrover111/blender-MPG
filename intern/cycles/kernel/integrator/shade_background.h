@@ -81,8 +81,8 @@ ccl_device_inline void integrate_background(KernelGlobals kg,
 #endif
   }
 
-#ifdef __MNEE__
-  if (INTEGRATOR_STATE(state, path, mnee) & PATH_MNEE_CULL_LIGHT_CONNECTION) {
+#ifdef __CAUSTICS__
+  if (INTEGRATOR_STATE(state, path, caustics) & PATH_MNEE_CULL_LIGHT_CONNECTION) {
     if (kernel_data.background.use_mis) {
       for (int lamp = 0; lamp < kernel_data.integrator.num_lights; lamp++) {
         /* This path should have been resolved with mnee, it will
@@ -95,7 +95,7 @@ ccl_device_inline void integrate_background(KernelGlobals kg,
       }
     }
   }
-#endif /* __MNEE__ */
+#endif /* __CAUSTICS__ */
 
   /* Evaluate background shader. */
   Spectrum L = zero_spectrum();
@@ -154,15 +154,15 @@ ccl_device_inline void integrate_distant_lights(KernelGlobals kg,
       }
 #endif
 
-#ifdef __MNEE__
-      if (INTEGRATOR_STATE(state, path, mnee) & PATH_MNEE_CULL_LIGHT_CONNECTION) {
+#ifdef __CAUSTICS__
+      if (INTEGRATOR_STATE(state, path, caustics) & PATH_MNEE_CULL_LIGHT_CONNECTION) {
         /* This path should have been resolved with mnee, it will
          * generate a firefly for small lights since it is improbable. */
         if (klight->use_caustics) {
           continue;
         }
       }
-#endif /* __MNEE__ */
+#endif /* __CAUSTICS__ */
 
       /* Evaluate light shader. */
       /* TODO: does aliasing like this break automatic SoA in CUDA? */

@@ -76,8 +76,14 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
     INTEGRATOR_STATE_WRITE(state, guiding, volume_guiding_sampling_prob) = 0.0f;
   }
 #endif
-#ifdef __MNEE__
-  INTEGRATOR_STATE_WRITE(state, path, mnee) = 0;
+#ifdef __CAUSTICS__
+  INTEGRATOR_STATE_WRITE(state, path, caustics) = PATH_CAUSTICS_NONE;
+  /* Initialize SMS (Specular Manifold Sampling) state. */
+  INTEGRATOR_STATE_WRITE(state, sms, vertex_count) = 0;
+  INTEGRATOR_STATE_WRITE(state, sms, num_closures) = 0;
+  INTEGRATOR_STATE_WRITE(state, sms, diffuse_vertex_index) = 0;
+  INTEGRATOR_STATE_WRITE(state, sms, max_iterations) = 64;  /* Default max iterations */
+  INTEGRATOR_STATE_WRITE(state, sms, chain_throughput) = zero_spectrum();
 #endif
 
   INTEGRATOR_STATE_WRITE(state, isect, object) = OBJECT_NONE;

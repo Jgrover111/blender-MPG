@@ -149,7 +149,7 @@ bool OneapiDevice::can_use_hardware_raytracing_for_features(const uint requested
   /* MNEE and Ray-trace kernels work correctly with Hardware Ray-tracing starting with Embree 4.1.
    */
 #  if defined(RTC_VERSION) && RTC_VERSION < 40100
-  return !(requested_features & (KERNEL_FEATURE_MNEE | KERNEL_FEATURE_NODE_RAYTRACE));
+  return !(requested_features & (KERNEL_FEATURE_CAUSTICS | KERNEL_FEATURE_NODE_RAYTRACE));
 #  else
   (void)requested_features;
   return true;
@@ -273,7 +273,7 @@ void OneapiDevice::reserve_private_memory(const uint kernel_features)
   /* Use the biggest kernel for estimation. */
   const DeviceKernel test_kernel = (kernel_features & KERNEL_FEATURE_NODE_RAYTRACE) ?
                                        DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE :
-                                   (kernel_features & KERNEL_FEATURE_MNEE) ?
+                                   (kernel_features & KERNEL_FEATURE_CAUSTICS) ?
                                        DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_MNEE :
                                        DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE;
 

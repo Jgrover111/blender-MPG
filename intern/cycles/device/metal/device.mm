@@ -80,9 +80,9 @@ void device_metal_info(vector<DeviceInfo> &devices)
 
     /* MNEE caused "Compute function exceeds available temporary registers" in macOS < 13 due to a
      * bug in spill buffer allocation sizing. */
-    info.has_mnee = false;
+    info.has_caustics = false;
     if (@available(macos 13.0, *)) {
-      info.has_mnee = true;
+      info.has_caustics = true;
     }
 
     info.use_hardware_raytracing = false;

@@ -115,8 +115,8 @@ CCL_NAMESPACE_BEGIN
 #define KERNEL_FEATURE_AO_ADDITIVE (1U << 23U)
 #define KERNEL_FEATURE_AO (KERNEL_FEATURE_AO_PASS | KERNEL_FEATURE_AO_ADDITIVE)
 
-/* MNEE. */
-#define KERNEL_FEATURE_MNEE (1U << 24U)
+/* Caustics (MNEE and SMS). */
+#define KERNEL_FEATURE_CAUSTICS (1U << 24U)
 
 /* Path guiding. */
 #define KERNEL_FEATURE_PATH_GUIDING (1U << 25U)
@@ -175,7 +175,7 @@ CCL_NAMESPACE_BEGIN
 #define __SHADOW_LINKING__
 #define __LIGHT_TREE__
 #define __OBJECT_MOTION__
-#define __MNEE__
+#define __CAUSTICS__
 #define __PASSES__
 #define __POINTCLOUD__
 #define __PRINCIPLED_HAIR__
@@ -207,7 +207,7 @@ CCL_NAMESPACE_BEGIN
 /* MNEE caused "Compute function exceeds available temporary registers" in macOS < 13 due to a bug
  * in spill buffer allocation sizing. */
 #if defined(__KERNEL_METAL__) && (__KERNEL_METAL_MACOS__ < 13)
-#  undef __MNEE__
+#  undef __CAUSTICS__
 #endif
 
 /* Scene-based selective features compilation. */
@@ -240,8 +240,8 @@ CCL_NAMESPACE_BEGIN
 #  if !(__KERNEL_FEATURES__ & KERNEL_FEATURE_AO)
 #    undef __AO__
 #  endif
-#  if !(__KERNEL_FEATURES__ & KERNEL_FEATURE_MNEE)
-#    undef __MNEE__
+#  if !(__KERNEL_FEATURES__ & KERNEL_FEATURE_CAUSTICS)
+#    undef __CAUSTICS__
 #  endif
 #  if !(__KERNEL_FEATURES__ & KERNEL_FEATURE_PATH_GUIDING)
 #    undef __PATH_GUIDING__
@@ -446,13 +446,20 @@ enum PathRayFlag : uint32_t {
   PATH_RAY_VOLUME_PRIMARY_TRANSMIT = (1U << 23U),
 };
 
-// 8bit enum, just in case we need to move more variables in it
-enum PathRayMNEE {
-  PATH_MNEE_NONE = 0,
+/* Caustics path state flags for both MNEE and SMS algorithms.
+ * 8bit enum, just in case we need to move more variables in it. */
+enum PathRayCaustics {
+  PATH_CAUSTICS_NONE = 0,
 
+  /* MNEE (Manifold Next Event Estimation) flags for shadow caustics. */
   PATH_MNEE_VALID = (1U << 0U),
   PATH_MNEE_RECEIVER_ANCESTOR = (1U << 1U),
   PATH_MNEE_CULL_LIGHT_CONNECTION = (1U << 2U),
+
+  /* SMS (Specular Manifold Sampling) flags for full caustic paths. */
+  PATH_SMS_SPECULAR_CHAIN = (1U << 3U),  /* Building a specular chain for SMS. */
+  PATH_SMS_VALID = (1U << 4U),           /* SMS manifold walk succeeded. */
+  PATH_SMS_DEFER = (1U << 5U),           /* Defer SMS until complete chain. */
 };
 
 /* Caustics Mode */

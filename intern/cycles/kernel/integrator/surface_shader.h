@@ -186,8 +186,8 @@ ccl_device_inline void surface_shader_prepare_closures(KernelGlobals kg,
    * Blurring of bsdf after bounces, for rays that have a small likelihood
    * of following this particular path (diffuse, rough glossy) */
   if (kernel_data.integrator.filter_glossy != FLT_MAX
-#ifdef __MNEE__
-      && !(INTEGRATOR_STATE(state, path, mnee) & PATH_MNEE_VALID)
+#ifdef __CAUSTICS__
+      && !(INTEGRATOR_STATE(state, path, caustics) & PATH_MNEE_VALID)
 #endif
   )
   {

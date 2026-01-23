@@ -311,7 +311,7 @@ bool HIPRTDevice::load_kernels(const uint kernel_features)
     {
       const DeviceKernel test_kernel = (kernel_features & KERNEL_FEATURE_NODE_RAYTRACE) ?
                                            DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE :
-                                       (kernel_features & KERNEL_FEATURE_MNEE) ?
+                                       (kernel_features & KERNEL_FEATURE_CAUSTICS) ?
                                            DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_MNEE :
                                            DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE;
 

@@ -195,6 +195,8 @@ KERNEL_STRUCT_MEMBER(integrator, float, sample_clamp_direct)
 KERNEL_STRUCT_MEMBER(integrator, float, sample_clamp_indirect)
 /* Caustics. */
 KERNEL_STRUCT_MEMBER(integrator, int, use_caustics)
+/* Caustics mode: 0=off, 1=shadow (MNEE), 2=full (SMS). */
+KERNEL_STRUCT_MEMBER(integrator, int, caustics_mode)
 /* Sampling pattern. */
 KERNEL_STRUCT_MEMBER(integrator, int, sampling_pattern)
 KERNEL_STRUCT_MEMBER(integrator, float, scrambling_distance)

@@ -1062,7 +1062,7 @@ ccl_device_forceinline int kernel_path_mnee_sample(KernelGlobals kg,
   };
 
   /* Mark the manifold walk invalid to keep mollification on by default. */
-  INTEGRATOR_STATE_WRITE(state, path, mnee) &= ~PATH_MNEE_VALID;
+  INTEGRATOR_STATE_WRITE(state, path, caustics) &= ~PATH_MNEE_VALID;
 
   if (vertex_count == 0) {
     return 0;
@@ -1092,7 +1092,7 @@ ccl_device_forceinline int kernel_path_mnee_sample(KernelGlobals kg,
    * is: this is noticeable when another mnee is performed deeper in the path, for an internally
    * reflected ray for example. If mollification was active for the reflection, a clear
    * discontinuity is visible between direct and indirect contributions */
-  INTEGRATOR_STATE_WRITE(state, path, mnee) |= PATH_MNEE_VALID;
+  INTEGRATOR_STATE_WRITE(state, path, caustics) |= PATH_MNEE_VALID;
 
   /* Distant or environment light. */
   bool light_fixed_direction = (ls->t == FLT_MAX);

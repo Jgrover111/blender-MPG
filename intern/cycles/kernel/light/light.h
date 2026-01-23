@@ -263,7 +263,7 @@ ccl_device_forceinline int lights_intersect_impl(KernelGlobals kg,
                                                  const int last_object,
                                                  const int last_type,
                                                  const uint32_t path_flag,
-                                                 const uint8_t path_mnee,
+                                                 const uint8_t path_caustics,
                                                  const int receiver_forward,
                                                  ccl_private uint *lcg_state,
                                                  int num_hits)
@@ -286,10 +286,10 @@ ccl_device_forceinline int lights_intersect_impl(KernelGlobals kg,
         continue;
       }
 
-#ifdef __MNEE__
+#ifdef __CAUSTICS__
       /* This path should have been resolved with mnee, it will
        * generate a firefly for small lights since it is improbable. */
-      if ((path_mnee & PATH_MNEE_CULL_LIGHT_CONNECTION) && klight->use_caustics) {
+      if ((path_caustics & PATH_MNEE_CULL_LIGHT_CONNECTION) && klight->use_caustics) {
         continue;
       }
 #endif
@@ -405,7 +405,11 @@ ccl_device bool lights_intersect(KernelGlobals kg,
                                  const int last_type,
                                  const uint32_t path_flag)
 {
-  const uint8_t path_mnee = INTEGRATOR_STATE(state, path, mnee);
+#ifdef __CAUSTICS__
+  const uint8_t path_caustics = INTEGRATOR_STATE(state, path, caustics);
+#else
+  const uint8_t path_caustics = PATH_CAUSTICS_NONE;
+#endif
   const int receiver_forward = light_link_receiver_forward(kg, state);
 
   lights_intersect_impl<true>(kg,
@@ -415,7 +419,7 @@ ccl_device bool lights_intersect(KernelGlobals kg,
                               last_object,
                               last_type,
                               path_flag,
-                              path_mnee,
+                              path_caustics,
                               receiver_forward,
                               nullptr,
                               0);
@@ -446,7 +450,7 @@ ccl_device int lights_intersect_shadow_linked(KernelGlobals kg,
                                       last_object,
                                       last_type,
                                       path_flag,
-                                      PATH_MNEE_NONE,
+                                      PATH_CAUSTICS_NONE,
                                       receiver_forward,
                                       lcg_state,
                                       num_hits);

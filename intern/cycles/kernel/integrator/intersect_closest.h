@@ -390,7 +390,7 @@ ccl_device void integrator_intersect_closest(KernelGlobals kg,
   /* Setup mnee flag to signal last intersection with a caster */
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
 
-#ifdef __MNEE__
+#ifdef __CAUSTICS__
   /* Path culling logic for MNEE (removes fireflies at the cost of bias) */
   if (kernel_data.integrator.use_caustics) {
     /* The following firefly removal mechanism works by culling light connections when
@@ -404,17 +404,32 @@ ccl_device void integrator_intersect_closest(KernelGlobals kg,
       from_caustic_caster = (object_flags & SD_OBJECT_CAUSTICS_CASTER);
     }
 
-    const bool has_receiver_ancestor = INTEGRATOR_STATE(state, path, mnee) &
+    const bool has_receiver_ancestor = INTEGRATOR_STATE(state, path, caustics) &
                                        PATH_MNEE_RECEIVER_ANCESTOR;
-    INTEGRATOR_STATE_WRITE(state, path, mnee) &= ~PATH_MNEE_CULL_LIGHT_CONNECTION;
+    INTEGRATOR_STATE_WRITE(state, path, caustics) &= ~PATH_MNEE_CULL_LIGHT_CONNECTION;
     if (from_caustic_caster && has_receiver_ancestor) {
-      INTEGRATOR_STATE_WRITE(state, path, mnee) |= PATH_MNEE_CULL_LIGHT_CONNECTION;
+      INTEGRATOR_STATE_WRITE(state, path, caustics) |= PATH_MNEE_CULL_LIGHT_CONNECTION;
     }
     if (from_caustic_receiver) {
-      INTEGRATOR_STATE_WRITE(state, path, mnee) |= PATH_MNEE_RECEIVER_ANCESTOR;
+      INTEGRATOR_STATE_WRITE(state, path, caustics) |= PATH_MNEE_RECEIVER_ANCESTOR;
     }
   }
-#endif /* __MNEE__ */
+
+  /* SMS (Specular Manifold Sampling) specular chain tracking. */
+  if (kernel_data.integrator.use_caustics) {
+    const uint8_t caustics_state = INTEGRATOR_STATE(state, path, caustics);
+
+    /* Check if we're building a specular chain for SMS. */
+    if (caustics_state & PATH_SMS_SPECULAR_CHAIN) {
+      /* Increment vertex count for SMS manifold tracking.
+       * This will be used to determine when we have a complete S-D-S chain. */
+      const uint8_t vertex_count = INTEGRATOR_STATE(state, sms, vertex_count);
+      if (vertex_count < 255) {  /* Prevent overflow */
+        INTEGRATOR_STATE_WRITE(state, sms, vertex_count) = vertex_count + 1;
+      }
+    }
+  }
+#endif /* __CAUSTICS__ */
 
   /* Light intersection for MIS. */
   if (kernel_data.integrator.use_light_mis && !integrator_intersect_skip_lights(kg, state)) {

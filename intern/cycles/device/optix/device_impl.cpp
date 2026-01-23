@@ -240,7 +240,7 @@ bool OptiXDevice::load_kernels(const uint kernel_features)
    * before compiling the CUDA kernels, to avoid failing right after when
    * compiling the OptiX kernel. */
   string suffix = use_osl_shading ? "_osl" :
-                  (kernel_features & (KERNEL_FEATURE_NODE_RAYTRACE | KERNEL_FEATURE_MNEE)) ?
+                  (kernel_features & (KERNEL_FEATURE_NODE_RAYTRACE | KERNEL_FEATURE_CAUSTICS)) ?
                                     "_shader_raytrace" :
                                     "";
   string ptx_filename;
@@ -549,7 +549,7 @@ bool OptiXDevice::load_kernels(const uint kernel_features)
     }
   }
 
-  if (kernel_features & KERNEL_FEATURE_MNEE) {
+  if (kernel_features & KERNEL_FEATURE_CAUSTICS) {
     group_descs[PG_RGEN_SHADE_SURFACE_MNEE].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
     group_descs[PG_RGEN_SHADE_SURFACE_MNEE].raygen.module = optix_module;
     group_descs[PG_RGEN_SHADE_SURFACE_MNEE].raygen.entryFunctionName =
@@ -679,7 +679,7 @@ bool OptiXDevice::load_kernels(const uint kernel_features)
   if (use_osl_shading || use_osl_camera) {
     /* OSL kernels will be (re)created on by OSL manager. */
   }
-  else if (kernel_features & (KERNEL_FEATURE_NODE_RAYTRACE | KERNEL_FEATURE_MNEE)) {
+  else if (kernel_features & (KERNEL_FEATURE_NODE_RAYTRACE | KERNEL_FEATURE_CAUSTICS)) {
     /* Create shader ray-tracing and MNEE pipeline. */
     vector<OptixProgramGroup> pipeline_groups;
     pipeline_groups.reserve(NUM_PROGRAM_GROUPS);
@@ -688,7 +688,7 @@ bool OptiXDevice::load_kernels(const uint kernel_features)
       pipeline_groups.push_back(groups[PG_CALL_SVM_AO]);
       pipeline_groups.push_back(groups[PG_CALL_SVM_BEVEL]);
     }
-    if (kernel_features & KERNEL_FEATURE_MNEE) {
+    if (kernel_features & KERNEL_FEATURE_CAUSTICS) {
       pipeline_groups.push_back(groups[PG_RGEN_SHADE_SURFACE_MNEE]);
     }
     pipeline_groups.push_back(groups[PG_MISS]);

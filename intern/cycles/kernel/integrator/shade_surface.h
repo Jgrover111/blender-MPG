@@ -250,7 +250,7 @@ integrate_direct_light_shadow_init_common(KernelGlobals kg,
         state, path, portal_bounce);
   }
 
-#ifdef __MNEE__
+#ifdef __CAUSTICS__
   if (mnee_vertex_count > 0) {
     INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, transmission_bounce) =
         INTEGRATOR_STATE(state, path, transmission_bounce) + mnee_vertex_count - 1;
@@ -354,7 +354,7 @@ ccl_device
   BsdfEval bsdf_eval ccl_optional_struct_init;
 
   int mnee_vertex_count = 0;  // NOLINT
-#ifdef __MNEE__
+#ifdef __CAUSTICS__
   IF_KERNEL_FEATURE(MNEE)
   {
     if (ls.type != LIGHT_TRIANGLE) {
@@ -381,7 +381,7 @@ ccl_device
     light_sample_to_surface_shadow_ray(kg, emission_sd, &ls, &ray);
   }
   else
-#endif /* __MNEE__ */
+#endif /* __CAUSTICS__ */
   {
     const Spectrum light_eval = light_sample_shader_eval(kg, state, emission_sd, &ls, sd->time);
     if (is_zero(light_eval)) {
@@ -875,9 +875,9 @@ ccl_device_forceinline void integrator_shade_surface_raytrace(
 ccl_device_forceinline void integrator_shade_surface_mnee(
     KernelGlobals kg, IntegratorState state, ccl_global float *ccl_restrict render_buffer)
 {
-#ifdef __MNEE__
+#ifdef __CAUSTICS__
   integrator_shade_surface<(KERNEL_FEATURE_NODE_MASK_SURFACE & ~KERNEL_FEATURE_NODE_RAYTRACE) |
-                               KERNEL_FEATURE_MNEE,
+                               KERNEL_FEATURE_CAUSTICS,
                            DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_MNEE>(kg, state, render_buffer);
 #endif
 }

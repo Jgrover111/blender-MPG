@@ -165,7 +165,7 @@ bool oneapi_kernel_is_required_for_features(const std::string &kernel_name,
     return false;
   }
 
-  if ((kernel_features & KERNEL_FEATURE_MNEE) == 0 &&
+  if ((kernel_features & KERNEL_FEATURE_CAUSTICS) == 0 &&
       kernel_name.find(device_kernel_as_string(DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_MNEE)) !=
           std::string::npos)
   {

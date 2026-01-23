@@ -536,13 +536,19 @@ void Scene::update_kernel_features()
   bool has_caustics_receiver = false;
   bool has_caustics_caster = false;
   bool has_caustics_light = false;
+  int max_caustics_mode = CAUSTICS_OFF;
 
   for (Object *object : objects) {
-    if (object->get_caustics_caster_mode() != CAUSTICS_OFF) {
+    const CausticsMode caster_mode = object->get_caustics_caster_mode();
+    const CausticsMode receiver_mode = object->get_caustics_receiver_mode();
+
+    if (caster_mode != CAUSTICS_OFF) {
       has_caustics_caster = true;
+      max_caustics_mode = max(max_caustics_mode, static_cast<int>(caster_mode));
     }
-    else if (object->get_caustics_receiver_mode() != CAUSTICS_OFF) {
+    if (receiver_mode != CAUSTICS_OFF) {
       has_caustics_receiver = true;
+      max_caustics_mode = max(max_caustics_mode, static_cast<int>(receiver_mode));
     }
     Geometry *geom = object->get_geometry();
     if (use_motion) {
@@ -570,8 +576,10 @@ void Scene::update_kernel_features()
     }
     else if (geom->is_light()) {
       const Light *light = static_cast<const Light *>(object->get_geometry());
-      if (light->get_caustics_mode() != CAUSTICS_OFF) {
+      const CausticsMode light_mode = light->get_caustics_mode();
+      if (light_mode != CAUSTICS_OFF) {
         has_caustics_light = true;
+        max_caustics_mode = max(max_caustics_mode, static_cast<int>(light_mode));
       }
     }
     if (object->has_light_linking()) {
@@ -583,10 +591,12 @@ void Scene::update_kernel_features()
   }
 
   dscene.data.integrator.use_caustics = false;
-  if (device->info.has_mnee && has_caustics_caster && has_caustics_receiver && has_caustics_light)
+  dscene.data.integrator.caustics_mode = CAUSTICS_OFF;
+  if (device->info.has_caustics && has_caustics_caster && has_caustics_receiver && has_caustics_light)
   {
     dscene.data.integrator.use_caustics = true;
-    kernel_features |= KERNEL_FEATURE_MNEE;
+    dscene.data.integrator.caustics_mode = max_caustics_mode;
+    kernel_features |= KERNEL_FEATURE_CAUSTICS;
   }
 
   if (integrator->get_guiding_params(device).use) {
@@ -655,7 +665,7 @@ static void log_kernel_features(const uint features)
   LOG_INFO << "Use Bump " << string_from_bool(features & KERNEL_FEATURE_NODE_BUMP);
   LOG_INFO << "Use Voronoi " << string_from_bool(features & KERNEL_FEATURE_NODE_VORONOI_EXTRA);
   LOG_INFO << "Use Shader Raytrace " << string_from_bool(features & KERNEL_FEATURE_NODE_RAYTRACE);
-  LOG_INFO << "Use MNEE " << string_from_bool(features & KERNEL_FEATURE_MNEE);
+  LOG_INFO << "Use MNEE " << string_from_bool(features & KERNEL_FEATURE_CAUSTICS);
   LOG_INFO << "Use Transparent " << string_from_bool(features & KERNEL_FEATURE_TRANSPARENT);
   LOG_INFO << "Use Denoising " << string_from_bool(features & KERNEL_FEATURE_DENOISING);
   LOG_INFO << "Use Path Tracing " << string_from_bool(features & KERNEL_FEATURE_PATH_TRACING);

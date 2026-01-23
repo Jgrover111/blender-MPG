@@ -263,7 +263,7 @@ bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
   }
 
   if (device_kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_MNEE) {
-    if ((device->kernel_features & KERNEL_FEATURE_MNEE) == 0) {
+    if ((device->kernel_features & KERNEL_FEATURE_CAUSTICS) == 0) {
       /* Skip shade_surface_mnee kernel if the scene doesn't require it. */
       return false;
     }

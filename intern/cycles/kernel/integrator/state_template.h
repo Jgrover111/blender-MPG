@@ -37,8 +37,8 @@ KERNEL_STRUCT_MEMBER(path, uint32_t, rng_pixel, KERNEL_FEATURE_PATH_TRACING)
 KERNEL_STRUCT_MEMBER(path, uint16_t, rng_offset, KERNEL_FEATURE_PATH_TRACING)
 /* enum PathRayFlag */
 KERNEL_STRUCT_MEMBER(path, uint32_t, flag, KERNEL_FEATURE_PATH_TRACING)
-/* enum PathRayMNEE */
-KERNEL_STRUCT_MEMBER(path, uint8_t, mnee, KERNEL_FEATURE_PATH_TRACING)
+/* enum PathRayCaustics - state flags for both MNEE and SMS caustics algorithms */
+KERNEL_STRUCT_MEMBER(path, uint8_t, caustics, KERNEL_FEATURE_PATH_TRACING)
 /* Majorant volume optical depth. */
 KERNEL_STRUCT_MEMBER(path, float, optical_depth, KERNEL_FEATURE_PATH_TRACING)
 /* Multiple importance sampling
@@ -150,3 +150,18 @@ KERNEL_STRUCT_MEMBER(shadow_link, float, dedicated_light_weight, KERNEL_FEATURE_
 KERNEL_STRUCT_MEMBER(shadow_link, int, last_isect_prim, KERNEL_FEATURE_SHADOW_LINKING)
 KERNEL_STRUCT_MEMBER(shadow_link, int, last_isect_object, KERNEL_FEATURE_SHADOW_LINKING)
 KERNEL_STRUCT_END(shadow_link)
+
+/*********************** Specular Manifold Sampling (SMS) *********************/
+
+KERNEL_STRUCT_BEGIN(sms)
+/* Number of specular vertices in the current manifold chain. */
+KERNEL_STRUCT_MEMBER(sms, uint8_t, vertex_count, KERNEL_FEATURE_CAUSTICS)
+/* Number of closures stored for the current specular vertex. */
+KERNEL_STRUCT_MEMBER(sms, uint8_t, num_closures, KERNEL_FEATURE_CAUSTICS)
+/* Index of the current diffuse vertex in the chain (where SMS will solve from). */
+KERNEL_STRUCT_MEMBER(sms, uint8_t, diffuse_vertex_index, KERNEL_FEATURE_CAUSTICS)
+/* Maximum number of Newton iterations for this path. */
+KERNEL_STRUCT_MEMBER(sms, uint8_t, max_iterations, KERNEL_FEATURE_CAUSTICS)
+/* Accumulated path throughput before SMS is applied. */
+KERNEL_STRUCT_MEMBER(sms, PackedSpectrum, chain_throughput, KERNEL_FEATURE_CAUSTICS)
+KERNEL_STRUCT_END(sms)
