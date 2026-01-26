@@ -50,9 +50,12 @@ KERNEL_STRUCT_MEMBER(shadow_path, uint16_t, num_hits, KERNEL_FEATURE_PATH_TRACIN
 KERNEL_STRUCT_MEMBER(shadow_path, uint8_t, lightgroup, KERNEL_FEATURE_PATH_TRACING)
 /* ============================================================================
  * DEBUG CODE - TEMPORARY - REMOVE BEFORE PRODUCTION
- * Tracks which caustic algorithm was used: 0=NEE, 1=SMS, 2=MNEE
+ * Tracks caustic algorithm result (positive = success, negative = SMS error code):
+ * 0 = no caustics, 1 = SMS success, 2 = MNEE
+ * -1 = SMS mode check failed, -2 = no vertices, -3 = Newton failed
+ * -4 = path contribution failed, -5 = probability estimation failed
  * ============================================================================ */
-KERNEL_STRUCT_MEMBER(shadow_path, uint8_t, caustic_debug_mode, KERNEL_FEATURE_PATH_TRACING)
+KERNEL_STRUCT_MEMBER(shadow_path, int8_t, caustic_debug_mode, KERNEL_FEATURE_PATH_TRACING)
 /* ============================================================================ */
 /* Path guiding. */
 KERNEL_STRUCT_MEMBER(shadow_path, PackedSpectrum, unlit_throughput, KERNEL_FEATURE_PATH_GUIDING)

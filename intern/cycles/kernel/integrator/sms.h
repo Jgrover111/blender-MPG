@@ -131,9 +131,20 @@ ccl_device_forceinline int kernel_path_sms_sample(
     ccl_private LightSample *ls,
     ccl_private BsdfEval *throughput)
 {
+  /* ============================================================================
+   * DEBUG CODE - TEMPORARY - REMOVE BEFORE PRODUCTION
+   * Return negative values to encode failure reasons:
+   * >= 1 = success (vertex count)
+   * -1 = caustics mode not FULL
+   * -2 = no vertices found during seed ray discovery
+   * -3 = Newton solver failed to converge
+   * -4 = path contribution failed
+   * -5 = probability estimation failed
+   * ============================================================================ */
+
   /* Check if SMS is enabled globally */
   if (kernel_data.integrator.caustics_mode != CAUSTICS_FULL) {
-    return 0;  /* SMS not enabled, use standard path tracing */
+    return -1;  /* SMS not enabled - DEBUG: mode check failed */
   }
 
   /* Step 1: Discover caustic caster chain by tracing seed ray from receiver to light */
@@ -221,7 +232,7 @@ ccl_device_forceinline int kernel_path_sms_sample(
 
     /* Validate this is a triangle primitive */
     if (!(probe_isect.type & PRIMITIVE_TRIANGLE)) {
-      return 0;  /* SMS requires triangle geometry */
+      return -2;  /* DEBUG: Non-triangle geometry */
     }
 
     /* Setup shader data for this intersection */
@@ -229,7 +240,7 @@ ccl_device_forceinline int kernel_path_sms_sample(
 
     /* Check for smooth normals (required for dn_du, dn_dv computation) */
     if (!(sd_sms->shader & SHADER_SMOOTH_NORMAL)) {
-      return 0;  /* Flat normals don't provide derivatives */
+      return -2;  /* DEBUG: Flat normals, no derivatives */
     }
 
     /* Evaluate shader to get BSDF
@@ -249,7 +260,7 @@ ccl_device_forceinline int kernel_path_sms_sample(
     }
 
     if (!specular_bsdf) {
-      return 0;  /* No specular BSDF found */
+      return -2;  /* DEBUG: No microfacet BSDF found at caster */
     }
 
     /* Store intersection data */
@@ -280,7 +291,7 @@ ccl_device_forceinline int kernel_path_sms_sample(
 
   /* Validate we found at least one caustic caster */
   if (vertex_count == 0) {
-    return 0;  /* No valid caustic chain found */
+    return -2;  /* DEBUG: No caustic casters found in seed ray trace */
   }
 
   /* Check bounce limits before attempting to solve */
@@ -291,15 +302,15 @@ ccl_device_forceinline int kernel_path_sms_sample(
   if ((transmission_bounce + vertex_count - 1) >=
       kernel_data.integrator.max_transmission_bounce)
   {
-    return 0;  /* Transmission depth limit exceeded */
+    return -2;  /* DEBUG: Transmission bounce limit */
   }
 
   if ((diffuse_bounce + 1) >= kernel_data.integrator.max_diffuse_bounce) {
-    return 0;  /* Diffuse depth limit exceeded */
+    return -2;  /* DEBUG: Diffuse bounce limit */
   }
 
   if ((total_bounce + vertex_count) >= kernel_data.integrator.max_bounce) {
-    return 0;  /* Total bounce limit exceeded */
+    return -2;  /* DEBUG: Total bounce limit */
   }
 
   /* Step 2: Stochastic initialization - sample random microfacet normal offsets
@@ -327,7 +338,7 @@ ccl_device_forceinline int kernel_path_sms_sample(
   if (!mnee_newton_solver(
           kg, sd, sd_sms, ls, light_fixed_direction, vertex_count, vertices_ref))
   {
-    return 0;  /* Manifold solver failed to converge */
+    return -3;  /* DEBUG: Manifold solver failed to converge */
   }
 
   /* Store reference solution for comparison */
@@ -387,7 +398,7 @@ ccl_device_forceinline int kernel_path_sms_sample(
     if (trial_count >= SMS_MAX_TRIALS &&
         !sms_solutions_match(vertex_count, vertices_ref, solution_ref))
     {
-      return 0;  /* Probability estimation failed */
+      return -5;  /* DEBUG: Probability estimation failed (Bernoulli trials) */
     }
   }
   /* For perfect specular, inv_probability stays 1.0 (deterministic) */
@@ -403,7 +414,7 @@ ccl_device_forceinline int kernel_path_sms_sample(
                               solution_ref,
                               throughput))
   {
-    return 0;  /* Path contribution calculation failed */
+    return -4;  /* DEBUG: Path contribution (mnee_path_contribution) failed */
   }
 
   /* Step 6: Weight contribution by inverse probability for unbiased estimator */

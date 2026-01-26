@@ -396,15 +396,29 @@ ccl_device
             caustic_vertex_count = kernel_path_sms_sample(
                 kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
 
-            /* DEBUG: Check if SMS succeeded */
+            /* DEBUG: Check if SMS succeeded or capture failure code */
             if (caustic_vertex_count > 0) {
               debug_caustic_mode = 1;  /* SMS success */
             }
-            else {
+            else if (caustic_vertex_count < 0) {
+              /* SMS failed - pass through negative error code for debugging
+               * -1 = mode check failed
+               * -2 = no vertices found
+               * -3 = Newton solver failed
+               * -4 = path contribution failed
+               * -5 = probability estimation failed */
+              debug_caustic_mode = caustic_vertex_count;  /* Negative value = SMS error code */
+
               /* Fallback to MNEE if SMS failed */
               caustic_vertex_count = kernel_path_mnee_sample(
                   kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
-              /* DEBUG: Mark as MNEE fallback */
+              /* If MNEE succeeds, still show SMS error code (keep negative debug_caustic_mode) */
+            }
+            else {
+              /* SMS returned 0 (shouldn't happen with new error codes) */
+              debug_caustic_mode = 0;
+              caustic_vertex_count = kernel_path_mnee_sample(
+                  kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
               if (caustic_vertex_count > 0) debug_caustic_mode = 2;
             }
           }

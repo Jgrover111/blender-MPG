@@ -183,11 +183,17 @@ ccl_device void integrator_shade_shadow(KernelGlobals kg,
 
   /* ============================================================================
    * DEBUG CODE - TEMPORARY - REMOVE BEFORE PRODUCTION
-   * Visualize which caustic algorithm was used:
-   * Green = SMS success, Red = MNEE fallback, Blue = standard NEE
+   * Visualize which caustic algorithm was used and SMS failure modes:
+   * Green = SMS success
+   * Red = MNEE (CAUSTICS_SHADOW mode)
+   * Cyan = SMS failed at mode check (-1)
+   * Blue = SMS failed: no vertices found (-2)
+   * Magenta = SMS failed: Newton solver (-3)
+   * Yellow = SMS failed: path contribution (-4)
+   * Orange = SMS failed: probability estimation (-5)
    * ============================================================================ */
-  const uint8_t debug_mode = INTEGRATOR_STATE(state, shadow_path, caustic_debug_mode);
-  if (debug_mode > 0) {
+  const int8_t debug_mode = (int8_t)INTEGRATOR_STATE(state, shadow_path, caustic_debug_mode);
+  if (debug_mode != 0) {
     const uint32_t render_pixel_index = INTEGRATOR_STATE(state, shadow_path, render_pixel_index);
     const uint64_t render_pixel_offset = (uint64_t)render_pixel_index *
                                          kernel_data.film.pass_stride;
@@ -203,10 +209,40 @@ ccl_device void integrator_shade_shadow(KernelGlobals kg,
         combined[2] = 0.0f;  /* B */
       }
       else if (debug_mode == 2) {
-        /* MNEE fallback - bright red */
+        /* MNEE (CAUSTICS_SHADOW mode) - bright red */
         combined[0] = 2.0f;  /* R */
         combined[1] = 0.0f;  /* G */
         combined[2] = 0.0f;  /* B */
+      }
+      else if (debug_mode == -1) {
+        /* SMS mode check failed - cyan */
+        combined[0] = 0.0f;   /* R */
+        combined[1] = 2.0f;   /* G */
+        combined[2] = 2.0f;   /* B */
+      }
+      else if (debug_mode == -2) {
+        /* SMS no vertices found - blue (most likely culprit) */
+        combined[0] = 0.0f;   /* R */
+        combined[1] = 0.0f;   /* G */
+        combined[2] = 2.0f;   /* B */
+      }
+      else if (debug_mode == -3) {
+        /* SMS Newton solver failed - magenta */
+        combined[0] = 2.0f;   /* R */
+        combined[1] = 0.0f;   /* G */
+        combined[2] = 2.0f;   /* B */
+      }
+      else if (debug_mode == -4) {
+        /* SMS path contribution failed - yellow */
+        combined[0] = 2.0f;   /* R */
+        combined[1] = 2.0f;   /* G */
+        combined[2] = 0.0f;   /* B */
+      }
+      else if (debug_mode == -5) {
+        /* SMS probability estimation failed - orange */
+        combined[0] = 2.0f;   /* R */
+        combined[1] = 1.0f;   /* G */
+        combined[2] = 0.0f;   /* B */
       }
     }
   }
