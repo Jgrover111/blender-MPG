@@ -160,7 +160,7 @@ ccl_device_forceinline int kernel_path_sms_sample(
   seed_ray.dD = differential_zero_compact();
 
   /* Direction and distance depend on light type */
-  const bool light_fixed_direction = (ls->t == FLT_MAX);
+  bool light_fixed_direction = (ls->t == FLT_MAX);
   if (light_fixed_direction) {
     /* Distant or environment light */
     seed_ray.D = ls->D;
@@ -169,6 +169,15 @@ ccl_device_forceinline int kernel_path_sms_sample(
   else {
     /* Point/spot/area light - compute direction and distance */
     seed_ray.D = normalize_len(ls->P - seed_ray.P, &seed_ray.tmax);
+  }
+
+  /* Check for area light with zero spread (also fixed direction) */
+  if (ls->type == LIGHT_AREA) {
+    const ccl_global KernelLight *klight = &kernel_data_fetch(lights, ls->prim);
+    if (klight->area.tan_half_spread == 0.0f) {
+      /* Area light with zero spread also has fixed direction */
+      light_fixed_direction = true;
+    }
   }
 
   /* Storage for discovered intersections and BSDFs */
