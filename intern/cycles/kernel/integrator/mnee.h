@@ -124,7 +124,8 @@ ccl_device_forceinline void mnee_setup_manifold_vertex(KernelGlobals kg,
                                                        const float2 n_offset,
                                                        const ccl_private Ray *ray,
                                                        const ccl_private Intersection *isect,
-                                                       ccl_private ShaderData *sd_vtx)
+                                                       ccl_private ShaderData *sd_vtx,
+                                                       const ccl_private RNGState *rng_state = nullptr)
 {
   sd_vtx->object = (isect->object == OBJECT_NONE) ? kernel_data_fetch(prim_object, isect->prim) :
                                                     isect->object;
@@ -414,7 +415,9 @@ ccl_device_forceinline bool mnee_newton_solver(KernelGlobals kg,
                                                const ccl_private LightSample *ls,
                                                const bool light_fixed_direction,
                                                const int vertex_count,
-                                               ccl_private ManifoldVertex *vertices)
+                                               ccl_private ManifoldVertex *vertices,
+                                               bool reflection = false,
+                                               int caustics_constraint_derivatives = 0)
 {
   float2 dx[MNEE_MAX_CAUSTIC_CASTERS];
   ManifoldVertex tentative[MNEE_MAX_CAUSTIC_CASTERS];

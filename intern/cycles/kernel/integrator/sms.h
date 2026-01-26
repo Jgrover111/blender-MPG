@@ -329,7 +329,8 @@ ccl_device_forceinline int kernel_path_sms_sample(
   const bool has_roughness = sms_sample_microfacet_offsets(
       kg, rng_state, vertex_count, compatible_bsdfs, h_offsets_ref);
 
-  /* Step 3: Setup and solve for reference manifold solution */
+  /* Step 3: Setup and solve for reference manifold solution
+   * Use the same seed_ray for all vertices (provides origin context, not propagation) */
   ManifoldVertex vertices_ref[MNEE_MAX_CAUSTIC_CASTERS];
 
   for (int v_idx = 0; v_idx < vertex_count; v_idx++) {
@@ -340,7 +341,8 @@ ccl_device_forceinline int kernel_path_sms_sample(
                                 h_offsets_ref[v_idx],
                                 &seed_ray,
                                 &isects[v_idx],
-                                sd_sms);
+                                sd_sms,
+                                rng_state);
   }
 
   /* Solve using MNEE's full block Newton solver */
@@ -369,7 +371,7 @@ ccl_device_forceinline int kernel_path_sms_sample(
     sms_sample_microfacet_offsets(
         kg, rng_state, vertex_count, compatible_bsdfs, h_offsets_trial);
 
-    /* Setup vertices with new offsets */
+    /* Setup vertices with new offsets - use same seed_ray for all vertices */
     ManifoldVertex vertices_trial[MNEE_MAX_CAUSTIC_CASTERS];
     for (int v_idx = 0; v_idx < vertex_count; v_idx++) {
       mnee_setup_manifold_vertex(kg,
@@ -379,7 +381,8 @@ ccl_device_forceinline int kernel_path_sms_sample(
                                   h_offsets_trial[v_idx],
                                   &seed_ray,
                                   &isects[v_idx],
-                                  sd_sms);
+                                  sd_sms,
+                                  rng_state);
     }
 
     /* Solve manifold with new initialization */
