@@ -180,6 +180,38 @@ ccl_device void integrator_shade_shadow(KernelGlobals kg,
 
   guiding_record_direct_light(kg, state);
   film_write_direct_light(kg, state, render_buffer);
+
+  /* ============================================================================
+   * DEBUG CODE - TEMPORARY - REMOVE BEFORE PRODUCTION
+   * Visualize which caustic algorithm was used:
+   * Green = SMS success, Red = MNEE fallback, Blue = standard NEE
+   * ============================================================================ */
+  const uint8_t debug_mode = INTEGRATOR_STATE(state, shadow_path, caustic_debug_mode);
+  if (debug_mode > 0) {
+    const uint32_t render_pixel_index = INTEGRATOR_STATE(state, shadow_path, render_pixel_index);
+    const uint64_t render_pixel_offset = (uint64_t)render_pixel_index *
+                                         kernel_data.film.pass_stride;
+    ccl_global float *buffer = render_buffer + render_pixel_offset;
+
+    /* Write debug color to combined pass */
+    if (kernel_data.film.pass_combined != PASS_UNUSED) {
+      ccl_global float *combined = buffer + kernel_data.film.pass_combined;
+      if (debug_mode == 1) {
+        /* SMS success - bright green */
+        combined[0] = 0.0f;  /* R */
+        combined[1] = 2.0f;  /* G */
+        combined[2] = 0.0f;  /* B */
+      }
+      else if (debug_mode == 2) {
+        /* MNEE fallback - bright red */
+        combined[0] = 2.0f;  /* R */
+        combined[1] = 0.0f;  /* G */
+        combined[2] = 0.0f;  /* B */
+      }
+    }
+  }
+  /* ============================================================================ */
+
   integrator_shadow_path_terminate(state, DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW);
 }
 

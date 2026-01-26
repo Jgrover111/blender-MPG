@@ -355,6 +355,15 @@ ccl_device
   BsdfEval bsdf_eval ccl_optional_struct_init;
 
   int caustic_vertex_count = 0;  // NOLINT (tracks MNEE or SMS vertex count)
+
+  /* ============================================================================
+   * DEBUG CODE - TEMPORARY - REMOVE BEFORE PRODUCTION
+   * This debug code visualizes SMS vs MNEE contribution for debugging.
+   * Colors: Green = SMS success, Red = MNEE fallback, Blue = standard NEE
+   * ============================================================================ */
+  int debug_caustic_mode = 0;  /* 0 = NEE, 1 = SMS, 2 = MNEE */
+  /* ============================================================================ */
+
 #ifdef __CAUSTICS__
   /* Try caustics rendering (MNEE or SMS) based on caustics mode.
    * MNEE handles shadow caustics (CAUSTICS_SHADOW).
@@ -379,16 +388,24 @@ ccl_device
             /* MNEE for shadow caustics */
             caustic_vertex_count = kernel_path_mnee_sample(
                 kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+            /* DEBUG: Mark as MNEE */
+            if (caustic_vertex_count > 0) debug_caustic_mode = 2;
           }
           else if (kernel_data.integrator.caustics_mode == CAUSTICS_FULL) {
             /* SMS for full caustic paths (try SMS first, fallback to MNEE if it fails) */
             caustic_vertex_count = kernel_path_sms_sample(
                 kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
 
-            /* Fallback to MNEE if SMS failed */
-            if (caustic_vertex_count == 0) {
+            /* DEBUG: Check if SMS succeeded */
+            if (caustic_vertex_count > 0) {
+              debug_caustic_mode = 1;  /* SMS success */
+            }
+            else {
+              /* Fallback to MNEE if SMS failed */
               caustic_vertex_count = kernel_path_mnee_sample(
                   kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+              /* DEBUG: Mark as MNEE fallback */
+              if (caustic_vertex_count > 0) debug_caustic_mode = 2;
             }
           }
         }
@@ -431,6 +448,13 @@ ccl_device
   /* Branch off shadow kernel. */
   IntegratorShadowState shadow_state = integrate_direct_light_shadow_init_common(
       kg, state, &ray, bsdf_eval_sum(&bsdf_eval), ls.group, caustic_vertex_count);
+
+  /* ============================================================================
+   * DEBUG CODE - TEMPORARY - REMOVE BEFORE PRODUCTION
+   * Add debug visualization to shadow state
+   * ============================================================================ */
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, caustic_debug_mode) = debug_caustic_mode;
+  /* ============================================================================ */
 
   if (is_transmission) {
 #ifdef __VOLUME__

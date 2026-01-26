@@ -48,6 +48,12 @@ KERNEL_STRUCT_MEMBER(shadow_path, PackedSpectrum, pass_glossy_weight, KERNEL_FEA
 KERNEL_STRUCT_MEMBER(shadow_path, uint16_t, num_hits, KERNEL_FEATURE_PATH_TRACING)
 /* Light group. */
 KERNEL_STRUCT_MEMBER(shadow_path, uint8_t, lightgroup, KERNEL_FEATURE_PATH_TRACING)
+/* ============================================================================
+ * DEBUG CODE - TEMPORARY - REMOVE BEFORE PRODUCTION
+ * Tracks which caustic algorithm was used: 0=NEE, 1=SMS, 2=MNEE
+ * ============================================================================ */
+KERNEL_STRUCT_MEMBER(shadow_path, uint8_t, caustic_debug_mode, KERNEL_FEATURE_PATH_TRACING)
+/* ============================================================================ */
 /* Path guiding. */
 KERNEL_STRUCT_MEMBER(shadow_path, PackedSpectrum, unlit_throughput, KERNEL_FEATURE_PATH_GUIDING)
 #if defined(__PATH_GUIDING__)
