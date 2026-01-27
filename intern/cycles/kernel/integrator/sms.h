@@ -347,7 +347,8 @@ ccl_device_forceinline int kernel_path_sms_sample(
 
   /* Solve using MNEE's full block Newton solver */
   if (!mnee_newton_solver(
-          kg, sd, sd_sms, ls, light_fixed_direction, vertex_count, vertices_ref))
+          kg, sd, sd_sms, ls, light_fixed_direction, vertex_count, vertices_ref, false,
+          CAUSTICS_CONSTRAINT_DERIVATIVES_HV))
   {
     return -3;  /* DEBUG: Manifold solver failed to converge */
   }
@@ -387,7 +388,8 @@ ccl_device_forceinline int kernel_path_sms_sample(
 
     /* Solve manifold with new initialization */
     if (!mnee_newton_solver(
-            kg, sd, sd_sms, ls, light_fixed_direction, vertex_count, vertices_trial))
+            kg, sd, sd_sms, ls, light_fixed_direction, vertex_count, vertices_trial, false,
+            CAUSTICS_CONSTRAINT_DERIVATIVES_HV))
     {
       /* Solver failed - count as non-matching trial */
       trial_count++;

@@ -51,6 +51,10 @@
 #define MNEE_MIN_PROGRESS_DISTANCE 0.0001f
 #define MNEE_MIN_DETERMINANT 0.0001f
 #define MNEE_PROJECTION_DISTANCE_MULTIPLIER 2.f
+
+/* Constraint derivative methods */
+#define CAUSTICS_CONSTRAINT_DERIVATIVES_HV 0  /* Half Vector Constraint */
+#define CAUSTICS_CONSTRAINT_DERIVATIVES_AD 1  /* Angle Difference Constraint */
 // NOLINTEND
 
 CCL_NAMESPACE_BEGIN
@@ -245,6 +249,148 @@ ccl_device_forceinline void mnee_setup_manifold_vertex(KernelGlobals kg,
   vtx->shader = sd_vtx->shader;
 }
 
+/* AD (Angle-Difference) helper functions for constraint derivatives */
+
+ccl_device_inline float3 ad_reflect(const float3 &w, const float3 &n)
+{
+  return 2.0f * dot(w, n) * n - w;
+}
+
+ccl_device_inline void ad_d_reflect(const float3 &w,
+                                    const float3 &dw_du,
+                                    const float3 &dw_dv,
+                                    const float3 &n,
+                                    const float3 &dn_du,
+                                    const float3 &dn_dv,
+                                    ccl_private float3 &dwr_du,
+                                    ccl_private float3 &dwr_dv)
+{
+  float dot_w_n = dot(w, n);
+  float dot_dwdu_n = dot(dw_du, n);
+  float dot_dwdv_n = dot(dw_dv, n);
+  float dot_w_dndu = dot(w, dn_du);
+  float dot_w_dndv = dot(w, dn_dv);
+
+  dwr_du = 2.0f * ((dot_dwdu_n + dot_w_dndu) * n + dot_w_n * dn_du) - dw_du;
+  dwr_dv = 2.0f * ((dot_dwdv_n + dot_w_dndv) * n + dot_w_n * dn_dv) - dw_dv;
+}
+
+ccl_device_inline int ad_refract(const float3 &w,
+                                 const float3 &n_surf,
+                                 float eta_param,
+                                 ccl_private float3 &wt)
+{
+  float3 n_local = n_surf;
+  float eta_calc = 1.0f / eta_param;
+
+  if (dot(w, n_local) < 0.0f) {
+    eta_calc = eta_param;
+    n_local *= -1.0f;
+  }
+
+  float dot_w_n = dot(w, n_local);
+  float root_term = 1.0f - eta_calc * eta_calc * (1.0f - dot_w_n * dot_w_n);
+
+  if (root_term < 0.0f) {
+    wt = make_float3(0.0f, 0.0f, 0.0f);
+    return false;
+  }
+
+  wt = -eta_calc * (w - dot_w_n * n_local) - n_local * sqrtf(root_term);
+  return true;
+}
+
+ccl_device_inline void ad_d_refract(const float3 &w,
+                                    const float3 &dw_du,
+                                    const float3 &dw_dv,
+                                    const float3 &n_surf_,
+                                    const float3 &dn_surf_du_,
+                                    const float3 &dn_surf_dv_,
+                                    float eta_param,
+                                    ccl_private float3 &dwt_du,
+                                    ccl_private float3 &dwt_dv)
+{
+  float3 n_local = n_surf_;
+  float3 dn_local_du = dn_surf_du_;
+  float3 dn_local_dv = dn_surf_dv_;
+  float eta_calc = 1.0f / eta_param;
+
+  if (dot(w, n_local) < 0.0f) {
+    eta_calc = eta_param;
+    n_local *= -1.0f;
+    dn_local_du *= -1.0f;
+    dn_local_dv *= -1.0f;
+  }
+
+  float dot_w_n = dot(w, n_local);
+  float dot_dwdu_n = dot(dw_du, n_local);
+  float dot_dwdv_n = dot(dw_dv, n_local);
+  float dot_w_dndu = dot(w, dn_local_du);
+  float dot_w_dndv = dot(w, dn_local_dv);
+
+  float term_under_sqrt = 1.0f - eta_calc * eta_calc * (1.0f - dot_w_n * dot_w_n);
+  float root = sqrtf(fmaxf(0.0f, term_under_sqrt));
+
+  float3 dA_du = -eta_calc *
+                 (dw_du - ((dot_dwdu_n + dot_w_dndu) * n_local + dot_w_n * dn_local_du));
+  float3 dA_dv = -eta_calc *
+                 (dw_dv - ((dot_dwdv_n + dot_w_dndv) * n_local + dot_w_n * dn_local_dv));
+
+  float inv_2root;
+  if (root < 1e-6f) {
+    inv_2root = 0.0f;
+  }
+  else {
+    inv_2root = 1.0f / (2.0f * root);
+  }
+
+  float droot_term_du_factor = -eta_calc * eta_calc * (-2.0f * dot_w_n);
+  float droot_du = inv_2root * (droot_term_du_factor * (dot_dwdu_n + dot_w_dndu));
+  float droot_dv = inv_2root * (droot_term_du_factor * (dot_dwdv_n + dot_w_dndv));
+
+  float3 dB_du = dn_local_du * root + n_local * droot_du;
+  float3 dB_dv = dn_local_dv * root + n_local * droot_dv;
+
+  dwt_du = dA_du - dB_du;
+  dwt_dv = dA_dv - dB_dv;
+}
+
+ccl_device_inline void ad_sphcoords(const float3 &w,
+                                    ccl_private float &theta,
+                                    ccl_private float &phi)
+{
+  theta = acosf(clamp(w.z, -1.0f, 1.0f));
+  phi = atan2f(w.y, w.x);
+
+  if (phi < 0.0f) {
+    phi += M_2PI_F;
+  }
+}
+
+ccl_device_inline void ad_d_sphcoords(const float3 &w,
+                                      const float3 &dw_du,
+                                      const float3 &dw_dv,
+                                      ccl_private float &d_theta_du,
+                                      ccl_private float &d_phi_du,
+                                      ccl_private float &d_theta_dv,
+                                      ccl_private float &d_phi_dv)
+{
+  float d_acos_dz = -inversesqrtf(fmaxf(1e-8f, 1.0f - w.z * w.z));
+  d_theta_du = d_acos_dz * dw_du.z;
+  d_theta_dv = d_acos_dz * dw_dv.z;
+
+  float xy_sq_sum = w.x * w.x + w.y * w.y;
+  if (xy_sq_sum < 1e-8f) {
+    d_phi_du = 0.0f;
+    d_phi_dv = 0.0f;
+  }
+  else {
+    float inv_xy_sq_sum = 1.0f / xy_sq_sum;
+    d_phi_du = (w.x * dw_du.y - w.y * dw_du.x) * inv_xy_sq_sum;
+    d_phi_dv = (w.x * dw_dv.y - w.y * dw_dv.x) * inv_xy_sq_sum;
+  }
+}
+
 /* Compute constraint derivatives. */
 
 #if defined(__KERNEL_METAL__)
@@ -254,12 +400,13 @@ __attribute__((noinline))
 #else
 ccl_device_forceinline
 #endif
-bool mnee_compute_constraint_derivatives(
-  const int vertex_count,
+bool mnee_compute_hv_constraint_derivatives(
+    const int vertex_count,
     ccl_private ManifoldVertex *vertices,
-     const ccl_private  float3 &surface_sample_pos,
+    const ccl_private  float3 &surface_sample_pos,
     const bool light_fixed_direction,
-    const float3 light_sample)
+    const float3 light_sample,
+    bool reflection = false)
 {
   for (int vi = 0; vi < vertex_count; vi++) {
     ccl_private ManifoldVertex &v = vertices[vi];
@@ -270,7 +417,7 @@ bool mnee_compute_constraint_derivatives(
     if (ili < MNEE_MIN_DISTANCE) {
       return false;
     }
-    ili = 1.f / ili;
+    ili = 1.0f / ili;
     wi *= ili;
 
     /* Direction toward light sample. */
@@ -281,27 +428,36 @@ bool mnee_compute_constraint_derivatives(
     if (ilo < MNEE_MIN_DISTANCE) {
       return false;
     }
-    ilo = 1.f / ilo;
+    ilo = 1.0f / ilo;
     wo *= ilo;
 
-    /* Invert ior if coming from inside. */
-    float eta = v.eta;
-    if (dot(wi, v.ng) < .0f) {
-      eta = 1.f / eta;
+    bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(v.bsdf->type);
+    float eta = 1.0f;
+    float3 H;
+
+    if (!reflection_vi) {
+      /* Invert ior if coming from inside. */
+      eta = (dot(wi, v.ng) < 0.0f) ? 1.0f / v.eta : v.eta;
+
+      /* Half vector. */
+      H = -(wi + eta * wo);
+    }
+    else {
+      /* Reflection: (no sign flip, no ior scaling) */
+      H = wi + wo;
     }
 
-    /* Half vector. */
-    float3 H = -(wi + eta * wo);
-    const float ilh = 1.f / len(H);
+    const float ilh = 1.0f / len(H);
     H *= ilh;
 
+    /* Refraction: eta scaling. (eta is 1.0 for reflection) */
     ilo *= eta * ilh;
     ili *= ilh;
 
     /* Local shading frame. */
     const float dp_du_dot_n = dot(v.dp_du, v.n);
     float3 s = v.dp_du - dp_du_dot_n * v.n;
-    const float inv_len_s = 1.f / len(s);
+    const float inv_len_s = 1.0f / len(s);
     s *= inv_len_s;
     const float3 t = cross(v.n, s);
 
@@ -311,31 +467,47 @@ bool mnee_compute_constraint_derivatives(
     /* Constraint derivatives WRT previous vertex. */
     if (vi > 0) {
       const ccl_private ManifoldVertex &v_prev = vertices[vi - 1];
-      dH_du = (v_prev.dp_du - wi * dot(wi, v_prev.dp_du)) * ili;
-      dH_dv = (v_prev.dp_dv - wi * dot(wi, v_prev.dp_dv)) * ili;
+
+      /* Derivatives of H w.r.t. next vertex parameters (u, v) */
+      dH_du = ili * (v_prev.dp_du - wi * dot(wi, v_prev.dp_du));
+      dH_dv = ili * (v_prev.dp_dv - wi * dot(wi, v_prev.dp_dv));
+
+      /* Project to maintain H unit length. */
       dH_du -= H * dot(dH_du, H);
       dH_dv -= H * dot(dH_dv, H);
-      dH_du = -dH_du;
-      dH_dv = -dH_dv;
+
+      /* Sign flip for refraction only. */
+      if (!reflection_vi) {
+        dH_du = -dH_du;
+        dH_dv = -dH_dv;
+      }
 
       v.a = make_float4(dot(dH_du, s), dot(dH_dv, s), dot(dH_du, t), dot(dH_dv, t));
     }
 
     /* Constraint derivatives WRT current vertex. */
     if (vi == vertex_count - 1 && light_fixed_direction) {
+      /* Fixed light direction. */
       dH_du = ili * (-v.dp_du + wi * dot(wi, v.dp_du));
       dH_dv = ili * (-v.dp_dv + wi * dot(wi, v.dp_dv));
     }
     else {
+      /* Movable light direction. */
       dH_du = -v.dp_du * (ili + ilo) + wi * (dot(wi, v.dp_du) * ili) +
               wo * (dot(wo, v.dp_du) * ilo);
       dH_dv = -v.dp_dv * (ili + ilo) + wi * (dot(wi, v.dp_dv) * ili) +
               wo * (dot(wo, v.dp_dv) * ilo);
     }
+
+    /* Project to maintain H unit length. */
     dH_du -= H * dot(dH_du, H);
     dH_dv -= H * dot(dH_dv, H);
-    dH_du = -dH_du;
-    dH_dv = -dH_dv;
+
+    /* Sign flip for refraction only. */
+    if (!reflection_vi) {
+      dH_du = -dH_du;
+      dH_dv = -dH_dv;
+    }
 
     float3 ds_du = -inv_len_s * (dot(v.dp_du, v.dn_du) * v.n + dp_du_dot_n * v.dn_du);
     float3 ds_dv = -inv_len_s * (dot(v.dp_du, v.dn_dv) * v.n + dp_du_dot_n * v.dn_dv);
@@ -352,12 +524,20 @@ bool mnee_compute_constraint_derivatives(
     /* Constraint derivatives WRT next vertex. */
     if (vi < vertex_count - 1) {
       const ccl_private ManifoldVertex &v_next = vertices[vi + 1];
-      dH_du = (v_next.dp_du - wo * dot(wo, v_next.dp_du)) * ilo;
-      dH_dv = (v_next.dp_dv - wo * dot(wo, v_next.dp_dv)) * ilo;
+
+      /* Derivatives of H w.r.t. next vertex parameters (u, v) */
+      dH_du = ilo * (v_next.dp_du - wo * dot(wo, v_next.dp_du));
+      dH_dv = ilo * (v_next.dp_dv - wo * dot(wo, v_next.dp_dv));
+
+      /* Project to maintain H unit length. */
       dH_du -= H * dot(dH_du, H);
       dH_dv -= H * dot(dH_dv, H);
-      dH_du = -dH_du;
-      dH_dv = -dH_dv;
+
+      /* Sign flip for refraction only. */
+      if (!reflection_vi) {
+        dH_du = -dH_du;
+        dH_dv = -dH_dv;
+      }
 
       v.c = make_float4(dot(dH_du, s), dot(dH_dv, s), dot(dH_du, t), dot(dH_dv, t));
     }
@@ -365,6 +545,355 @@ bool mnee_compute_constraint_derivatives(
     /* Constraint vector WRT. the local shading frame. */
     v.constraint = make_float2(dot(s, H), dot(t, H)) - v.n_offset;
   }
+
+  return true;
+}
+
+/* Angle-Difference constraint derivatives (alternative formulation) */
+
+#if defined(__KERNEL_METAL__)
+__attribute__((noinline))
+#else
+ccl_device_forceinline
+#endif
+bool mnee_compute_ad_constraint_derivatives(
+    const int vertex_count,
+    ccl_private ManifoldVertex *vertices,
+    const ccl_private float3 &surface_sample_pos,
+    const bool light_fixed_direction,
+    const float3 light_sample,
+    bool reflection = false)
+{
+  for (int vi = 0; vi < vertex_count; vi++) {
+    ccl_private ManifoldVertex &v_cur = vertices[vi];
+
+    /* Initialize derivative matrices */
+    v_cur.a = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    v_cur.c = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    const float3 x_prev_p = (vi == 0) ? surface_sample_pos : vertices[vi - 1].p;
+    const float3 x_cur_p = v_cur.p;
+    const float3 x_next_p_or_dir = (vi == vertex_count - 1) ? light_sample : vertices[vi + 1].p;
+
+    const bool at_endpoint_with_fixed_direction = (vi == vertex_count - 1 &&
+                                                   light_fixed_direction);
+
+    /* Setup wo (outgoing direction from x_cur_p) */
+    float3 wo;
+    if (at_endpoint_with_fixed_direction) {
+      wo = x_next_p_or_dir;
+    }
+    else {
+      wo = x_next_p_or_dir - x_cur_p;
+    }
+
+    float wo_len = len(wo);
+    if (wo_len < MNEE_MIN_DISTANCE) {
+      return false;
+    }
+
+    float ilo = 1.0f / wo_len;
+    wo *= ilo;
+
+    /* Setup dwo_du_cur, dwo_dv_cur */
+    float3 dwo_du_cur = make_float3(0.0f, 0.0f, 0.0f);
+    float3 dwo_dv_cur = make_float3(0.0f, 0.0f, 0.0f);
+    if (!at_endpoint_with_fixed_direction) {
+      dwo_du_cur = -ilo * (v_cur.dp_du - wo * dot(wo, v_cur.dp_du));
+      dwo_dv_cur = -ilo * (v_cur.dp_dv - wo * dot(wo, v_cur.dp_dv));
+    }
+
+    /* Setup wi (incoming direction to x_cur_p) */
+    float3 wi = x_prev_p - x_cur_p;
+    float wi_len = len(wi);
+    if (wi_len < MNEE_MIN_DISTANCE) {
+      return false;
+    }
+    float ili = 1.0f / wi_len;
+    wi *= ili;
+
+    /* Setup dwi_du_cur, dwi_dv_cur */
+    float3 dwi_du_cur = -ili * (v_cur.dp_du - wi * dot(wi, v_cur.dp_du));
+    float3 dwi_dv_cur = -ili * (v_cur.dp_dv - wi * dot(wi, v_cur.dp_dv));
+
+    /* Determine if this interaction is reflection or refraction */
+    bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(v_cur.bsdf->type);
+
+    /* Normal and its derivatives at current vertex */
+    const float3 n_surf = v_cur.n;
+    const float3 dn_surf_du = v_cur.dn_du;
+    const float3 dn_surf_dv = v_cur.dn_dv;
+
+    bool success_i = false;
+
+    /* Variables for spherical coordinate derivatives */
+    float dto_du_p, dpo_du_p, dto_dv_p, dpo_dv_p;
+    float dtio_du_p, dpio_du_p, dtio_dv_p, dpio_dv_p;
+    float dto_du_c, dpo_du_c, dto_dv_c, dpo_dv_c;
+    float dtio_du_c, dpio_du_c, dtio_dv_c, dpio_dv_c;
+    float dto_du_n, dpo_du_n, dto_dv_n, dpo_dv_n;
+    float dtio_du_n, dpio_du_n, dtio_dv_n, dpio_dv_n;
+
+    /* Strategy 1: Transform wi to wio, compare with wo */
+    float3 wio;
+    bool valid_transform_wi;
+    if (reflection_vi) {
+      wio = ad_reflect(wi, n_surf);
+      valid_transform_wi = true;
+    }
+    else {
+      valid_transform_wi = ad_refract(wi, n_surf, v_cur.eta, wio);
+    }
+
+    if (valid_transform_wi) {
+      float to, po;
+      float tio, pio;
+      ad_sphcoords(wo, to, po);
+      ad_sphcoords(wio, tio, pio);
+
+      float dt = to - tio;
+      float dp = po - pio;
+      if (dp < -M_PI_F) {
+        dp += M_2PI_F;
+      }
+      else if (dp > M_PI_F) {
+        dp -= M_2PI_F;
+      }
+      v_cur.constraint = make_float2(dt, dp);
+
+      /* Derivatives w.r.t. x_{i-1} */
+      if (vi > 0) {
+        const ccl_private ManifoldVertex &v_prev = vertices[vi - 1];
+        float3 dwi_du_prev = ili * (v_prev.dp_du - wi * dot(wi, v_prev.dp_du));
+        float3 dwi_dv_prev = ili * (v_prev.dp_dv - wi * dot(wi, v_prev.dp_dv));
+
+        float3 dwio_du_prev, dwio_dv_prev;
+        if (reflection_vi) {
+          ad_d_reflect(wi,
+                       dwi_du_prev,
+                       dwi_dv_prev,
+                       n_surf,
+                       make_float3(0.0f, 0.0f, 0.0f),
+                       make_float3(0.0f, 0.0f, 0.0f),
+                       dwio_du_prev,
+                       dwio_dv_prev);
+        }
+        else {
+          ad_d_refract(wi,
+                       dwi_du_prev,
+                       dwi_dv_prev,
+                       n_surf,
+                       make_float3(0.0f, 0.0f, 0.0f),
+                       make_float3(0.0f, 0.0f, 0.0f),
+                       v_cur.eta,
+                       dwio_du_prev,
+                       dwio_dv_prev);
+        }
+
+        dto_du_p = 0.0f;
+        dpo_du_p = 0.0f;
+        dto_dv_p = 0.0f;
+        dpo_dv_p = 0.0f;
+        ad_d_sphcoords(
+            wio, dwio_du_prev, dwio_dv_prev, dtio_du_p, dpio_du_p, dtio_dv_p, dpio_dv_p);
+
+        v_cur.a = make_float4(dto_du_p - dtio_du_p,
+                              dto_dv_p - dtio_dv_p,
+                              dpo_du_p - dpio_du_p,
+                              dpo_dv_p - dpio_dv_p);
+      }
+
+      /* Derivatives w.r.t. x_{i} */
+      float3 dwio_du_cur, dwio_dv_cur;
+      if (reflection_vi) {
+        ad_d_reflect(
+            wi, dwi_du_cur, dwi_dv_cur, n_surf, dn_surf_du, dn_surf_dv, dwio_du_cur, dwio_dv_cur);
+      }
+      else {
+        ad_d_refract(wi,
+                     dwi_du_cur,
+                     dwi_dv_cur,
+                     n_surf,
+                     dn_surf_du,
+                     dn_surf_dv,
+                     v_cur.eta,
+                     dwio_du_cur,
+                     dwio_dv_cur);
+      }
+      ad_d_sphcoords(wo, dwo_du_cur, dwo_dv_cur, dto_du_c, dpo_du_c, dto_dv_c, dpo_dv_c);
+      ad_d_sphcoords(wio, dwio_du_cur, dwio_dv_cur, dtio_du_c, dpio_du_c, dtio_dv_c, dpio_dv_c);
+      v_cur.b = make_float4(
+          dto_du_c - dtio_du_c, dto_dv_c - dtio_dv_c, dpo_du_c - dpio_du_c, dpo_dv_c - dpio_dv_c);
+
+      /* Derivatives w.r.t. x_{i+1} */
+      if (vi < vertex_count - 1) {
+        const ccl_private ManifoldVertex &v_next = vertices[vi + 1];
+        float3 dwo_du_next = ilo * (v_next.dp_du - wo * dot(wo, v_next.dp_du));
+        float3 dwo_dv_next = ilo * (v_next.dp_dv - wo * dot(wo, v_next.dp_dv));
+
+        ad_d_sphcoords(wo, dwo_du_next, dwo_dv_next, dto_du_n, dpo_du_n, dto_dv_n, dpo_dv_n);
+        dtio_du_n = 0.0f;
+        dpio_du_n = 0.0f;
+        dtio_dv_n = 0.0f;
+        dpio_dv_n = 0.0f;
+
+        v_cur.c = make_float4(dto_du_n - dtio_du_n,
+                              dto_dv_n - dtio_dv_n,
+                              dpo_du_n - dpio_du_n,
+                              dpo_dv_n - dpio_dv_n);
+      }
+      success_i = true;
+    }
+
+    /* Strategy 2: Transform wo to woi, compare with wi */
+    if (!success_i) {
+      float3 woi;
+      bool valid_transform_wo;
+      if (reflection_vi) {
+        woi = ad_reflect(wo, n_surf);
+        valid_transform_wo = true;
+      }
+      else {
+        valid_transform_wo = ad_refract(wo, n_surf, v_cur.eta, woi);
+      }
+
+      if (valid_transform_wo) {
+        float ti, pi;
+        float toi, poi;
+        ad_sphcoords(wi, ti, pi);
+        ad_sphcoords(woi, toi, poi);
+
+        float dt = ti - toi;
+        float dp = pi - poi;
+        if (dp < -M_PI_F) {
+          dp += M_2PI_F;
+        }
+        else if (dp > M_PI_F) {
+          dp -= M_2PI_F;
+        }
+        v_cur.constraint = make_float2(dt, dp);
+
+        /* Derivatives w.r.t. x_{i-1} */
+        if (vi > 0) {
+          const ccl_private ManifoldVertex &v_prev = vertices[vi - 1];
+          float3 dwi_du_prev = ili * (v_prev.dp_du - wi * dot(wi, v_prev.dp_du));
+          float3 dwi_dv_prev = ili * (v_prev.dp_dv - wi * dot(wi, v_prev.dp_dv));
+
+          ad_d_sphcoords(wi,
+                         dwi_du_prev,
+                         dwi_dv_prev,
+                         dtio_du_p,
+                         dpio_du_p,
+                         dtio_dv_p,
+                         dpio_dv_p);
+          dto_du_p = 0.0f;
+          dpo_du_p = 0.0f;
+          dto_dv_p = 0.0f;
+          dpo_dv_p = 0.0f;
+
+          v_cur.a = make_float4(dtio_du_p - dto_du_p,
+                                dtio_dv_p - dto_dv_p,
+                                dpio_du_p - dpo_du_p,
+                                dpio_dv_p - dpo_dv_p);
+        }
+
+        /* Derivatives w.r.t. x_{i} */
+        float3 dwoi_du_cur, dwoi_dv_cur;
+        if (reflection_vi) {
+          ad_d_reflect(wo,
+                       dwo_du_cur,
+                       dwo_dv_cur,
+                       n_surf,
+                       dn_surf_du,
+                       dn_surf_dv,
+                       dwoi_du_cur,
+                       dwoi_dv_cur);
+        }
+        else {
+          ad_d_refract(wo,
+                       dwo_du_cur,
+                       dwo_dv_cur,
+                       n_surf,
+                       dn_surf_du,
+                       dn_surf_dv,
+                       v_cur.eta,
+                       dwoi_du_cur,
+                       dwoi_dv_cur);
+        }
+        ad_d_sphcoords(wi,
+                       dwi_du_cur,
+                       dwi_dv_cur,
+                       dtio_du_c,
+                       dpio_du_c,
+                       dtio_dv_c,
+                       dpio_dv_c);
+        ad_d_sphcoords(woi,
+                       dwoi_du_cur,
+                       dwoi_dv_cur,
+                       dto_du_c,
+                       dpo_du_c,
+                       dto_dv_c,
+                       dpo_dv_c);
+        v_cur.b = make_float4(dtio_du_c - dto_du_c,
+                              dtio_dv_c - dto_dv_c,
+                              dpio_du_c - dpo_du_c,
+                              dpio_dv_c - dpo_dv_c);
+
+        /* Derivatives w.r.t. x_{i+1} */
+        if (vi < vertex_count - 1) {
+          const ccl_private ManifoldVertex &v_next = vertices[vi + 1];
+          float3 dwo_du_next = ilo * (v_next.dp_du - wo * dot(wo, v_next.dp_du));
+          float3 dwo_dv_next = ilo * (v_next.dp_dv - wo * dot(wo, v_next.dp_dv));
+
+          float3 dwoi_du_next, dwoi_dv_next;
+          if (reflection_vi) {
+            ad_d_reflect(wo,
+                         dwo_du_next,
+                         dwo_dv_next,
+                         n_surf,
+                         make_float3(0.0f, 0.0f, 0.0f),
+                         make_float3(0.0f, 0.0f, 0.0f),
+                         dwoi_du_next,
+                         dwoi_dv_next);
+          }
+          else {
+            ad_d_refract(wo,
+                         dwo_du_next,
+                         dwo_dv_next,
+                         n_surf,
+                         make_float3(0.0f, 0.0f, 0.0f),
+                         make_float3(0.0f, 0.0f, 0.0f),
+                         v_cur.eta,
+                         dwoi_du_next,
+                         dwoi_dv_next);
+          }
+
+          dtio_du_n = 0.0f;
+          dpio_du_n = 0.0f;
+          dtio_dv_n = 0.0f;
+          dpio_dv_n = 0.0f;
+          ad_d_sphcoords(woi,
+                         dwoi_du_next,
+                         dwoi_dv_next,
+                         dto_du_n,
+                         dpo_du_n,
+                         dto_dv_n,
+                         dpo_dv_n);
+
+          v_cur.c = make_float4(dtio_du_n - dto_du_n,
+                                dtio_dv_n - dto_dv_n,
+                                dpio_du_n - dpo_du_n,
+                                dpio_dv_n - dpo_dv_n);
+        }
+        success_i = true;
+      }
+    }
+
+    if (!success_i) {
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -442,9 +971,19 @@ ccl_device_forceinline bool mnee_newton_solver(KernelGlobals kg,
   for (int iteration = 0; iteration < MNEE_MAX_ITERATIONS; iteration++) {
     if (resolve_constraint) {
       /* Calculate constraint and its derivatives for vertices. */
-      if (!mnee_compute_constraint_derivatives(
-              vertex_count, vertices, sd->P, light_fixed_direction, light_sample))
-      {
+      bool derivatives_ok;
+      if (caustics_constraint_derivatives == CAUSTICS_CONSTRAINT_DERIVATIVES_HV) {
+        /* Original half-vector formulation */
+        derivatives_ok = mnee_compute_hv_constraint_derivatives(
+            vertex_count, vertices, sd->P, light_fixed_direction, light_sample, false);
+      }
+      else {
+        /* Angle-difference formulation (handles TIR better) */
+        derivatives_ok = mnee_compute_ad_constraint_derivatives(
+            vertex_count, vertices, sd->P, light_fixed_direction, light_sample, false);
+      }
+
+      if (!derivatives_ok) {
         return false;
       }
 
@@ -538,7 +1077,7 @@ ccl_device_forceinline bool mnee_newton_solver(KernelGlobals kg,
       }
     }
 
-    /* Check that tentative path is still transmissive. */
+    /* Check that tentative path is still transmissive/reflective as appropriate. */
     if (!reduce_stepsize) {
       for (int vi = 0; vi < vertex_count; vi++) {
         const ccl_private ManifoldVertex &tv = tentative[vi];
@@ -549,7 +1088,13 @@ ccl_device_forceinline bool mnee_newton_solver(KernelGlobals kg,
         const float3 wo = (vi == vertex_count - 1) ? light_fixed_direction ? ls->D : ls->P - tv.p :
                                                      tentative[vi + 1].p - tv.p;
 
-        if (dot(tv.n, wi) * dot(tv.n, wo) >= 0.f) {
+        bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(vertices[vi].bsdf->type);
+        float dot_in = dot(tv.n, wi);
+        float dot_out = dot(tv.n, wo);
+
+        if ((!reflection_vi && dot_in * dot_out >= 0.0f) ||
+            (reflection_vi && dot_in * dot_out < 0.0f))
+        {
           reduce_stepsize = true;
           break;
         }
