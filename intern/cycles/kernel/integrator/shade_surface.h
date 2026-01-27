@@ -146,6 +146,24 @@ ccl_device_forceinline void integrate_surface_emission(KernelGlobals kg,
   }
 #endif
 
+#ifdef __MNEE__
+  /* Cull emission from caustic paths that should have been handled by MNEE/SMS.
+   * When PATH_MNEE_CULL_LIGHT_CONNECTION is set, the path went through a caustic receiver
+   * then a caustic caster. If this path hits an emissive caustic caster, the contribution
+   * should be culled since SMS/MNEE handles these paths.
+   * This prevents double-counting between BSDF sampling and SMS. */
+  if (kernel_data.integrator.use_caustics) {
+    const uint8_t path_mnee = INTEGRATOR_STATE(state, path, mnee);
+    if (path_mnee & PATH_MNEE_CULL_LIGHT_CONNECTION) {
+      /* Check if this emissive surface is a caustic caster. If so, this is a caustic path
+       * that should have been handled by SMS/MNEE, so cull it. */
+      if (sd->object_flag & SD_OBJECT_CAUSTICS_CASTER) {
+        return;
+      }
+    }
+  }
+#endif
+
   /* Evaluate emissive closure. */
   const Spectrum L = surface_shader_emission(sd);
 
