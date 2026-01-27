@@ -17,6 +17,7 @@
 #include "kernel/geom/triangle.h"
 
 #include "kernel/integrator/mnee.h"
+#include "kernel/integrator/sms.h"
 
 #include "kernel/integrator/guiding.h"
 #include "kernel/integrator/shadow_linking.h"
@@ -300,7 +301,8 @@ ccl_device
     integrate_surface_direct_light(KernelGlobals kg,
                                    IntegratorState state,
                                    ccl_private ShaderData *sd,
-                                   const ccl_private RNGState *rng_state)
+                                   const ccl_private RNGState *rng_state,
+                                   ccl_global float *ccl_restrict render_buffer)
 {
   /* Test if there is a light or BSDF that needs direct light. */
   if (!(kernel_data.integrator.use_direct_light && (sd->flag & SD_BSDF_HAS_EVAL))) {
@@ -368,6 +370,36 @@ ccl_device
 
         /* Are we on a caustic receiver? */
         if (!is_transmission && (sd->object_flag & SD_OBJECT_CAUSTICS_RECEIVER)) {
+          /* Which strategy to use. */
+          const int caustics_sampling_strategy = kernel_data.integrator.caustics_sampling_strategy;
+          Spectrum sms_contribution = zero_spectrum();
+
+          if (caustics_sampling_strategy == CAUSTICS_SAMPLING_STRATEGY_SMS_UNBIASED) {
+            /* Use unbiased SMS */
+            sms_contribution = integrate_sms_unbiased(
+                kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+          }
+
+          if (caustics_sampling_strategy == CAUSTICS_SAMPLING_STRATEGY_SMS_BIASED) {
+            /* Use biased SMS */
+            sms_contribution = integrate_sms_biased(
+                kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+          }
+
+          /* If SMS succeeded, write contribution and skip shadow ray. */
+          if (!is_zero(sms_contribution)) {
+            /* Clamp the final SMS contribution like direct light */
+            film_clamp_light(kg, &sms_contribution, 0 /* bounce */);
+
+            /* Write contribution using the dedicated function */
+            film_write_direct_light_sms(
+                kg, state, sms_contribution, &bsdf_eval, ls.group, render_buffer);
+
+            return; /* SMS handled this light sample, skip standard NEE. */
+          }
+
+          /* Fallback to original MNEE if SMS is disabled, failed, or no caster found. */
+          // if (caustics_sampling_strategy == CAUSTICS_SAMPLING_STRATEGY_MNEE)
           mnee_vertex_count = kernel_path_mnee_sample(
               kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
         }
@@ -795,7 +827,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
 #endif
     /* Direct light. */
     PROFILING_EVENT(PROFILING_SHADE_SURFACE_DIRECT_LIGHT);
-    integrate_surface_direct_light<node_feature_mask>(kg, state, &sd, &rng_state);
+    integrate_surface_direct_light<node_feature_mask>(kg, state, &sd, &rng_state, render_buffer);
 
 #if defined(__AO__)
     /* Ambient occlusion pass. */

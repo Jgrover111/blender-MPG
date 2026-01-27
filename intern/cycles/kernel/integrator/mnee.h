@@ -124,26 +124,44 @@ ccl_device_forceinline void mnee_setup_manifold_vertex(KernelGlobals kg,
                                                        const float2 n_offset,
                                                        const ccl_private Ray *ray,
                                                        const ccl_private Intersection *isect,
-                                                       ccl_private ShaderData *sd_vtx)
+                                                       ccl_private ShaderData *sd_vtx,
+                                                       const ccl_private RNGState *rng_state = nullptr)
 {
   sd_vtx->object = (isect->object == OBJECT_NONE) ? kernel_data_fetch(prim_object, isect->prim) :
                                                     isect->object;
 
   sd_vtx->type = isect->type;
+  sd_vtx->prim = isect->prim;
   sd_vtx->flag = 0;
   sd_vtx->object_flag = kernel_data_fetch(object_flag, sd_vtx->object);
+  sd_vtx->shader = kernel_data_fetch(tri_shader, sd_vtx->prim);
 
   /* Matrices and time. */
   shader_setup_object_transforms(kg, sd_vtx, ray->time);
   sd_vtx->time = ray->time;
 
-  sd_vtx->prim = isect->prim;
-  sd_vtx->ray_length = isect->t;
+  float u, v;
+  if (rng_state) {
+    /* Random barycentrics. */
+    const float2 rand_bary = path_state_rng_2D(kg, rng_state, PRNG_SURFACE_BSDF);
+    u = rand_bary.x;
+    v = rand_bary.y;
+    if (u + v > 1.0f) {
+      u = 1.0f - u;
+      v = 1.0f - v;
+    }
+    // sd_vtx->ray_length will be calculated after P is finalized
+  }
+  else {
+    u = isect->u;
+    v = isect->v;
+    sd_vtx->ray_length = isect->t;
+  }
 
-  sd_vtx->u = isect->u;
-  sd_vtx->v = isect->v;
-
-  sd_vtx->shader = kernel_data_fetch(tri_shader, sd_vtx->prim);
+  /* Store final barycentrics. */
+  const float w = 1.0f - u - v;
+  sd_vtx->u = u;
+  sd_vtx->v = v;
 
   float3 verts[3];
   float3 normals[3];
@@ -152,7 +170,9 @@ ccl_device_forceinline void mnee_setup_manifold_vertex(KernelGlobals kg,
     triangle_vertices_and_normals(kg, sd_vtx->prim, verts, normals);
 
     /* Compute refined position (same code as in triangle_point_from_uv). */
-    sd_vtx->P = (1.f - isect->u - isect->v) * verts[0] + isect->u * verts[1] + isect->v * verts[2];
+    sd_vtx->P = u * verts[1] + v * verts[2] + w * verts[0];
+
+    /* Apply object transform if needed. */
     if (!(sd_vtx->object_flag & SD_OBJECT_TRANSFORM_APPLIED)) {
       const Transform tfm = object_get_transform(kg, sd_vtx);
       sd_vtx->P = transform_point(&tfm, sd_vtx->P);
@@ -164,7 +184,12 @@ ccl_device_forceinline void mnee_setup_manifold_vertex(KernelGlobals kg,
         kg, sd_vtx->object, sd_vtx->prim, sd_vtx->time, verts, normals);
 
     /* Compute refined position. */
-    sd_vtx->P = motion_triangle_point_from_uv(kg, sd_vtx, isect->u, isect->v, verts);
+    sd_vtx->P = motion_triangle_point_from_uv(kg, sd_vtx, u, v, verts);
+  }
+
+  /* Calculate ray_length if using random sampling. */
+  if (rng_state) {
+    sd_vtx->ray_length = len(sd_vtx->P - ray->P);
   }
 
   /* Instance transform. */
@@ -189,9 +214,7 @@ ccl_device_forceinline void mnee_setup_manifold_vertex(KernelGlobals kg,
 
   /* Shading normals: Interpolate normals between vertices. */
   float n_len;
-  vtx->n = normalize_len(normals[0] * (1.0f - sd_vtx->u - sd_vtx->v) + normals[1] * sd_vtx->u +
-                             normals[2] * sd_vtx->v,
-                         &n_len);
+  vtx->n = normalize_len(u * normals[1] + v * normals[2] + w * normals[0], &n_len);
 
   /* Shading normal derivatives WRT barycentric (u, v)
    * we calculate the derivative of n = |u*n0 + v*n1 + (1-u-v)*n2| using:
@@ -238,7 +261,7 @@ ccl_device_forceinline void mnee_setup_manifold_vertex(KernelGlobals kg,
   vtx->eta = eta;
 
   /* Geometric information. */
-  vtx->uv = make_float2(isect->u, isect->v);
+  vtx->uv = make_float2(u, v);
   vtx->object = sd_vtx->object;
   vtx->prim = sd_vtx->prim;
   vtx->shader = sd_vtx->shader;
@@ -253,12 +276,13 @@ __attribute__((noinline))
 #else
 ccl_device_forceinline
 #endif
-bool mnee_compute_constraint_derivatives(
-  const int vertex_count,
+bool mnee_compute_hv_constraint_derivatives(
+    const int vertex_count,
     ccl_private ManifoldVertex *vertices,
-     const ccl_private  float3 &surface_sample_pos,
+    const ccl_private  float3 &surface_sample_pos,
     const bool light_fixed_direction,
-    const float3 light_sample)
+    const float3 light_sample,
+    bool reflection = false)
 {
   for (int vi = 0; vi < vertex_count; vi++) {
     ccl_private ManifoldVertex &v = vertices[vi];
@@ -283,17 +307,26 @@ bool mnee_compute_constraint_derivatives(
     ilo = 1.f / ilo;
     wo *= ilo;
 
-    /* Invert ior if coming from inside. */
-    float eta = v.eta;
-    if (dot(wi, v.ng) < .0f) {
-      eta = 1.f / eta;
+    bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(v.bsdf->type);
+    float eta = 1.0f;
+    float3 H;
+
+    if (!reflection_vi) {
+      /* Invert ior if coming from inside. */
+      eta = (dot(wi, v.ng) < 0.0f) ? 1.0f / v.eta : v.eta;
+
+      /* Half vector. */
+      H = -(wi + eta * wo);
+    }
+    else {
+      /* Reflection: (no sign flip, no ior scaling) */
+      H = wi + wo;
     }
 
-    /* Half vector. */
-    float3 H = -(wi + eta * wo);
     const float ilh = 1.f / len(H);
     H *= ilh;
 
+    /* Refraction: eta scaling. (eta is 1.0 for reflection) */
     ilo *= eta * ilh;
     ili *= ilh;
 
@@ -310,12 +343,16 @@ bool mnee_compute_constraint_derivatives(
     /* Constraint derivatives WRT previous vertex. */
     if (vi > 0) {
       const ccl_private ManifoldVertex &v_prev = vertices[vi - 1];
-      dH_du = (v_prev.dp_du - wi * dot(wi, v_prev.dp_du)) * ili;
-      dH_dv = (v_prev.dp_dv - wi * dot(wi, v_prev.dp_dv)) * ili;
+      dH_du = ili * (v_prev.dp_du - wi * dot(wi, v_prev.dp_du));
+      dH_dv = ili * (v_prev.dp_dv - wi * dot(wi, v_prev.dp_dv));
       dH_du -= H * dot(dH_du, H);
       dH_dv -= H * dot(dH_dv, H);
-      dH_du = -dH_du;
-      dH_dv = -dH_dv;
+
+      /* Sign flip for refraction only. */
+      if (!reflection_vi) {
+        dH_du = -dH_du;
+        dH_dv = -dH_dv;
+      }
 
       v.a = make_float4(dot(dH_du, s), dot(dH_dv, s), dot(dH_du, t), dot(dH_dv, t));
     }
@@ -333,8 +370,12 @@ bool mnee_compute_constraint_derivatives(
     }
     dH_du -= H * dot(dH_du, H);
     dH_dv -= H * dot(dH_dv, H);
-    dH_du = -dH_du;
-    dH_dv = -dH_dv;
+
+    /* Sign flip for refraction only. */
+    if (!reflection_vi) {
+      dH_du = -dH_du;
+      dH_dv = -dH_dv;
+    }
 
     float3 ds_du = -inv_len_s * (dot(v.dp_du, v.dn_du) * v.n + dp_du_dot_n * v.dn_du);
     float3 ds_dv = -inv_len_s * (dot(v.dp_du, v.dn_dv) * v.n + dp_du_dot_n * v.dn_dv);
@@ -351,12 +392,16 @@ bool mnee_compute_constraint_derivatives(
     /* Constraint derivatives WRT next vertex. */
     if (vi < vertex_count - 1) {
       const ccl_private ManifoldVertex &v_next = vertices[vi + 1];
-      dH_du = (v_next.dp_du - wo * dot(wo, v_next.dp_du)) * ilo;
-      dH_dv = (v_next.dp_dv - wo * dot(wo, v_next.dp_dv)) * ilo;
+      dH_du = ilo * (v_next.dp_du - wo * dot(wo, v_next.dp_du));
+      dH_dv = ilo * (v_next.dp_dv - wo * dot(wo, v_next.dp_dv));
       dH_du -= H * dot(dH_du, H);
       dH_dv -= H * dot(dH_dv, H);
-      dH_du = -dH_du;
-      dH_dv = -dH_dv;
+
+      /* Sign flip for refraction only. */
+      if (!reflection_vi) {
+        dH_du = -dH_du;
+        dH_dv = -dH_dv;
+      }
 
       v.c = make_float4(dot(dH_du, s), dot(dH_dv, s), dot(dH_du, t), dot(dH_dv, t));
     }
@@ -364,6 +409,547 @@ bool mnee_compute_constraint_derivatives(
     /* Constraint vector WRT. the local shading frame. */
     v.constraint = make_float2(dot(s, H), dot(t, H)) - v.n_offset;
   }
+
+    return true;
+}
+
+// --- Helper functions for Angle Difference Constraint ---
+ccl_device_inline float3 ad_reflect(const float3 &w, const float3 &n)
+{
+  return 2.0f * dot(w, n) * n - w;
+}
+
+ccl_device_inline void ad_d_reflect(const float3 &w,
+                                    const float3 &dw_du,
+                                    const float3 &dw_dv,
+                                    const float3 &n,
+                                    const float3 &dn_du,
+                                    const float3 &dn_dv,
+                                    ccl_private float3 &dwr_du,
+                                    ccl_private float3 &dwr_dv)
+{
+  float dot_w_n = dot(w, n);
+  float dot_dwdu_n = dot(dw_du, n);
+  float dot_dwdv_n = dot(dw_dv, n);
+  float dot_w_dndu = dot(w, dn_du);
+  float dot_w_dndv = dot(w, dn_dv);
+
+  dwr_du = 2.0f * ((dot_dwdu_n + dot_w_dndu) * n + dot_w_n * dn_du) - dw_du;
+  dwr_dv = 2.0f * ((dot_dwdv_n + dot_w_dndv) * n + dot_w_n * dn_dv) - dw_dv;
+}
+
+ccl_device_inline int ad_refract(const float3 &w,
+                                 const float3 &n_surf,
+                                 float eta_param,  // eta_transmitted / eta_incident
+                                 ccl_private float3 &wt)
+{
+  float3 n_local = n_surf;
+  // eta_calc is eta_incident / eta_transmitted for Snell's law form: sin_t = (ni/nt) sin_i
+  float eta_calc = 1.0f / eta_param;
+
+  if (dot(w, n_local) < 0.0f) {
+    // Coming from the "transmitted" side according to n_local.
+    // Flip normal, eta_calc becomes eta_param (which is nt/ni for this new frame).
+    // So, eta_calc is (new_ni / new_nt) = (old_nt / old_ni) = eta_param.
+    eta_calc = eta_param;  // or 1.0f / eta_calc;
+    n_local *= -1.0f;
+  }
+
+  float dot_w_n = dot(w, n_local);
+  float root_term = 1.0f - eta_calc * eta_calc * (1.0f - dot_w_n * dot_w_n);
+
+  if (root_term < 0.0f) {
+    wt = make_float3(0.0f, 0.0f, 0.0f);
+    return false;
+  }
+
+  wt = -eta_calc * (w - dot_w_n * n_local) - n_local * sqrtf(root_term);
+  return true;
+}
+
+ccl_device_inline void ad_d_refract(const float3 &w,
+                                    const float3 &dw_du,
+                                    const float3 &dw_dv,
+                                    const float3 &n_surf_,
+                                    const float3 &dn_surf_du_,
+                                    const float3 &dn_surf_dv_,
+                                    float eta_param,  // eta_transmitted / eta_incident
+                                    ccl_private float3 &dwt_du,
+                                    ccl_private float3 &dwt_dv)
+{
+  float3 n_local = n_surf_;
+  float3 dn_local_du = dn_surf_du_;
+  float3 dn_local_dv = dn_surf_dv_;
+  // eta_calc is eta_incident / eta_transmitted
+  float eta_calc = 1.0f / eta_param;
+
+  if (dot(w, n_local) < 0.0f) {
+    eta_calc = eta_param;  // or 1.0f / eta_calc;
+    n_local *= -1.0f;
+    dn_local_du *= -1.0f;
+    dn_local_dv *= -1.0f;
+  }
+
+  float dot_w_n = dot(w, n_local);
+  float dot_dwdu_n = dot(dw_du, n_local);
+  float dot_dwdv_n = dot(dw_dv, n_local);
+  float dot_w_dndu = dot(w, dn_local_du);
+  float dot_w_dndv = dot(w, dn_local_dv);
+
+  float term_under_sqrt = 1.0f - eta_calc * eta_calc * (1.0f - dot_w_n * dot_w_n);
+  // It's assumed that ad_refract() was called first and succeeded, so term_under_sqrt >= 0
+  float root = sqrtf(fmaxf(0.0f, term_under_sqrt));  // Clamp to avoid NaN from precision issues
+
+  // Derivatives of wt = -eta_calc * (w - dot_w_n * n_local) - n_local * sqrt(root_term)
+  // wt = A - B
+  // A = -eta_calc*(w - dot_w_n*n_local)
+  // B = n_local*root
+
+  // dA/du = -eta_calc * (dw_du - ( (dot_dwdu_n + dot_w_dndu)*n_local + dot_w_n*dn_local_du ) )
+  float3 dA_du = -eta_calc *
+                 (dw_du - ((dot_dwdu_n + dot_w_dndu) * n_local + dot_w_n * dn_local_du));
+  float3 dA_dv = -eta_calc *
+                 (dw_dv - ((dot_dwdv_n + dot_w_dndv) * n_local + dot_w_n * dn_local_dv));
+
+  // dB/du = dn_local_du * root + n_local * d(root)/du
+  // d(root)/du = (1/(2*root)) * d(term_under_sqrt)/du
+  // d(term_under_sqrt)/du = -eta_calc^2 * (-2*dot_w_n*(dot_dwdu_n + dot_w_dndu))
+  float inv_2root;
+  if (root < 1e-6f) {  // Avoid division by zero if root is very small (grazing angle / TIR)
+    inv_2root = 0.0f;  // Derivative becomes unstable, approximate as 0
+  }
+  else {
+    inv_2root = 1.0f / (2.0f * root);
+  }
+
+  float droot_term_du_factor = -eta_calc * eta_calc * (-2.0f * dot_w_n);
+  float droot_du = inv_2root * (droot_term_du_factor * (dot_dwdu_n + dot_w_dndu));
+  float droot_dv = inv_2root * (droot_term_du_factor * (dot_dwdv_n + dot_w_dndv));
+
+  float3 dB_du = dn_local_du * root + n_local * droot_du;
+  float3 dB_dv = dn_local_dv * root + n_local * droot_dv;
+
+  dwt_du = dA_du - dB_du;
+  dwt_dv = dA_dv - dB_dv;
+}
+
+ccl_device_inline void ad_sphcoords(const float3 &w,
+                                    ccl_private float &theta,
+                                    ccl_private float &phi)
+{
+  theta = acosf(clamp(w.z, -1.0f, 1.0f));
+  phi = atan2f(w.y, w.x);
+
+  if (phi < 0.0f) {
+    phi += M_2PI_F;
+  }
+}
+
+ccl_device_inline void ad_d_sphcoords(const float3 &w,
+                                      const float3 &dw_du,
+                                      const float3 &dw_dv,
+                                      ccl_private float &d_theta_du,
+                                      ccl_private float &d_phi_du,
+                                      ccl_private float &d_theta_dv,
+                                      ccl_private float &d_phi_dv)
+{
+  // d(acos(z))/dz = -1 / sqrt(1-z^2)
+  float d_acos_dz = -inversesqrtf(fmaxf(1e-8f, 1.0f - w.z * w.z));
+  d_theta_du = d_acos_dz * dw_du.z;
+  d_theta_dv = d_acos_dz * dw_dv.z;
+
+  // d(atan2(y,x))/du = (x * dy/du - y * dx/du) / (x^2 + y^2)
+  float xy_sq_sum = w.x * w.x + w.y * w.y;
+  if (xy_sq_sum < 1e-8f) {  // Handle pole case (w.x and w.y are zero)
+    d_phi_du = 0.0f;
+    d_phi_dv = 0.0f;
+  }
+  else {
+    float inv_xy_sq_sum = 1.0f / xy_sq_sum;
+    d_phi_du = (w.x * dw_du.y - w.y * dw_du.x) * inv_xy_sq_sum;
+    d_phi_dv = (w.x * dw_dv.y - w.y * dw_dv.x) * inv_xy_sq_sum;
+  }
+}
+// --- End of helper functions ---
+
+#if defined(__KERNEL_METAL__)
+/* Temporary workaround for front-end compilation bug (incorrect MNEE rendering when this is
+ * inlined). */
+__attribute__((noinline))
+#else
+ccl_device_forceinline
+#endif
+bool mnee_compute_ad_constraint_derivatives(
+    const int vertex_count,
+    ccl_private ManifoldVertex *vertices,
+    const ccl_private float3 &surface_sample_pos,
+    const bool light_fixed_direction,
+    const float3 light_sample,
+    bool reflection = false)
+{
+  for (int vi = 0; vi < vertex_count; vi++) {
+    ccl_private ManifoldVertex &v_cur = vertices[vi];
+
+    // Initialize derivative matrices
+    // C0 = dt, C1 = dp
+    v_cur.a = make_float4(0.0f, 0.0f, 0.0f, 0.0f);  // Derivatives w.r.t. previous vertex params
+    // v_cur.b is set below (Derivatives w.r.t. current vertex params)
+    v_cur.c = make_float4(0.0f, 0.0f, 0.0f, 0.0f);  // Derivatives w.r.t. next vertex params
+
+    const float3 x_prev_p = (vi == 0) ? surface_sample_pos : vertices[vi - 1].p;
+    const float3 x_cur_p = v_cur.p;
+    // x_next_p_or_dir is either the position of the next vertex, or the light direction
+    const float3 x_next_p_or_dir = (vi == vertex_count - 1) ? light_sample : vertices[vi + 1].p;
+
+    const bool at_endpoint_with_fixed_direction = (vi == vertex_count - 1 &&
+                                                   light_fixed_direction);
+
+    // Setup wo (outgoing direction from x_cur_p)
+    float3 wo;
+    if (at_endpoint_with_fixed_direction) {
+      wo = x_next_p_or_dir;  // This is already a direction vector
+    }
+    else {
+      wo = x_next_p_or_dir - x_cur_p;  // Vector from x_cur_p to x_next_p
+    }
+
+    float wo_len = len(wo);
+    if (wo_len < MNEE_MIN_DISTANCE) {
+      return false;
+    }
+
+    float ilo = 1.0f / wo_len;
+    wo *= ilo;  // Normalize wo
+
+    // Setup dwo_du_cur, dwo_dv_cur (derivatives of wo w.r.t. x_cur_p's surface parameters u,v)
+    float3 dwo_du_cur = make_float3(0.0f, 0.0f, 0.0f);
+    float3 dwo_dv_cur = make_float3(0.0f, 0.0f, 0.0f);
+    if (!at_endpoint_with_fixed_direction) {
+      // If wo is towards a movable point x_next_p, its derivative w.r.t. x_cur_p is non-zero.
+      dwo_du_cur = -ilo * (v_cur.dp_du - wo * dot(wo, v_cur.dp_du));
+      dwo_dv_cur = -ilo * (v_cur.dp_dv - wo * dot(wo, v_cur.dp_dv));
+    }
+    // If wo is a fixed direction, its derivatives w.r.t. x_cur_p's params are zero.
+
+    // Setup wi (incoming direction to x_cur_p)
+    float3 wi = x_prev_p - x_cur_p;
+    float wi_len = len(wi);
+    if (wi_len < MNEE_MIN_DISTANCE) {
+      return false;
+    }
+    float ili = 1.0f / wi_len;
+    wi *= ili;  // Normalize wi
+
+    // Setup dwi_du_cur, dwi_dv_cur (derivatives of wi w.r.t. x_cur_p's surface parameters u,v)
+    float3 dwi_du_cur = -ili * (v_cur.dp_du - wi * dot(wi, v_cur.dp_du));
+    float3 dwi_dv_cur = -ili * (v_cur.dp_dv - wi * dot(wi, v_cur.dp_dv));
+
+    // Determine if this interaction is reflection or refraction.
+    bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(v_cur.bsdf->type);
+
+    // Normal and its derivatives at current vertex x_cur_p.
+    const float3 n_surf = v_cur.n;
+    const float3 dn_surf_du = v_cur.dn_du;
+    const float3 dn_surf_dv = v_cur.dn_dv;
+
+    bool success_i = false;
+
+    // Variables for spherical coordinate derivatives
+    // For derivatives w.r.t previous vertex's params (_p)
+    float dto_du_p, dpo_du_p, dto_dv_p, dpo_dv_p;
+    float dtio_du_p, dpio_du_p, dtio_dv_p, dpio_dv_p;
+    // For derivatives w.r.t current vertex's params (_c)
+    float dto_du_c, dpo_du_c, dto_dv_c, dpo_dv_c;
+    float dtio_du_c, dpio_du_c, dtio_dv_c, dpio_dv_c;
+    // For derivatives w.r.t next vertex's params (_n)
+    float dto_du_n, dpo_du_n, dto_dv_n, dpo_dv_n;
+    float dtio_du_n, dpio_du_n, dtio_dv_n, dpio_dv_n;
+
+    // --- Strategy 1: Transform wi to wio, compare spherical coords of wio with wo ---
+    // Constraint: (theta_o - theta_io, phi_o - phi_io)
+    float3 wio;  // Transformed wi
+    bool valid_transform_wi;
+    if (reflection_vi) {
+      wio = ad_reflect(wi, n_surf);
+      valid_transform_wi = true;  // Reflection is always valid (except grazing, handled by helper)
+    }
+    else {
+      valid_transform_wi = ad_refract(wi, n_surf, v_cur.eta, wio);  // v_cur.eta is relative IOR
+    }
+
+    if (valid_transform_wi) {
+      float to, po;    // Spherical coords of wo
+      float tio, pio;  // Spherical coords of wio
+      ad_sphcoords(wo, to, po);
+      ad_sphcoords(wio, tio, pio);
+
+      float dt = to - tio;
+      float dp = po - pio;
+      // Normalize dp to [-PI, PI]
+      if (dp < -M_PI_F) {
+        dp += M_2PI_F;
+      }
+      else if (dp > M_PI_F) {
+        dp -= M_2PI_F;
+      }
+      v_cur.constraint = make_float2(dt, dp);
+
+      // Derivatives w.r.t. x_{i-1} (v_prev's parameters u_p, v_p)
+      if (vi > 0) {
+        const ccl_private ManifoldVertex &v_prev = vertices[vi - 1];
+        // Derivatives of wi w.r.t. v_prev's u,v
+        float3 dwi_du_prev = ili * (v_prev.dp_du - wi * dot(wi, v_prev.dp_du));
+        float3 dwi_dv_prev = ili * (v_prev.dp_dv - wi * dot(wi, v_prev.dp_dv));
+
+        // Derivatives of transformed wi (wio) w.r.t. v_prev's u,v
+        // n_surf and its derivatives (dn_surf_du, dv) are at x_cur, so they don't depend on
+        // v_prev's params.
+        float3 dwio_du_prev, dwio_dv_prev;
+        if (reflection_vi) {
+          ad_d_reflect(wi,
+                       dwi_du_prev,
+                       dwi_dv_prev,
+                       n_surf,
+                       make_float3(0.0f, 0.0f, 0.0f),
+                       make_float3(0.0f, 0.0f, 0.0f), /* dn_du_p, dn_dv_p = 0 */
+                       dwio_du_prev,
+                       dwio_dv_prev);
+        }
+        else {
+          ad_d_refract(wi,
+                       dwi_du_prev,
+                       dwi_dv_prev,
+                       n_surf,
+                       make_float3(0.0f, 0.0f, 0.0f),
+                       make_float3(0.0f, 0.0f, 0.0f), /* dn_du_p, dn_dv_p = 0 */
+                       v_cur.eta,
+                       dwio_du_prev,
+                       dwio_dv_prev);
+        }
+
+        // wo does not depend on v_prev's parameters, so its spherical derivatives are zero.
+        dto_du_p = 0.0f;
+        dpo_du_p = 0.0f;
+        dto_dv_p = 0.0f;
+        dpo_dv_p = 0.0f;
+        ad_d_sphcoords(
+            wio, dwio_du_prev, dwio_dv_prev, dtio_du_p, dpio_du_p, dtio_dv_p, dpio_dv_p);
+
+        // v_cur.a stores (d(dt)/du_p, d(dt)/dv_p, d(dp)/du_p, d(dp)/dv_p)
+        v_cur.a = make_float4(dto_du_p - dtio_du_p,
+                              dto_dv_p - dtio_dv_p,
+                              dpo_du_p - dpio_du_p,
+                              dpo_dv_p - dpio_dv_p);
+      }
+
+      // Derivatives w.r.t. x_{i} (v_cur's parameters u_c, v_c)
+      // dwi_du_cur, dwi_dv_cur are already computed.
+      // dwo_du_cur, dwo_dv_cur are already computed.
+      // dn_surf_du, dn_surf_dv are properties of v_cur.
+      float3 dwio_du_cur, dwio_dv_cur;  // Derivatives of wio w.r.t. v_cur's u,v
+      if (reflection_vi) {
+        ad_d_reflect(
+            wi, dwi_du_cur, dwi_dv_cur, n_surf, dn_surf_du, dn_surf_dv, dwio_du_cur, dwio_dv_cur);
+      }
+      else {
+        ad_d_refract(wi,
+                     dwi_du_cur,
+                     dwi_dv_cur,
+                     n_surf,
+                     dn_surf_du,
+                     dn_surf_dv,
+                     v_cur.eta,
+                     dwio_du_cur,
+                     dwio_dv_cur);
+      }
+      ad_d_sphcoords(wo, dwo_du_cur, dwo_dv_cur, dto_du_c, dpo_du_c, dto_dv_c, dpo_dv_c);
+      ad_d_sphcoords(wio, dwio_du_cur, dwio_dv_cur, dtio_du_c, dpio_du_c, dtio_dv_c, dpio_dv_c);
+      // v_cur.b stores (d(dt)/du_c, d(dt)/dv_c, d(dp)/du_c, d(dp)/dv_c)
+      v_cur.b = make_float4(
+          dto_du_c - dtio_du_c, dto_dv_c - dtio_dv_c, dpo_du_c - dpio_du_c, dpo_dv_c - dpio_dv_c);
+
+      // Derivatives w.r.t. x_{i+1} (v_next's parameters u_n, v_n)
+      if (vi < vertex_count - 1) {
+        const ccl_private ManifoldVertex &v_next = vertices[vi + 1];
+        // Derivatives of wo w.r.t. v_next's u,v.
+        // This case (vi < vertex_count - 1) implies wo is not a fixed direction.
+        float3 dwo_du_next = ilo * (v_next.dp_du - wo * dot(wo, v_next.dp_du));
+        float3 dwo_dv_next = ilo * (v_next.dp_dv - wo * dot(wo, v_next.dp_dv));
+
+        ad_d_sphcoords(wo, dwo_du_next, dwo_dv_next, dto_du_n, dpo_du_n, dto_dv_n, dpo_dv_n);
+        // wi and wio do not depend on v_next's parameters.
+        dtio_du_n = 0.0f;
+        dpio_du_n = 0.0f;
+        dtio_dv_n = 0.0f;
+        dpio_dv_n = 0.0f;
+
+        // v_cur.c stores (d(dt)/du_n, d(dt)/dv_n, d(dp)/du_n, d(dp)/dv_n)
+        v_cur.c = make_float4(dto_du_n - dtio_du_n,
+                              dto_dv_n - dtio_dv_n,
+                              dpo_du_n - dpio_du_n,
+                              dpo_dv_n - dpio_dv_n);
+      }
+      success_i = true;
+    }
+
+    // --- Strategy 2: Transform wo to woi, compare spherical coords of woi with wi ---
+    // Constraint: (theta_i - theta_oi, phi_i - phi_oi)
+    if (!success_i) {  // Only if first strategy failed (e.g., TIR for wi)
+      float3 woi;      // Transformed wo
+      bool valid_transform_wo;
+      if (reflection_vi) {
+        woi = ad_reflect(wo, n_surf);
+        valid_transform_wo = true;
+      }
+      else {
+        valid_transform_wo = ad_refract(wo, n_surf, v_cur.eta, woi);
+      }
+
+      if (valid_transform_wo) {
+        float ti, pi;    // Spherical coords of wi
+        float toi, poi;  // Spherical coords of woi
+        ad_sphcoords(wi, ti, pi);
+        ad_sphcoords(woi, toi, poi);
+
+        float dt = ti - toi;
+        float dp = pi - poi;
+        if (dp < -M_PI_F) {
+          dp += M_2PI_F;
+        }
+        else if (dp > M_PI_F) {
+          dp -= M_2PI_F;
+        }
+        v_cur.constraint = make_float2(dt, dp);
+
+        // Variables for derivatives are reused from Strategy 1 for clarity in each block
+        // Derivatives w.r.t. x_{i-1} (v_prev's parameters u_p, v_p)
+        if (vi > 0) {
+          const ccl_private ManifoldVertex &v_prev = vertices[vi - 1];
+          float3 dwi_du_prev = ili * (v_prev.dp_du - wi * dot(wi, v_prev.dp_du));
+          float3 dwi_dv_prev = ili * (v_prev.dp_dv - wi * dot(wi, v_prev.dp_dv));
+
+          ad_d_sphcoords(wi,
+                         dwi_du_prev,
+                         dwi_dv_prev,
+                         dtio_du_p,
+                         dpio_du_p,
+                         dtio_dv_p,
+                         dpio_dv_p);  // Using dtio/dpio for dti/dpi
+          // wo and woi do not depend on v_prev's parameters.
+          dto_du_p = 0.0f;
+          dpo_du_p = 0.0f;
+          dto_dv_p = 0.0f;
+          dpo_dv_p = 0.0f;  // Using dto/dpo for dtoi/dpoi
+
+          // v_cur.a = (d(ti)/du_p - d(toi)/du_p, ...)
+          v_cur.a = make_float4(dtio_du_p - dto_du_p,
+                                dtio_dv_p - dto_dv_p,  // dti_du_p, dti_dv_p
+                                dpio_du_p - dpo_du_p,
+                                dpio_dv_p - dpo_dv_p);  // dpi_du_p, dpi_dv_p
+        }
+
+        // Derivatives w.r.t. x_{i} (v_cur's parameters u_c, v_c)
+        // dwi_du_cur, dwi_dv_cur are already computed.
+        // dwo_du_cur, dwo_dv_cur are already computed.
+        float3 dwoi_du_cur, dwoi_dv_cur;  // Derivatives of woi w.r.t. v_cur's u,v
+        if (reflection_vi) {
+          ad_d_reflect(wo,
+                       dwo_du_cur,
+                       dwo_dv_cur,
+                       n_surf,
+                       dn_surf_du,
+                       dn_surf_dv,
+                       dwoi_du_cur,
+                       dwoi_dv_cur);
+        }
+        else {
+          ad_d_refract(wo,
+                       dwo_du_cur,
+                       dwo_dv_cur,
+                       n_surf,
+                       dn_surf_du,
+                       dn_surf_dv,
+                       v_cur.eta,
+                       dwoi_du_cur,
+                       dwoi_dv_cur);
+        }
+        ad_d_sphcoords(wi,
+                       dwi_du_cur,
+                       dwi_dv_cur,
+                       dtio_du_c,
+                       dpio_du_c,
+                       dtio_dv_c,
+                       dpio_dv_c);  // Using dtio/dpio for dti/dpi
+        ad_d_sphcoords(woi,
+                       dwoi_du_cur,
+                       dwoi_dv_cur,
+                       dto_du_c,
+                       dpo_du_c,
+                       dto_dv_c,
+                       dpo_dv_c);  // Using dto/dpo for dtoi/dpoi
+        // v_cur.b = (d(ti)/du_c - d(toi)/du_c, ...)
+        v_cur.b = make_float4(dtio_du_c - dto_du_c,
+                              dtio_dv_c - dto_dv_c,
+                              dpio_du_c - dpo_du_c,
+                              dpio_dv_c - dpo_dv_c);
+
+        // Derivatives w.r.t. x_{i+1} (v_next's parameters u_n, v_n)
+        if (vi < vertex_count - 1) {
+          const ccl_private ManifoldVertex &v_next = vertices[vi + 1];
+          float3 dwo_du_next = ilo * (v_next.dp_du - wo * dot(wo, v_next.dp_du));
+          float3 dwo_dv_next = ilo * (v_next.dp_dv - wo * dot(wo, v_next.dp_dv));
+
+          float3 dwoi_du_next, dwoi_dv_next;  // Derivatives of woi w.r.t. v_next's u,v
+          if (reflection_vi) {
+            ad_d_reflect(wo,
+                         dwo_du_next,
+                         dwo_dv_next,
+                         n_surf,
+                         make_float3(0.0f, 0.0f, 0.0f),
+                         make_float3(0.0f, 0.0f, 0.0f), /* dn_du_n, dn_dv_n = 0 */
+                         dwoi_du_next,
+                         dwoi_dv_next);
+          }
+          else {
+            ad_d_refract(wo,
+                         dwo_du_next,
+                         dwo_dv_next,
+                         n_surf,
+                         make_float3(0.0f, 0.0f, 0.0f),
+                         make_float3(0.0f, 0.0f, 0.0f), /* dn_du_n, dn_dv_n = 0 */
+                         v_cur.eta,
+                         dwoi_du_next,
+                         dwoi_dv_next);
+          }
+
+          // wi does not depend on v_next's parameters.
+          dtio_du_n = 0.0f;
+          dpio_du_n = 0.0f;
+          dtio_dv_n = 0.0f;
+          dpio_dv_n = 0.0f;  // Using dtio/dpio for dti/dpi
+          ad_d_sphcoords(woi,
+                         dwoi_du_next,
+                         dwoi_dv_next,
+                         dto_du_n,
+                         dpo_du_n,
+                         dto_dv_n,
+                         dpo_dv_n);  // Using dto/dpo for dtoi/dpoi
+
+          // v_cur.c = (d(ti)/du_n - d(toi)/du_n, ...)
+          v_cur.c = make_float4(dtio_du_n - dto_du_n,
+                                dtio_dv_n - dto_dv_n,
+                                dpio_du_n - dpo_du_n,
+                                dpio_dv_n - dpo_dv_n);
+        }
+        success_i = true;
+      }
+    }
+
+    if (!success_i) {
+      return false;  // If neither strategy worked for this vertex
+    }
+  } // End loop over vertices
+
   return true;
 }
 
@@ -414,7 +1000,9 @@ ccl_device_forceinline bool mnee_newton_solver(KernelGlobals kg,
                                                const ccl_private LightSample *ls,
                                                const bool light_fixed_direction,
                                                const int vertex_count,
-                                               ccl_private ManifoldVertex *vertices)
+                                               ccl_private ManifoldVertex *vertices,
+                                               bool reflection = false,
+                                               int caustics_constraint_derivatives = CAUSTICS_CONSTRAINT_DERIVATIVES_HV)
 {
   float2 dx[MNEE_MAX_CAUSTIC_CASTERS];
   ManifoldVertex tentative[MNEE_MAX_CAUSTIC_CASTERS];
@@ -439,9 +1027,23 @@ ccl_device_forceinline bool mnee_newton_solver(KernelGlobals kg,
   for (int iteration = 0; iteration < MNEE_MAX_ITERATIONS; iteration++) {
     if (resolve_constraint) {
       /* Calculate constraint and its derivatives for vertices. */
-      if (!mnee_compute_constraint_derivatives(
-              vertex_count, vertices, sd->P, light_fixed_direction, light_sample))
-      {
+      bool derivatives_ok;
+      if (caustics_constraint_derivatives == CAUSTICS_CONSTRAINT_DERIVATIVES_HV)
+      {  // Original half-vector
+        derivatives_ok = mnee_compute_hv_constraint_derivatives(
+            vertex_count,
+            vertices,
+            sd->P,
+            light_fixed_direction,
+            light_sample,
+            false /*reflection is false here*/);
+      }
+      else {  // CAUSTICS_CONSTRAINT_DERIVATIVES_AD -> new angle-difference
+        derivatives_ok = mnee_compute_ad_constraint_derivatives(
+            vertex_count, vertices, sd->P, light_fixed_direction, light_sample, false);
+      }
+
+      if (!derivatives_ok) {
         return false;
       }
 
@@ -546,7 +1148,13 @@ ccl_device_forceinline bool mnee_newton_solver(KernelGlobals kg,
         const float3 wo = (vi == vertex_count - 1) ? light_fixed_direction ? ls->D : ls->P - tv.p :
                                                      tentative[vi + 1].p - tv.p;
 
-        if (dot(tv.n, wi) * dot(tv.n, wo) >= 0.f) {
+        bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(vertices[vi].bsdf->type);
+        float dot_in = dot(tv.n, wi);
+        float dot_out = dot(tv.n, wo);
+
+        if ((!reflection_vi && dot_in * dot_out >= 0.0f) ||
+            (reflection_vi && dot_in * dot_out < 0.0f))
+        {
           reduce_stepsize = true;
           break;
         }
@@ -609,7 +1217,9 @@ ccl_device_forceinline float2 mnee_sample_bsdf_dh(ClosureType type,
 
   /* Map sampled angles to micro-normal direction h. */
   float tan2_theta = alpha2;
-  if (type == CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID) {
+  if (type == CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID ||
+      type == CLOSURE_BSDF_MICROFACET_BECKMANN_ID)  // how about glass?
+  {
     tan2_theta *= -logf(1.0f - sample_u);
   }
   else { /* type == CLOSURE_BSDF_MICROFACET_GGX_REFRACTION_ID assumed */
@@ -629,22 +1239,34 @@ ccl_device_forceinline float2 mnee_sample_bsdf_dh(ClosureType type,
 ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
                                                             ccl_private ShaderClosure *closure,
                                                             const float3 wi,
-                                                            const float3 wo)
+                                                            const float3 wo,
+                                                            bool reflection = false)
 {
   ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)closure;
 
   const float cosNI = dot(bsdf->N, wi);
   const float cosNO = dot(bsdf->N, wo);
 
-  const float3 Ht = normalize(-(bsdf->ior * wo + wi));
-  const float cosHI = dot(Ht, wi);
+  float3 Ht;
+  bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(bsdf->type);
+
+  if (reflection_vi) {
+    Ht = normalize(wi + wo);
+  }
+  else {
+    Ht = normalize(-(bsdf->ior * wo + wi));
+  }
+  float cosHI = dot(Ht, wi);
+  // float cosHO = dot(Ht, wo);
 
   const float alpha2 = bsdf->alpha_x * bsdf->alpha_y;
   const float cosThetaM = dot(bsdf->N, Ht);
 
   /* Now calculate G1(i, m) and G1(o, m). */
   float G;
-  if (bsdf->type == CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID) {
+  if (bsdf->type == CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID ||
+      bsdf->type == CLOSURE_BSDF_MICROFACET_BECKMANN_ID)  // how about glass?
+  {
     G = bsdf_G<MicrofacetType::BECKMANN>(alpha2, cosNI, cosNO);
   }
   else { /* bsdf->type == CLOSURE_BSDF_MICROFACET_GGX_REFRACTION_ID assumed */
@@ -664,7 +1286,25 @@ ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
    *              = (1 - F) * G * |h.wi / (n.wi * n.h^2)|
    */
   /* TODO: energy compensation for multi-GGX. */
-  return bsdf->weight * transmittance * G * fabsf(cosHI / (cosNI * sqr(cosThetaM)));
+  if (reflection_vi) {
+    /* Reflection contribution:
+     * TODO: integrate reflection MIS calculations.
+     */
+    const float mis_weight = G;  // incomplete
+    return bsdf->weight * reflectance * mis_weight;
+  }
+  else {
+    /* Refraction contribution:
+     * bsdf_do = (1 - F) * D_do * G * |h.wi| / (n.wi * n.wo)
+     *  pdf_dh = D_dh * cosThetaM
+     *    D_do = D_dh * |dh/do|
+     *
+     * contribution = bsdf_do * |do/dh| * |n.wo / n.h| / pdf_dh
+     *              = (1 - F) * G * |h.wi / (n.wi * n.h^2)|
+     */
+    const float mis_weight = G * fabsf(cosHI / (cosNI * sqr(cosThetaM)));
+    return bsdf->weight * transmittance * mis_weight;
+  }
 }
 
 /* Compute transfer matrix determinant |T1| = |dx1/dxn| (and |dh/dx| in the process) */
@@ -674,7 +1314,8 @@ ccl_device_forceinline bool mnee_compute_transfer_matrix(const ccl_private Shade
                                                          const int vertex_count,
                                                          ccl_private ManifoldVertex *vertices,
                                                          ccl_private float *dx1_dxlight,
-                                                         ccl_private float *dh_dx)
+                                                         ccl_private float *dh_dx,
+                                                         bool reflection = false)
 {
   /* Simplified block tridiagonal LU factorization. */
   float4 Li;
@@ -719,10 +1360,15 @@ ccl_device_forceinline bool mnee_compute_transfer_matrix(const ccl_private Shade
   const float ili = 1.f / len(wi);
   wi *= ili;
 
-  /* Invert ior if coming from inside. */
-  float eta = m.eta;
-  if (dot(wi, m.ng) < .0f) {
-    eta = 1.f / eta;
+  bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(m.bsdf->type);
+  float eta = 1.0f;
+
+  if (!reflection_vi) {
+    /* Invert ior if coming from inside. */
+    eta = m.eta;
+    if (dot(wi, m.ng) < 0.0f) {
+      eta = 1.0f / eta;
+    }
   }
 
   float dxn_dwn;
@@ -733,11 +1379,23 @@ ccl_device_forceinline bool mnee_compute_transfer_matrix(const ccl_private Shade
     const float3 wo = ls->D;
 
     /* Half vector. */
-    float3 H = -(wi + eta * wo);
-    const float ilh = 1.f / len(H);
-    H *= ilh;
+    float3 H;
+    float ilh;
+    float ilo;
 
-    const float ilo = -eta * ilh;
+    if (reflection_vi) {
+      /* Reflection: no sign flip and eta scaling. */
+      H = normalize(wi + wo);
+      ilh = 1.0f / len(H);
+      ilo = ilh;
+    }
+    else {
+      /* Refraction: sign flip and eta scaling. */
+      H = -(wi + eta * wo);
+      ilh = 1.0f / len(H);
+      H *= ilh;
+      ilo = -eta * ilh;
+    }
 
     const float cos_theta = dot(wo, m.n);
     const float sin_theta = sin_from_cos(cos_theta);
@@ -749,6 +1407,12 @@ ccl_device_forceinline bool mnee_compute_transfer_matrix(const ccl_private Shade
     float3 dH_dphi = ilo * sin_theta * (-sin_phi * s + cos_phi * t);
     dH_dtheta -= H * dot(dH_dtheta, H);
     dH_dphi -= H * dot(dH_dphi, H);
+
+    /* Sign flip for refraction only. */
+    if (!reflection_vi) {
+      dH_dtheta = -dH_dtheta;
+      dH_dphi = -dH_dphi;
+    }
 
     /* Constraint derivatives WRT light direction expressed
      * in spherical coordinates (theta, phi). */
@@ -765,18 +1429,33 @@ ccl_device_forceinline bool mnee_compute_transfer_matrix(const ccl_private Shade
     wo *= ilo;
 
     /* Half vector. */
-    float3 H = -(wi + eta * wo);
-    const float ilh = 1.f / len(H);
-    H *= ilh;
+    float3 H;
+    float ilh;
 
-    ilo *= eta * ilh;
+    if (reflection_vi) {
+      /* Reflection: no sign flip and eta scaling. */
+      H = normalize(wi + wo);
+      ilh = 1.0f / len(H);
+      ilo *= ilh;
+    }
+    else {
+      /* Refraction: sign flip and eta scaling. */
+      H = -(wi + eta * wo);
+      ilh = 1.0f / len(H);
+      H *= ilh;
+      ilo *= eta * ilh;
+    }
 
     float3 dH_du = (dp_du - wo * dot(wo, dp_du)) * ilo;
     float3 dH_dv = (dp_dv - wo * dot(wo, dp_dv)) * ilo;
     dH_du -= H * dot(dH_du, H);
     dH_dv -= H * dot(dH_dv, H);
-    dH_du = -dH_du;
-    dH_dv = -dH_dv;
+
+    /* Sign flip for refraction only. */
+    if (!reflection_vi) {
+      dH_du = -dH_du;
+      dH_dv = -dH_dv;
+    }
 
     dc_dlight = make_float4(dot(dH_du, s), dot(dH_dv, s), dot(dH_du, t), dot(dH_dv, t));
 
@@ -804,7 +1483,8 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
                                                    const bool light_fixed_direction,
                                                    const int vertex_count,
                                                    ccl_private ManifoldVertex *vertices,
-                                                   ccl_private BsdfEval *throughput)
+                                                   ccl_private BsdfEval *throughput,
+                                                   bool reflection = false)
 {
   float wo_len;
   float3 wo = normalize_len(vertices[0].p - sd->P, &wo_len);
@@ -932,7 +1612,7 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
     /* Evaluate product term inside eq.6 at solution interface. vi
      * divided by corresponding sampled pdf:
      * fr(vi)_do / pdf_dh(vi) x |do/dh| x |n.wo / n.h| */
-    const Spectrum bsdf_contribution = mnee_eval_bsdf_contribution(kg, v.bsdf, wi, wo);
+    const Spectrum bsdf_contribution = mnee_eval_bsdf_contribution(kg, v.bsdf, wi, wo, reflection);
     bsdf_eval_mul(throughput, bsdf_contribution);
   }
 

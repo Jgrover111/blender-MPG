@@ -659,6 +659,9 @@ class CYCLES_RENDER_PT_light_paths_caustics(CyclesButtonsPanel, Panel):
 
         col = layout.column()
         col.prop(cscene, "blur_glossy")
+        if use_mnee(context):
+            col.prop(cscene, "caustics_sampling_strategy")
+            col.prop(cscene, "caustics_constraint_derivatives")
         col = layout.column(heading="Caustics", align=True)
         col.prop(cscene, "caustics_reflective", text="Reflective")
         col.prop(cscene, "caustics_refractive", text="Refractive")

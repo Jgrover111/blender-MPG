@@ -312,6 +312,7 @@ set(SRC_KERNEL_INTEGRATOR_HEADERS
   integrator/shadow_catcher.h
   integrator/shadow_linking.h
   integrator/shadow_state_template.h
+  integrator/sms.h
   integrator/state_flow.h
   integrator/state.h
   integrator/state_template.h

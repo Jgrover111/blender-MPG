@@ -186,6 +186,8 @@ KERNEL_STRUCT_MEMBER(integrator, int, transparent_shadows)
 /* Caustics. */
 KERNEL_STRUCT_MEMBER(integrator, int, caustics_reflective)
 KERNEL_STRUCT_MEMBER(integrator, int, caustics_refractive)
+KERNEL_STRUCT_MEMBER(integrator, int, caustics_sampling_strategy)
+KERNEL_STRUCT_MEMBER(integrator, int, caustics_constraint_derivatives)
 KERNEL_STRUCT_MEMBER(integrator, float, filter_glossy)
 /* Seed. */
 KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE

@@ -580,6 +580,81 @@ ccl_device_inline void film_write_direct_light(KernelGlobals kg,
 #endif
 }
 
+/* Write direct light contribution calculated via SMS.
+ * This handles Combined, Direct Diffuse/Glossy, Lightgroups, and Adaptive Sampling.
+ * Assumes the contribution is already clamped. */
+ccl_device_inline void film_write_direct_light_sms(KernelGlobals kg,
+                                                   ConstIntegratorState state,
+                                                   const Spectrum contribution,
+                                                   const ccl_private BsdfEval *bsdf_eval,
+                                                   const int lightgroup,
+                                                   ccl_global float *ccl_restrict render_buffer)
+{
+  ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
+  const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+  const int sample = INTEGRATOR_STATE(state, path, sample);
+
+  /* Write combined pass. */
+#ifdef __SHADOW_CATCHER__
+  if (film_write_shadow_catcher(kg, path_flag, contribution, buffer)) {
+    // Shadow catcher handled the contribution fully.
+    // We still need to potentially write to the adaptive buffer,
+    // but not the combined or light passes.
+    film_write_adaptive_buffer(kg, sample, contribution, buffer);
+    return;  // Stop further processing for standard passes.
+  }
+#endif
+  if (kernel_data.film.light_pass_flag & PASSMASK(COMBINED)) {
+    film_write_pass_spectrum(buffer + kernel_data.film.pass_combined, contribution);
+  }
+  film_write_adaptive_buffer(kg, sample, contribution, buffer);
+
+#ifdef __PASSES__
+  if (kernel_data.film.light_pass_flag & PASS_ANY) {
+    /* Don't write any light passes for shadow catcher. */
+    if (path_flag & PATH_RAY_SHADOW_CATCHER_HIT) {
+      return;
+    }
+
+    /* Write lightgroup pass. */
+    if (lightgroup != LIGHTGROUP_NONE && kernel_data.film.pass_lightgroup != PASS_UNUSED) {
+      film_write_pass_spectrum(buffer + kernel_data.film.pass_lightgroup + 3 * lightgroup,
+                               contribution);
+    }
+
+    /* Write Direct Diffuse/Glossy passes based on receiver's BSDF */
+    if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) {
+      /* Calculate weights from the provided bsdf_eval. */
+      Spectrum diffuse_weight = bsdf_eval_pass_diffuse_weight(bsdf_eval);
+      Spectrum glossy_weight = bsdf_eval_pass_glossy_weight(bsdf_eval);
+      Spectrum transmission_weight = max(zero_spectrum(),
+                                         one_spectrum() - diffuse_weight - glossy_weight);
+
+      /* Write Diffuse Direct Pass. */
+      if (kernel_data.film.pass_diffuse_direct != PASS_UNUSED && !is_zero(diffuse_weight)) {
+        film_write_pass_spectrum(buffer + kernel_data.film.pass_diffuse_direct,
+                                 diffuse_weight * contribution);
+      }
+
+      /* Write Glossy Direct Pass. */
+      if (kernel_data.film.pass_glossy_direct != PASS_UNUSED && !is_zero(glossy_weight)) {
+        film_write_pass_spectrum(buffer + kernel_data.film.pass_glossy_direct,
+                                 glossy_weight * contribution);
+      }
+
+      /* Write Transmission Direct Pass. */
+      /* SMS currently assumes non-transmission receiver, so transmission_weight is likely zero. */
+      if (kernel_data.film.pass_transmission_direct != PASS_UNUSED &&
+          !is_zero(transmission_weight))
+      {
+        film_write_pass_spectrum(buffer + kernel_data.film.pass_transmission_direct,
+                                 transmission_weight * contribution);
+      }
+    }
+  }
+#endif
+}
+
 /* Write transparency to render buffer.
  *
  * Note that we accumulate transparency = 1 - alpha in the render buffer.

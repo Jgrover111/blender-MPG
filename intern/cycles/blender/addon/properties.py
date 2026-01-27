@@ -365,6 +365,31 @@ enum_direct_light_sampling_type = (
      2),
 )
 
+enum_caustics_sampling_strategy = (
+    ('MNEE',
+     "MNEE",
+     "Original Manifold Next Event Estimation",
+     0),
+    ('SMS_UNBIASED',
+     "Unbiased SMS",
+     "Specular Manifold Sampling using unbiased algorithm (new)",
+     1),
+    ('SMS_BIASED',
+     "Biased SMS",
+     "Specular Manifold Sampling using biased algorithm (new)",
+     2),
+)
+
+enum_caustics_constraint_derivatives = (
+    ('HALF_VECTOR',
+     "Half Vector",
+     "Original half vector constraints",
+     0),
+    ('ANGLE_DIFF',
+     "Angle Difference",
+     "New angle difference constraints (experimental)",
+     1),
+)
 
 def update_render_passes(self, context):
     view_layer = context.view_layer
@@ -667,9 +692,23 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
     blur_glossy: FloatProperty(
         name="Filter Glossy",
         description="Adaptively blur glossy shaders after blurry bounces, "
-        "to reduce noise at the cost of accuracy",
+                    "to reduce noise at the cost of accuracy",
         min=0.0, max=10.0,
         default=1.0,
+    )
+
+    caustics_sampling_strategy: EnumProperty(
+        name="Sampling Strategy",
+        description="Method to use for caustic sampling",
+        items=enum_caustics_sampling_strategy,
+        default='MNEE',
+    )
+
+    caustics_constraint_derivatives: EnumProperty(
+        name="Constraint Derivatives",
+        description="Method to use for caustic derivatives",
+        items=enum_caustics_constraint_derivatives,
+        default='HALF_VECTOR',
     )
 
     use_guiding: BoolProperty(
