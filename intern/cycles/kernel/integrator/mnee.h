@@ -1560,7 +1560,20 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
   const Spectrum light_eval = light_sample_shader_eval(kg, state, sd_mnee, ls, sd->time);
   bsdf_eval_mul(throughput, light_eval / ls->pdf);
 
-  /* Generalized geometry term. */
+  /* Generalized geometry term.
+   *
+   * The geometric term requires half-vector constraint derivatives regardless of which
+   * constraint formulation was used by the solver. This is because the geometric term
+   * represents how the path geometry changes with endpoint position, which is naturally
+   * expressed in the half-vector representation.
+   *
+   * Recompute half-vector derivatives to ensure correct geometric term calculation. */
+  const float3 light_sample = light_fixed_direction ? ls->D : ls->P;
+  if (!mnee_compute_hv_constraint_derivatives(
+          vertex_count, vertices, sd->P, light_fixed_direction, light_sample, reflection))
+  {
+    return false;
+  }
 
   float dh_dx;
   float dx1_dxlight;
