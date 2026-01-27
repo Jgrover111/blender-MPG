@@ -647,10 +647,48 @@ bool mnee_compute_ad_constraint_derivatives(
     // Determine if this interaction is reflection or refraction.
     bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(v_cur.bsdf->type);
 
-    // Normal and its derivatives at current vertex x_cur_p.
-    const float3 n_surf = v_cur.n;
-    const float3 dn_surf_du = v_cur.dn_du;
-    const float3 dn_surf_dv = v_cur.dn_dv;
+    // Build local tangent frame (same as half-vector constraint).
+    const float dp_du_dot_n = dot(v_cur.dp_du, v_cur.n);
+    float3 s = v_cur.dp_du - dp_du_dot_n * v_cur.n;
+    const float inv_len_s = 1.0f / len(s);
+    s *= inv_len_s;
+    const float3 t = cross(v_cur.n, s);
+
+    // Construct microfacet normal from shading normal and n_offset.
+    // n_offset contains (sin_theta * cos_phi, sin_theta * sin_phi) in the local frame.
+    // The z component (cos_theta) is: sqrt(1 - n_offset.x^2 - n_offset.y^2)
+    const float n_offset_z = safe_sqrtf(1.0f - v_cur.n_offset.x * v_cur.n_offset.x -
+                                        v_cur.n_offset.y * v_cur.n_offset.y);
+    float3 n_micro = s * v_cur.n_offset.x + t * v_cur.n_offset.y + v_cur.n * n_offset_z;
+    n_micro = normalize(n_micro);
+
+    // Compute derivatives of the microfacet normal.
+    // The tangent frame (s, t, n) rotates as the shading normal changes.
+    // Since s is orthogonal to n by construction, when n changes by dn,
+    // s gets a component along the new normal direction.
+    const float3 dn_du = v_cur.dn_du;
+    const float3 dn_dv = v_cur.dn_dv;
+
+    // Derivatives of tangent frame vectors due to normal rotation.
+    // ds/du arises from keeping s orthogonal to the rotating normal.
+    // dt/du = d/du(cross(n, s)) = cross(dn/du, s) + cross(n, ds/du)
+    const float3 ds_du = -dot(dn_du, s) * v_cur.n;
+    const float3 ds_dv = -dot(dn_dv, s) * v_cur.n;
+    const float3 dt_du = cross(dn_du, s) + cross(v_cur.n, ds_du);
+    const float3 dt_dv = cross(dn_dv, s) + cross(v_cur.n, ds_dv);
+
+    // Derivative of microfacet normal: m = s * n_offset.x + t * n_offset.y + n * n_offset_z
+    float3 dn_micro_du = ds_du * v_cur.n_offset.x + dt_du * v_cur.n_offset.y + dn_du * n_offset_z;
+    float3 dn_micro_dv = ds_dv * v_cur.n_offset.x + dt_dv * v_cur.n_offset.y + dn_dv * n_offset_z;
+
+    // Project out component along n_micro to maintain unit length constraint.
+    dn_micro_du = dn_micro_du - n_micro * dot(dn_micro_du, n_micro);
+    dn_micro_dv = dn_micro_dv - n_micro * dot(dn_micro_dv, n_micro);
+
+    // Use microfacet normal and its derivatives for angle-difference constraint
+    const float3 n_surf = n_micro;
+    const float3 dn_surf_du = dn_micro_du;
+    const float3 dn_surf_dv = dn_micro_dv;
 
     bool success_i = false;
 
