@@ -1616,6 +1616,26 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
     bsdf_eval_mul(throughput, bsdf_contribution);
   }
 
+  /* Check visibility from last specular vertex to light.
+   * This is critical for SMS which doesn't use the shadow ray mechanism. */
+  if (!light_fixed_direction) {
+    /* For point/area lights, check visibility to the light position. */
+    const ccl_private ManifoldVertex &last_v = vertices[vertex_count - 1];
+    probe_ray.P = last_v.p;
+    probe_ray.self.object = last_v.object;
+    probe_ray.self.prim = last_v.prim;
+    probe_ray.D = normalize_len(ls->P - last_v.p, &probe_ray.tmax);
+    /* Shrink tmax slightly to avoid self-intersection with the light. */
+    probe_ray.tmax *= (1.0f - 1e-3f);
+
+    if (scene_intersect(kg, &probe_ray, PATH_RAY_SHADOW, &probe_isect)) {
+      /* Something is blocking the path to the light. */
+      return false;
+    }
+  }
+  /* For distant/environment lights with fixed direction, visibility was already
+   * checked implicitly during the manifold walk since we trace towards infinity. */
+
   /* Restore original state path bounce info. */
   INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
   INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce;

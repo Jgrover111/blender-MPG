@@ -379,8 +379,7 @@ ccl_device
             sms_contribution = integrate_sms_unbiased(
                 kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
           }
-
-          if (caustics_sampling_strategy == CAUSTICS_SAMPLING_STRATEGY_SMS_BIASED) {
+          else if (caustics_sampling_strategy == CAUSTICS_SAMPLING_STRATEGY_SMS_BIASED) {
             /* Use biased SMS */
             sms_contribution = integrate_sms_biased(
                 kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
@@ -399,9 +398,10 @@ ccl_device
           }
 
           /* Fallback to original MNEE if SMS is disabled, failed, or no caster found. */
-          // if (caustics_sampling_strategy == CAUSTICS_SAMPLING_STRATEGY_MNEE)
-          mnee_vertex_count = kernel_path_mnee_sample(
-              kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+          if (caustics_sampling_strategy == CAUSTICS_SAMPLING_STRATEGY_MNEE) {
+            mnee_vertex_count = kernel_path_mnee_sample(
+                kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+          }
         }
       }
     }
