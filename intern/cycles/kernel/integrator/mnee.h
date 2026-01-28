@@ -1294,8 +1294,7 @@ ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
   else {
     Ht = normalize(-(bsdf->ior * wo + wi));
   }
-  float cosHI = dot(Ht, wi);
-  // float cosHO = dot(Ht, wo);
+  const float cosHI = dot(Ht, wi);
 
   const float alpha2 = bsdf->alpha_x * bsdf->alpha_y;
   const float cosThetaM = dot(bsdf->N, Ht);
@@ -1315,32 +1314,33 @@ ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
   Spectrum transmittance;
   microfacet_fresnel(kg, bsdf, cosHI, nullptr, &reflectance, &transmittance);
 
-  /*
-   * bsdf_do = (1 - F) * D_do * G * |h.wi| / (n.wi * n.wo)
-   *  pdf_dh = D_dh * cosThetaM
-   *    D_do = D_dh * |dh/do|
+  /* BSDF contribution for SMS/MNEE specular vertices.
    *
-   * contribution = bsdf_do * |do/dh| * |n.wo / n.h| / pdf_dh
-   *              = (1 - F) * G * |h.wi / (n.wi * n.h^2)|
+   * When sampling microfacet normals from the distribution D with PDF p_h = D * |n·h|,
+   * and evaluating the BSDF, the D terms cancel. The remaining contribution after
+   * accounting for the half-vector to direction Jacobian is:
+   *
+   * Reflection: F * G * |h·wo| / (|n·wi| * |n·wo| * |n·h|)
+   * Refraction: (1-F) * G * |h·wi| / (η² * |n·wi| * |n·wo| * |n·h|)
+   *
+   * The η² factor in refraction accounts for solid angle compression.
+   * Reference: Zeltner et al. 2020, "Specular Manifold Sampling"
    */
   /* TODO: energy compensation for multi-GGX. */
   if (reflection_vi) {
     /* Reflection contribution:
-     * TODO: integrate reflection MIS calculations.
-     */
-    const float mis_weight = G;  // incomplete
+     * F * G * |h·wo| / (|n·wi| * |n·wo| * |n·h|) */
+    const float cosHO = dot(Ht, wo);
+    const float mis_weight = G * fabsf(cosHO) /
+                             (fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
     return bsdf->weight * reflectance * mis_weight;
   }
   else {
     /* Refraction contribution:
-     * bsdf_do = (1 - F) * D_do * G * |h.wi| / (n.wi * n.wo)
-     *  pdf_dh = D_dh * cosThetaM
-     *    D_do = D_dh * |dh/do|
-     *
-     * contribution = bsdf_do * |do/dh| * |n.wo / n.h| / pdf_dh
-     *              = (1 - F) * G * |h.wi / (n.wi * n.h^2)|
-     */
-    const float mis_weight = G * fabsf(cosHI / (cosNI * sqr(cosThetaM)));
+     * (1-F) * G * |h·wi| / (η² * |n·wi| * |n·wo| * |n·h|) */
+    const float eta_sq = bsdf->ior * bsdf->ior;
+    const float mis_weight = G * fabsf(cosHI) /
+                             (eta_sq * fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
     return bsdf->weight * transmittance * mis_weight;
   }
 }
