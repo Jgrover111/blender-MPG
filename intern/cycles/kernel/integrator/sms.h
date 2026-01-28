@@ -24,7 +24,7 @@
 // NOLINTBEGIN
 #define SMS_MAX_TRIALS 64   /* Maximum iterations for unbiased SMS probability estimation. */
 #define SMS_BIASED_BUDGET 2 /* Budget for unique solutions in biased SMS. */
-#define SMS_EPSILON 1e-5f   /* Small epsilon for float comparisons in solution checking. */
+#define SMS_UNIQUENESS_THRESHOLD 1e-4f /* Threshold for direction dot product comparison. */
 // NOLINTEND
 
 CCL_NAMESPACE_BEGIN
@@ -342,54 +342,52 @@ integrate_sms_unbiased(KernelGlobals kg,
     return zero_spectrum();
   }
 
-  /* Store the reference solution vertex positions for comparison during Bernoulli trials. */
-  float3 solution_p_ref[MNEE_MAX_CAUSTIC_CASTERS];
-  for (int v_idx = 0; v_idx < vertex_count; ++v_idx) {
-    solution_p_ref[v_idx] = vertices_ref[v_idx].p;
-  }
+  /* Store the reference solution direction for comparison during Bernoulli trials.
+   * Following the reference implementation, we compare directions (dot product)
+   * rather than positions, as this is more robust to numerical precision issues. */
+  const float3 direction_ref = normalize(vertices_ref[0].p - sd->P);
 
-  /* 3. Estimate inverse probability using Bernoulli trials (Geometric series estimator). */
+  /* 3. Estimate inverse probability using Bernoulli trials (Geometric series estimator).
+   *
+   * IMPORTANT: We use an LCG (Linear Congruential Generator) for the Bernoulli trials
+   * to ensure each trial gets truly independent random samples. Using the path RNG
+   * with the same dimension would return correlated or identical values. */
   float inv_prob_estimate = 1.0f; /* Initialize estimate for 1/p_k. */
-  int iterations = 0;             /* Iteration counter for trial limit. */
 
-  while (true) {
-    iterations++;
-    /* Check if the maximum number of trials is exceeded. */
-    if (iterations > SMS_MAX_TRIALS) {
-      inv_prob_estimate = 0.0f; /* Estimation failed if max trials reached without finding ref. */
-      break;
-    }
+  /* Initialize LCG state for independent random samples in Bernoulli trials. */
+  uint lcg_state = lcg_state_init(INTEGRATOR_STATE(state, path, rng_pixel),
+                                  INTEGRATOR_STATE(state, path, rng_offset),
+                                  INTEGRATOR_STATE(state, path, sample),
+                                  0x51633e2d);
 
+  for (int iterations = 0; iterations < SMS_MAX_TRIALS; iterations++) {
     /* Sample a new trial path (multi-scatter equivalent of x₂'..x_{k+1}'). */
     ManifoldVertex vertices_trial[MNEE_MAX_CAUSTIC_CASTERS];
-    float2 h_offsets_trial[MNEE_MAX_CAUSTIC_CASTERS]; /* Microfacet offsets for this trial. */
 
-    /* Initialize trial vertices with newly sampled offsets. */
+    /* Initialize trial vertices with newly sampled offsets using LCG. */
     for (int v_idx = 0; v_idx < vertex_count; ++v_idx) {
-      h_offsets_trial[v_idx] = zero_float2();
+      float2 h_offset_trial = zero_float2();
       ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)
           compatible_bsdfs[v_idx];
 
       /* Sample offset only if BSDF is rough. */
       if (microfacet_bsdf->alpha_x > 0.0f && microfacet_bsdf->alpha_y > 0.0f) {
-        const float2 bsdf_uv = path_state_rng_2D(kg, rng_state, PRNG_SURFACE_BSDF);
-        h_offsets_trial[v_idx] = mnee_sample_bsdf_dh(compatible_bsdfs[v_idx]->type,
-                                                     microfacet_bsdf->alpha_x,
-                                                     microfacet_bsdf->alpha_y,
-                                                     bsdf_uv.x,
-                                                     bsdf_uv.y);
+        /* Use LCG for independent random samples each trial. */
+        const float u = lcg_step_float(&lcg_state);
+        const float v = lcg_step_float(&lcg_state);
+        h_offset_trial = mnee_sample_bsdf_dh(compatible_bsdfs[v_idx]->type,
+                                             microfacet_bsdf->alpha_x,
+                                             microfacet_bsdf->alpha_y,
+                                             u,
+                                             v);
       }
 
-      /* Setup trial vertex.
-       * IMPORTANT: Pass nullptr for rng_state to use intersection barycentrics,
-       * not random barycentrics. For Bernoulli probability estimation to be correct,
-       * all trials must start at the same position as the reference path.
-       * Only the microfacet offsets should vary between trials. */
+      /* Setup trial vertex with intersection barycentrics (not random). */
       mnee_setup_manifold_vertex(kg,
                                  &vertices_trial[v_idx],
                                  compatible_bsdfs[v_idx],
                                  compatible_etas[v_idx],
-                                 h_offsets_trial[v_idx],
+                                 h_offset_trial,
                                  &probe_ray,
                                  &caster_isects[v_idx],
                                  sd_mnee,
@@ -408,35 +406,27 @@ integrate_sms_unbiased(KernelGlobals kg,
                                               caustics_constraint_derivatives);
 
     if (converged_trial) {
-      /* Check if the trial solution path matches the reference solution path.
-       * Compare positions of all vertices in the chain. */
-      bool match = true;
-      for (int v_idx = 0; v_idx < vertex_count; ++v_idx) {
-        if (len_squared(vertices_trial[v_idx].p - solution_p_ref[v_idx]) >=
-            SMS_EPSILON * SMS_EPSILON)
-        {
-          match = false; /* Mismatch found. */
-          break;
-        }
-      }
-
-      if (match) {
-        /* Found the same solution path, terminate Bernoulli trials. */
+      /* Check if the trial solution matches the reference using direction comparison.
+       * This is more robust than position comparison per the reference implementation.
+       * Two directions match when their dot product is sufficiently close to 1.0. */
+      const float3 direction_trial = normalize(vertices_trial[0].p - sd->P);
+      if (fabsf(dot(direction_ref, direction_trial) - 1.0f) < SMS_UNIQUENESS_THRESHOLD) {
+        /* Found the same solution, terminate Bernoulli trials. */
         break;
       }
     }
 
-    /* Trial failed (didn't converge or didn't match reference path). Increment estimator. */
+    /* Trial didn't match reference path. Increment estimator. */
     inv_prob_estimate += 1.0f;
   }
 
-  /* 4. Calculate final contribution. */
-  if (inv_prob_estimate <= 0.0f) {
-    /* Probability estimation failed (e.g., exceeded max trials). */
+  /* Check if we exceeded max trials without finding a match. */
+  if (inv_prob_estimate > SMS_MAX_TRIALS) {
+    /* Probability estimation failed. */
     return zero_spectrum();
   }
 
-  /* Calculate the contribution of the *reference path*. */
+  /* 4. Calculate the contribution of the *reference path*. */
   bool contribution_success = mnee_path_contribution(
       kg,
       state,
