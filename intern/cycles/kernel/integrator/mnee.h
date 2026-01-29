@@ -1271,14 +1271,19 @@ ccl_device_forceinline float2 mnee_sample_bsdf_dh(ClosureType type,
 /* Evaluate product term inside eq.6 at solution interface vi
  * divided by corresponding sampled pdf:
  * fr(vi)_do / pdf_dh(vi) x |do/dh| x |n.wo / n.h|
- * We assume here that the pdf (in half-vector measure) is the same as
- * the one calculation when sampling the microfacet normals from the
- * specular chain above: this allows us to simplify the bsdf weight */
+ *
+ * For MNEE (sms_mode=false): Uses standard microfacet importance sampling with
+ * PDF = D * |n·h| / (4 * |h·wo|) in direction space. The formula includes the
+ * half-vector to direction Jacobian.
+ *
+ * For SMS (sms_mode=true): We sample h_offset in projected (hx, hy) space with
+ * PDF = D. The BSDF/D formula is simpler without the Jacobian factors. */
 ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
                                                             ccl_private ShaderClosure *closure,
                                                             const float3 wi,
                                                             const float3 wo,
-                                                            bool reflection = false)
+                                                            bool reflection = false,
+                                                            bool sms_mode = false)
 {
   ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)closure;
 
@@ -1316,31 +1321,48 @@ ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
 
   /* BSDF contribution for SMS/MNEE specular vertices.
    *
-   * When sampling microfacet normals from the distribution D with PDF p_h = D * |n·h|,
-   * and evaluating the BSDF, the D terms cancel. The remaining contribution after
-   * accounting for the half-vector to direction Jacobian is:
-   *
+   * For MNEE (sms_mode=false): Standard microfacet importance sampling with
+   * PDF = D * |n·h| / (4 * |h·wo|) in outgoing direction space.
    * Reflection: F * G * |h·wo| / (|n·wi| * |n·wo| * |n·h|)
    * Refraction: (1-F) * G * |h·wi| / (η² * |n·wi| * |n·wo| * |n·h|)
    *
-   * The η² factor in refraction accounts for solid angle compression.
+   * For SMS (sms_mode=true): We sample h_offset in projected (hx, hy) space
+   * with PDF = D, which corresponds to PDF = D * |n·h| in solid angle measure.
+   * We divide BSDF by this PDF directly without the direction Jacobian.
+   * Reflection: F * G / (4 * |n·wi| * |n·wo| * |n·h|)
+   * Refraction: (1-F) * G / (4 * η² * |n·wi| * |n·wo| * |n·h|)
+   *
    * Reference: Zeltner et al. 2020, "Specular Manifold Sampling"
    */
   /* TODO: energy compensation for multi-GGX. */
   if (reflection_vi) {
-    /* Reflection contribution:
-     * F * G * |h·wo| / (|n·wi| * |n·wo| * |n·h|) */
     const float cosHO = dot(Ht, wo);
-    const float mis_weight = G * fabsf(cosHO) /
-                             (fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+    float mis_weight;
+    if (sms_mode) {
+      /* SMS: BSDF / (D * |n·h|) in half-vector solid angle measure.
+       * F * G / (4 * |n·wi| * |n·wo| * |n·h|) */
+      mis_weight = G / (4.0f * fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+    }
+    else {
+      /* MNEE: Standard importance sampling in outgoing direction measure.
+       * F * G * |h·wo| / (|n·wi| * |n·wo| * |n·h|) */
+      mis_weight = G * fabsf(cosHO) / (fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+    }
     return bsdf->weight * reflectance * mis_weight;
   }
   else {
-    /* Refraction contribution:
-     * (1-F) * G * |h·wi| / (η² * |n·wi| * |n·wo| * |n·h|) */
     const float eta_sq = bsdf->ior * bsdf->ior;
-    const float mis_weight = G * fabsf(cosHI) /
-                             (eta_sq * fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+    float mis_weight;
+    if (sms_mode) {
+      /* SMS: BSDF / (D * |n·h|) in half-vector solid angle measure.
+       * (1-F) * G / (4 * η² * |n·wi| * |n·wo| * |n·h|) */
+      mis_weight = G / (4.0f * eta_sq * fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+    }
+    else {
+      /* MNEE: Standard importance sampling with direction Jacobian.
+       * (1-F) * G * |h·wi| / (η² * |n·wi| * |n·wo| * |n·h|) */
+      mis_weight = G * fabsf(cosHI) / (eta_sq * fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+    }
     return bsdf->weight * transmittance * mis_weight;
   }
 }
@@ -1512,7 +1534,9 @@ ccl_device_forceinline bool mnee_compute_transfer_matrix(const ccl_private Shade
   return true;
 }
 
-/* Calculate the path contribution. */
+/* Calculate the path contribution.
+ * sms_mode: When true, uses SMS sampling weight (projected space with PDF = D).
+ *           When false, uses MNEE sampling weight (direction space with Jacobian). */
 ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
                                                    IntegratorState state,
                                                    ccl_private ShaderData *sd,
@@ -1522,7 +1546,8 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
                                                    const int vertex_count,
                                                    ccl_private ManifoldVertex *vertices,
                                                    ccl_private BsdfEval *throughput,
-                                                   bool reflection = false)
+                                                   bool reflection = false,
+                                                   bool sms_mode = false)
 {
   float wo_len;
   float3 wo = normalize_len(vertices[0].p - sd->P, &wo_len);
@@ -1660,10 +1685,11 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
                                     vertices[vi + 1].p - v.p;
     wo = normalize_len(wo, &wo_len);
 
-    /* Evaluate product term inside eq.6 at solution interface. vi
-     * divided by corresponding sampled pdf:
-     * fr(vi)_do / pdf_dh(vi) x |do/dh| x |n.wo / n.h| */
-    const Spectrum bsdf_contribution = mnee_eval_bsdf_contribution(kg, v.bsdf, wi, wo, reflection);
+    /* Evaluate product term inside eq.6 at solution interface vi.
+     * For MNEE (sms_mode=false): divided by direction-space pdf with Jacobian.
+     * For SMS (sms_mode=true): divided by half-vector-space pdf (D * |n·h|). */
+    const Spectrum bsdf_contribution = mnee_eval_bsdf_contribution(
+        kg, v.bsdf, wi, wo, reflection, sms_mode);
     bsdf_eval_mul(throughput, bsdf_contribution);
   }
 

@@ -437,7 +437,8 @@ integrate_sms_unbiased(KernelGlobals kg,
       vertex_count, /* Use actual vertex count. */
       vertices_ref, /* Use the reference vertex chain. */
       out_bsdf_eval,
-      false); /* Use reflection = false. */
+      false, /* Use reflection = false. */
+      true); /* Use sms_mode = true for projected space sampling. */
 
   if (!contribution_success) {
     return zero_spectrum(); /* Contribution calculation failed. */
@@ -585,7 +586,8 @@ integrate_sms_biased(KernelGlobals kg,
                                      vertex_count,   /* Pass the actual number of vertices. */
                                      vertices_trial, /* Pass the solved vertex chain. */
                                      out_bsdf_eval,
-                                     false)) /* Use sms_flag = false. */
+                                     false, /* Use reflection = false. */
+                                     true)) /* Use sms_mode = true for projected space sampling. */
           {
             Spectrum f_trial = bsdf_eval_sum(out_bsdf_eval);
             /* Only store if the contribution is non-zero. */
