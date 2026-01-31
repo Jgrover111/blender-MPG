@@ -1240,7 +1240,8 @@ ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
                                                             ccl_private ShaderClosure *closure,
                                                             const float3 wi,
                                                             const float3 wo,
-                                                            bool reflection = false)
+                                                            bool reflection = false,
+                                                            bool sms_mode = false)
 {
   ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)closure;
 
@@ -1290,7 +1291,18 @@ ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
     /* Reflection contribution:
      * TODO: integrate reflection MIS calculations.
      */
-    const float mis_weight = G;  // incomplete
+    const float cosHO = dot(Ht, wo);
+    float mis_weight;
+    if (sms_mode) {
+      /* SMS: BSDF / (D * |n·h|) in half-vector solid angle measure.
+       * F * G / (4 * |n·wi| * |n·wo| * |n·h|) */
+      mis_weight = G / (4.0f * fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+    }
+    else {
+      /* MNEE: Standard importance sampling in outgoing direction measure.
+       * F * G * |h·wo| / (|n·wi| * |n·wo| * |n·h|) */
+      mis_weight = G * fabsf(cosHO) / (fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+    }
     return bsdf->weight * reflectance * mis_weight;
   }
   else {
@@ -1302,7 +1314,18 @@ ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
      * contribution = bsdf_do * |do/dh| * |n.wo / n.h| / pdf_dh
      *              = (1 - F) * G * |h.wi / (n.wi * n.h^2)|
      */
-    const float mis_weight = G * fabsf(cosHI / (cosNI * sqr(cosThetaM)));
+    const float eta_sq = bsdf->ior * bsdf->ior;
+    float mis_weight;
+    if (sms_mode) {
+      /* SMS: BSDF / (D * |n·h|) in half-vector solid angle measure.
+       * (1-F) * G / (4 * η² * |n·wi| * |n·wo| * |n·h|) */
+      mis_weight = G / (4.0f * eta_sq * fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+    }
+    else {
+      /* MNEE: Standard importance sampling with direction Jacobian.
+       * (1-F) * G * |h·wi| / (η² * |n·wi| * |n·wo| * |n·h|) */
+      mis_weight = G * fabsf(cosHI) / (eta_sq * fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+    }
     return bsdf->weight * transmittance * mis_weight;
   }
 }
@@ -1484,7 +1507,8 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
                                                    const int vertex_count,
                                                    ccl_private ManifoldVertex *vertices,
                                                    ccl_private BsdfEval *throughput,
-                                                   bool reflection = false)
+                                                   bool reflection = false,
+                                                   bool sms_mode = false)
 {
   float wo_len;
   float3 wo = normalize_len(vertices[0].p - sd->P, &wo_len);
@@ -1612,7 +1636,7 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
     /* Evaluate product term inside eq.6 at solution interface. vi
      * divided by corresponding sampled pdf:
      * fr(vi)_do / pdf_dh(vi) x |do/dh| x |n.wo / n.h| */
-    const Spectrum bsdf_contribution = mnee_eval_bsdf_contribution(kg, v.bsdf, wi, wo, reflection);
+    const Spectrum bsdf_contribution = mnee_eval_bsdf_contribution(kg, v.bsdf, wi, wo, reflection, sms_mode);
     bsdf_eval_mul(throughput, bsdf_contribution);
   }
 
