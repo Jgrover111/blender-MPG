@@ -50,18 +50,19 @@ ccl_device_inline uint hash_float3(const float3 v)
 
 /* Helper function to check if a solution (defined by the first vertex's state)
  * is already present in the unique solutions list. Uses a hash for quick check
- * followed by direction comparison for collision resolution.
- * Following the reference implementation, solutions are compared by direction
- * (dot product) rather than absolute position. */
-ccl_device_inline bool sms_is_duplicate_solution(const float3 dir,
+ * followed by distance check for collision resolution. */
+ccl_device_inline bool sms_is_duplicate_solution(const float3 pos,
+                                                 const float3 dir,
                                                  const uint hash,
                                                  const ccl_private SMSUniqueSolution *solutions,
                                                  const int count)
 {
   for (int i = 0; i < count; ++i) {
     if (solutions[i].valid && solutions[i].hash == hash) {
-      /* Hash collision check: verify using direction dot product. */
-      if (fabsf(dot(solutions[i].dir, dir) - 1.0f) < SMS_EPSILON) {
+      /* Hash collision check: verify actual values using squared distance. */
+      if (len_squared(solutions[i].pos - pos) < SMS_EPSILON * SMS_EPSILON &&
+          len_squared(solutions[i].dir - dir) < SMS_EPSILON * SMS_EPSILON)
+      {
         return true;
       }
     }
@@ -339,10 +340,11 @@ integrate_sms_unbiased(KernelGlobals kg,
     return zero_spectrum();
   }
 
-  /* Store the reference solution direction for comparison during Bernoulli trials.
-   * Following the reference implementation, we compare the direction from receiver
-   * to first specular vertex, not absolute positions. */
-  const float3 solution_dir_ref = normalize(vertices_ref[0].p - sd->P);
+  /* Store the reference solution vertex positions for comparison during Bernoulli trials. */
+  float3 solution_p_ref[MNEE_MAX_CAUSTIC_CASTERS];
+  for (int v_idx = 0; v_idx < vertex_count; ++v_idx) {
+    solution_p_ref[v_idx] = vertices_ref[v_idx].p;
+  }
 
   /* 3. Estimate inverse probability using Bernoulli trials (Geometric series estimator). */
   float inv_prob_estimate = 1.0f; /* Initialize estimate for 1/p_k. */
@@ -401,10 +403,16 @@ integrate_sms_unbiased(KernelGlobals kg,
 
     if (converged_trial) {
       /* Check if the trial solution path matches the reference solution path.
-       * Following the reference implementation, compare directions from receiver
-       * to first specular vertex using dot product, not absolute positions. */
-      const float3 solution_dir_trial = normalize(vertices_trial[0].p - sd->P);
-      const bool match = (fabsf(dot(solution_dir_ref, solution_dir_trial) - 1.0f) < SMS_EPSILON);
+       * Compare positions of all vertices in the chain. */
+      bool match = true;
+      for (int v_idx = 0; v_idx < vertex_count; ++v_idx) {
+        if (len_squared(vertices_trial[v_idx].p - solution_p_ref[v_idx]) >=
+            SMS_EPSILON * SMS_EPSILON)
+        {
+          match = false; /* Mismatch found. */
+          break;
+        }
+      }
 
       if (match) {
         /* Found the same solution path, terminate Bernoulli trials. */
@@ -558,17 +566,18 @@ integrate_sms_biased(KernelGlobals kg,
                                         caustics_constraint_derivatives);
 
     if (converged) {
-      /* 4. Check for duplicates (based on direction) and store unique solutions.
-       * Following the reference implementation, compare directions from receiver
-       * to first specular vertex. */
-      float3 sol_p = vertices_trial[0].p;
-      /* Direction from receiver to first vertex (matching reference implementation). */
-      float3 sol_dir = safe_normalize(sol_p - sd->P);
-      /* Hash based on direction for quick uniqueness check. */
-      uint sol_hash = hash_float3(sol_dir);
+      /* 4. Check for duplicates (based on first vertex) and store unique solutions. */
+      float3 sol_p = vertices_trial[0].p; /* Position of the first vertex in the solved chain.
+                                           */
+      /* Direction from the first vertex towards the receiver. */
+      float3 sol_dir = safe_normalize(sd->P - sol_p);
+      /* Hash based on the first vertex state for quick uniqueness check. */
+      uint sol_hash = hash_float3(sol_p) ^ hash_float3(sol_dir);
 
-      /* Check if this direction is already stored. */
-      if (!sms_is_duplicate_solution(sol_dir, sol_hash, unique_solutions, num_unique_solutions)) {
+      /* Check if this first-vertex state is already stored. */
+      if (!sms_is_duplicate_solution(
+              sol_p, sol_dir, sol_hash, unique_solutions, num_unique_solutions))
+      {
         /* Check if there is space left in the unique solution budget. */
         if (num_unique_solutions < SMS_BIASED_BUDGET) {
           /* Calculate contribution of the *entire path*. */
@@ -587,7 +596,8 @@ integrate_sms_biased(KernelGlobals kg,
             Spectrum f_trial = bsdf_eval_sum(out_bsdf_eval);
             /* Only store if the contribution is non-zero. */
             if (!is_zero(f_trial)) {
-              /* Store the unique solution and its contribution. */
+              /* Store the unique solution (based on first vertex) and its total contribution.
+               */
               unique_solutions[num_unique_solutions].pos = sol_p;
               unique_solutions[num_unique_solutions].dir = sol_dir;
               unique_solutions[num_unique_solutions].hash = sol_hash;
