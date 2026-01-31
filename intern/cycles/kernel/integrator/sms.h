@@ -29,6 +29,15 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Structure to store BSDF data for SMS vertices.
+ * This stores the actual values rather than pointers to avoid dangling pointer issues
+ * when multiple vertices overwrite the shared ShaderData during chain finding. */
+struct SMSVertexBsdfData {
+  ClosureType type;  /* Closure type (REFRACTION, GLASS, etc.) */
+  float alpha_x;     /* Roughness in tangent direction. */
+  float alpha_y;     /* Roughness in bitangent direction. */
+};
+
 /* Structure to store unique solutions found during biased SMS integration.
  * Uniqueness is determined based on the state of the first vertex in the chain. */
 struct SMSUniqueSolution {
@@ -73,7 +82,7 @@ ccl_device_inline bool sms_is_duplicate_solution(const float3 pos,
 /* Helper function to find a chain of potential SMS caster intersections along a ray.
  * Iterates along the probe ray, identifies potential caster surfaces, checks their
  * properties (triangle, not receiver, smooth normals, compatible BSDF), and stores
- * relevant data (intersection, BSDF closure, eta). Stops if max intersections or
+ * relevant data (intersection, BSDF data, eta). Stops if max intersections or
  * max caster vertices are reached. Also checks path length limits against integrator settings.
  * Returns the number of vertices found in the chain, or 0 if no valid chain is found
  * or path limits are exceeded. */
@@ -85,7 +94,7 @@ ccl_device_forceinline int sms_find_caster_chain(
     ccl_private ShaderData *sd_scratch,               /* Scratch ShaderData for evaluations. */
     ccl_private Ray *probe_ray_out,                   /* Output: Initial probe ray properties. */
     ccl_private Intersection *caster_isects_out,      /* Output: Array for caster intersections. */
-    ccl_private ShaderClosure **compatible_bsdfs_out, /* Output: Array for compatible BSDFs. */
+    ccl_private SMSVertexBsdfData *bsdf_data_out,     /* Output: Array for BSDF data per vertex. */
     ccl_private float *compatible_etas_out)           /* Output: Array for compatible etas. */
 {
   /* Setup probe ray from receiver towards light sample. */
@@ -141,25 +150,26 @@ ccl_device_forceinline int sms_find_caster_chain(
           return 0;
         }
 
-        /* Check surface properties: Requires smooth normals for the solver. */
-        ShaderData sd_caster_check;
-        shader_setup_from_ray(kg, &sd_caster_check, &probe_ray, &probe_isect);
+        /* Check surface properties: Requires smooth normals for the solver.
+         * Use sd_scratch (persistent ShaderData) instead of a stack-local variable
+         * to ensure BSDF pointers remain valid after this function returns. */
+        shader_setup_from_ray(kg, sd_scratch, &probe_ray, &probe_isect);
 
         /* The MNEE solver requires smooth normals to compute derivatives (dn_du, dn_dv).
          * Flat shaded surfaces lack these derivatives, preventing the solver from working
          * correctly. */
-        if (sd_caster_check.shader & SHADER_SMOOTH_NORMAL) {
+        if (sd_scratch->shader & SHADER_SMOOTH_NORMAL) {
 
           /* Evaluate the surface shader to find compatible BSDF closures. */
           surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
-              kg, state, &sd_caster_check, nullptr, PATH_RAY_DIFFUSE, true);
+              kg, state, sd_scratch, nullptr, PATH_RAY_DIFFUSE, true);
 
           ccl_private ShaderClosure *found_bsdf = nullptr;
           float found_eta = 1.0f; /* Default eta for reflection. */
 
           /* Iterate through closures to find the first compatible one. */
-          for (int ci = 0; ci < sd_caster_check.num_closure; ++ci) {
-            ccl_private ShaderClosure *sc = &sd_caster_check.closure[ci];
+          for (int ci = 0; ci < sd_scratch->num_closure; ++ci) {
+            ccl_private ShaderClosure *sc = &sd_scratch->closure[ci];
 
             // Reflection is not supported for now.
             // if (CLOSURE_IS_SMS_COMPATIBLE(sc->type)) {
@@ -169,7 +179,7 @@ ccl_device_forceinline int sms_find_caster_chain(
 
             //   /* Calculate eta for refraction/glass based on facing direction. */
             //   if (!CLOSURE_IS_REFLECTION(found_bsdf->type)) {
-            //     found_eta = (sd_caster_check.flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior
+            //     found_eta = (sd_scratch->flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior
             //     :
             //                                                          microfacet_bsdf->ior;
             //   }
@@ -183,17 +193,21 @@ ccl_device_forceinline int sms_find_caster_chain(
                   found_bsdf;
 
               /* Calculate eta for refraction/glass based on facing direction. */
-              found_eta = (sd_caster_check.flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior :
-                                                                   microfacet_bsdf->ior;
+              found_eta = (sd_scratch->flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior :
+                                                               microfacet_bsdf->ior;
 
               break; /* Use the first compatible closure found. */
             }
           }
 
-          /* If a compatible BSDF was found, store the intersection data. */
+          /* If a compatible BSDF was found, store the intersection and BSDF data. */
           if (found_bsdf) {
+            ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)found_bsdf;
             caster_isects_out[vertex_count] = probe_isect;
-            compatible_bsdfs_out[vertex_count] = found_bsdf;
+            /* Store actual BSDF data values, not pointers, to avoid dangling pointer issues. */
+            bsdf_data_out[vertex_count].type = found_bsdf->type;
+            bsdf_data_out[vertex_count].alpha_x = microfacet_bsdf->alpha_x;
+            bsdf_data_out[vertex_count].alpha_y = microfacet_bsdf->alpha_y;
             compatible_etas_out[vertex_count] = found_eta;
             vertex_count++; /* Increment the number of found caster vertices. */
             /* Continue searching for subsequent vertices in the chain. */
@@ -268,11 +282,11 @@ integrate_sms_unbiased(KernelGlobals kg,
   /* 1. Find the caster chain and check path limits. */
   Ray probe_ray;
   Intersection caster_isects[MNEE_MAX_CAUSTIC_CASTERS];
-  ccl_private ShaderClosure *compatible_bsdfs[MNEE_MAX_CAUSTIC_CASTERS];
+  SMSVertexBsdfData bsdf_data[MNEE_MAX_CAUSTIC_CASTERS];
   float compatible_etas[MNEE_MAX_CAUSTIC_CASTERS];
 
   int vertex_count = sms_find_caster_chain(
-      kg, state, sd, ls, sd_mnee, &probe_ray, caster_isects, compatible_bsdfs, compatible_etas);
+      kg, state, sd, ls, sd_mnee, &probe_ray, caster_isects, bsdf_data, compatible_etas);
 
   if (vertex_count == 0) {
     return zero_spectrum(); /* No valid chain found or limits exceeded. */
@@ -295,26 +309,27 @@ integrate_sms_unbiased(KernelGlobals kg,
   const int caustics_constraint_derivatives =
       kernel_data.integrator.caustics_constraint_derivatives;
 
-  /* Initialize reference vertices with one set of sampled offsets. */
+  /* Initialize reference vertices with one set of sampled offsets.
+   * Use stored BSDF data (not pointers) to avoid stale data issues. */
   for (int v_idx = 0; v_idx < vertex_count; ++v_idx) {
     h_offsets_ref[v_idx] = zero_float2();
-    ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)
-        compatible_bsdfs[v_idx];
 
-    /* Sample offset only if BSDF is rough. */
-    if (microfacet_bsdf->alpha_x > 0.0f && microfacet_bsdf->alpha_y > 0.0f) {
+    /* Sample offset only if BSDF is rough. Use stored BSDF data. */
+    if (bsdf_data[v_idx].alpha_x > 0.0f && bsdf_data[v_idx].alpha_y > 0.0f) {
       const float2 bsdf_uv = path_state_rng_2D(kg, rng_state, PRNG_SURFACE_BSDF);
-      h_offsets_ref[v_idx] = mnee_sample_bsdf_dh(compatible_bsdfs[v_idx]->type,
-                                                 microfacet_bsdf->alpha_x,
-                                                 microfacet_bsdf->alpha_y,
+      h_offsets_ref[v_idx] = mnee_sample_bsdf_dh(bsdf_data[v_idx].type,
+                                                 bsdf_data[v_idx].alpha_x,
+                                                 bsdf_data[v_idx].alpha_y,
                                                  bsdf_uv.x,
                                                  bsdf_uv.y);
     }
 
-    /* Setup the manifold vertex. */
+    /* Setup the manifold vertex. Pass sd_mnee->closure[0] as the BSDF pointer.
+     * This pointer will be updated with correct data when mnee_path_contribution
+     * re-evaluates the shader for each vertex. */
     mnee_setup_manifold_vertex(kg,
                                &vertices_ref[v_idx],
-                               compatible_bsdfs[v_idx],
+                               &sd_mnee->closure[0],
                                compatible_etas[v_idx],
                                h_offsets_ref[v_idx],
                                &probe_ray,            /* Original probe ray context. */
@@ -362,18 +377,16 @@ integrate_sms_unbiased(KernelGlobals kg,
     ManifoldVertex vertices_trial[MNEE_MAX_CAUSTIC_CASTERS];
     float2 h_offsets_trial[MNEE_MAX_CAUSTIC_CASTERS]; /* Microfacet offsets for this trial. */
 
-    /* Initialize trial vertices with newly sampled offsets. */
+    /* Initialize trial vertices with newly sampled offsets. Use stored BSDF data. */
     for (int v_idx = 0; v_idx < vertex_count; ++v_idx) {
       h_offsets_trial[v_idx] = zero_float2();
-      ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)
-          compatible_bsdfs[v_idx];
 
-      /* Sample offset only if BSDF is rough. */
-      if (microfacet_bsdf->alpha_x > 0.0f && microfacet_bsdf->alpha_y > 0.0f) {
+      /* Sample offset only if BSDF is rough. Use stored BSDF data. */
+      if (bsdf_data[v_idx].alpha_x > 0.0f && bsdf_data[v_idx].alpha_y > 0.0f) {
         const float2 bsdf_uv = path_state_rng_2D(kg, rng_state, PRNG_SURFACE_BSDF);
-        h_offsets_trial[v_idx] = mnee_sample_bsdf_dh(compatible_bsdfs[v_idx]->type,
-                                                     microfacet_bsdf->alpha_x,
-                                                     microfacet_bsdf->alpha_y,
+        h_offsets_trial[v_idx] = mnee_sample_bsdf_dh(bsdf_data[v_idx].type,
+                                                     bsdf_data[v_idx].alpha_x,
+                                                     bsdf_data[v_idx].alpha_y,
                                                      bsdf_uv.x,
                                                      bsdf_uv.y);
       }
@@ -381,7 +394,7 @@ integrate_sms_unbiased(KernelGlobals kg,
       /* Setup trial vertex. */
       mnee_setup_manifold_vertex(kg,
                                  &vertices_trial[v_idx],
-                                 compatible_bsdfs[v_idx],
+                                 &sd_mnee->closure[0],
                                  compatible_etas[v_idx],
                                  h_offsets_trial[v_idx],
                                  &probe_ray,
@@ -488,12 +501,11 @@ integrate_sms_biased(KernelGlobals kg,
   /* 1. Find the caster chain and check path limits. */
   Ray probe_ray;
   Intersection caster_isects[MNEE_MAX_CAUSTIC_CASTERS];
-  ccl_private ShaderClosure *compatible_bsdfs_storage[MNEE_MAX_CAUSTIC_CASTERS];
-  ccl_private ShaderClosure **compatible_bsdfs = compatible_bsdfs_storage;
+  SMSVertexBsdfData bsdf_data[MNEE_MAX_CAUSTIC_CASTERS];
   float compatible_etas[MNEE_MAX_CAUSTIC_CASTERS];
 
   int vertex_count = sms_find_caster_chain(
-      kg, state, sd, ls, sd_mnee, &probe_ray, caster_isects, compatible_bsdfs, compatible_etas);
+      kg, state, sd, ls, sd_mnee, &probe_ray, caster_isects, bsdf_data, compatible_etas);
 
   if (vertex_count == 0) {
     return zero_spectrum(); /* No valid chain found or limits exceeded. */
@@ -527,17 +539,16 @@ integrate_sms_biased(KernelGlobals kg,
 
     ManifoldVertex vertices_trial[MNEE_MAX_CAUSTIC_CASTERS];
 
-    /* Initialize the ManifoldVertices for this trial using the stored intersections. */
+    /* Initialize the ManifoldVertices for this trial using the stored intersections.
+     * Use stored BSDF data (not pointers) to avoid stale data issues. */
     for (int v_idx = 0; v_idx < vertex_count; ++v_idx) {
-      /* Sample microfacet normal offset h_xy for this vertex based on its compatible BSDF. */
+      /* Sample microfacet normal offset h_xy for this vertex based on stored BSDF data. */
       float2 h_offset = zero_float2();
-      ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)
-          compatible_bsdfs[v_idx];
-      if (microfacet_bsdf->alpha_x > 0.0f && microfacet_bsdf->alpha_y > 0.0f) {
+      if (bsdf_data[v_idx].alpha_x > 0.0f && bsdf_data[v_idx].alpha_y > 0.0f) {
         const float2 bsdf_uv = path_state_rng_2D(kg, rng_state, PRNG_SURFACE_BSDF);
-        h_offset = mnee_sample_bsdf_dh(compatible_bsdfs[v_idx]->type,
-                                       microfacet_bsdf->alpha_x,
-                                       microfacet_bsdf->alpha_y,
+        h_offset = mnee_sample_bsdf_dh(bsdf_data[v_idx].type,
+                                       bsdf_data[v_idx].alpha_x,
+                                       bsdf_data[v_idx].alpha_y,
                                        bsdf_uv.x,
                                        bsdf_uv.y);
       }
@@ -545,7 +556,7 @@ integrate_sms_biased(KernelGlobals kg,
       /* Setup trial vertex. */
       mnee_setup_manifold_vertex(kg,
                                  &vertices_trial[v_idx],
-                                 compatible_bsdfs[v_idx],
+                                 &sd_mnee->closure[0],
                                  compatible_etas[v_idx],
                                  h_offset,
                                  &probe_ray,            /* Original probe ray context. */
