@@ -647,10 +647,34 @@ bool mnee_compute_ad_constraint_derivatives(
     // Determine if this interaction is reflection or refraction.
     bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(v_cur.bsdf->type);
 
-    // Normal and its derivatives at current vertex x_cur_p.
-    const float3 n_surf = v_cur.n;
-    const float3 dn_surf_du = v_cur.dn_du;
-    const float3 dn_surf_dv = v_cur.dn_dv;
+    // Construct local shading frame (s, t) at current vertex, same as HV constraint.
+    const float dp_du_dot_n = dot(v_cur.dp_du, v_cur.n);
+    float3 s = v_cur.dp_du - dp_du_dot_n * v_cur.n;
+    const float inv_len_s = 1.0f / len(s);
+    s *= inv_len_s;
+    const float3 t = cross(v_cur.n, s);
+
+    // Construct the offset normal from n_offset.
+    // n_offset is the (s, t) projection of the desired microfacet normal offset.
+    // The offset normal is: n_offset.x * s + n_offset.y * t + nz * n
+    // where nz = sqrt(1 - n_offset.x² - n_offset.y²) to maintain unit length.
+    const float nz = sqrtf(fmaxf(0.0f, 1.0f - v_cur.n_offset.x * v_cur.n_offset.x -
+                                            v_cur.n_offset.y * v_cur.n_offset.y));
+    const float3 n_surf = v_cur.n_offset.x * s + v_cur.n_offset.y * t + nz * v_cur.n;
+
+    // Compute derivatives of s w.r.t. surface parameters (same as HV constraint).
+    float3 ds_du = -inv_len_s * (dot(v_cur.dp_du, v_cur.dn_du) * v_cur.n + dp_du_dot_n * v_cur.dn_du);
+    float3 ds_dv = -inv_len_s * (dot(v_cur.dp_du, v_cur.dn_dv) * v_cur.n + dp_du_dot_n * v_cur.dn_dv);
+    ds_du -= s * dot(s, ds_du);
+    ds_dv -= s * dot(s, ds_dv);
+    const float3 dt_du = cross(v_cur.dn_du, s) + cross(v_cur.n, ds_du);
+    const float3 dt_dv = cross(v_cur.dn_dv, s) + cross(v_cur.n, ds_dv);
+
+    // Derivatives of n_surf w.r.t. surface parameters.
+    // n_surf = n_offset.x * s + n_offset.y * t + nz * n
+    // dn_surf/du = n_offset.x * ds/du + n_offset.y * dt/du + nz * dn/du
+    const float3 dn_surf_du = v_cur.n_offset.x * ds_du + v_cur.n_offset.y * dt_du + nz * v_cur.dn_du;
+    const float3 dn_surf_dv = v_cur.n_offset.x * ds_dv + v_cur.n_offset.y * dt_dv + nz * v_cur.dn_dv;
 
     bool success_i = false;
 
