@@ -1314,16 +1314,20 @@ ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
      * contribution = bsdf_do * |do/dh| * |n.wo / n.h| / pdf_dh
      *              = (1 - F) * G * |h.wi / (n.wi * n.h^2)|
      */
-    const float eta_sq = bsdf->ior * bsdf->ior;
     float mis_weight;
     if (sms_mode) {
       /* SMS: BSDF / (D * |n·h|) in half-vector solid angle measure.
-       * (1-F) * G / (4 * η² * |n·wi| * |n·wo| * |n·h|) */
-      mis_weight = G / (4.0f * eta_sq * fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+       * For refraction, the direction-to-half-vector Jacobian is:
+       *   |do/dh| = (wi·h + η*wo·h)² / (η² * |wo·h|)
+       * When applied to the standard refraction BSDF (which has η² in numerator
+       * and (wi·h + η*wo·h)² in denominator), these terms cancel, leaving:
+       *   (1-F) * G * |h·wi| / (|n·wi| * |n·wo| * |n·h|) */
+      mis_weight = G * fabsf(cosHI) / (fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
     }
     else {
       /* MNEE: Standard importance sampling with direction Jacobian.
        * (1-F) * G * |h·wi| / (η² * |n·wi| * |n·wo| * |n·h|) */
+      const float eta_sq = bsdf->ior * bsdf->ior;
       mis_weight = G * fabsf(cosHI) / (eta_sq * fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
     }
     return bsdf->weight * transmittance * mis_weight;
