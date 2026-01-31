@@ -1315,14 +1315,17 @@ ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
      *              = (1 - F) * G * |h.wi / (n.wi * n.h^2)|
      */
     const float eta_sq = bsdf->ior * bsdf->ior;
-    /* Both SMS and MNEE use the same BSDF weight for refraction:
-     * (1-F) * G * |h·wi| / (η² * |n·wi| * |n·wo| * |n·h|)
-     *
-     * For SMS in half-vector measure, the refraction Jacobian
-     * |do/dh| = (wi·h + η·wo·h)² / (η² · |wo·h|) applied to the
-     * standard BSDF cancels internal terms, yielding this formula. */
-    const float mis_weight = G * fabsf(cosHI) /
-                             (eta_sq * fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+    float mis_weight;
+    if (sms_mode) {
+      /* SMS: BSDF / (D * |n·h|) in half-vector solid angle measure.
+       * (1-F) * G / (4 * η² * |n·wi| * |n·wo| * |n·h|) */
+      mis_weight = G / (4.0f * eta_sq * fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+    }
+    else {
+      /* MNEE: Standard importance sampling with direction Jacobian.
+       * (1-F) * G * |h·wi| / (η² * |n·wi| * |n·wo| * |n·h|) */
+      mis_weight = G * fabsf(cosHI) / (eta_sq * fabsf(cosNI) * fabsf(cosNO) * fabsf(cosThetaM));
+    }
     return bsdf->weight * transmittance * mis_weight;
   }
 }
