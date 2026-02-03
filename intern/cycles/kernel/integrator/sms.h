@@ -29,15 +29,6 @@
 
 CCL_NAMESPACE_BEGIN
 
-/* Structure to store BSDF data for SMS vertices.
- * This stores the actual values extracted during chain finding to avoid
- * dangling pointer issues with the stack-local ShaderData. */
-struct SMSVertexBsdfData {
-  ClosureType type;  /* Closure type (REFRACTION, GLASS, etc.) */
-  float alpha_x;     /* Roughness in tangent direction. */
-  float alpha_y;     /* Roughness in bitangent direction. */
-};
-
 /* Structure to store unique solutions found during biased SMS integration.
  * Uniqueness is determined based on the state of the first vertex in the chain. */
 struct SMSUniqueSolution {
@@ -82,7 +73,7 @@ ccl_device_inline bool sms_is_duplicate_solution(const float3 pos,
 /* Helper function to find a chain of potential SMS caster intersections along a ray.
  * Iterates along the probe ray, identifies potential caster surfaces, checks their
  * properties (triangle, not receiver, smooth normals, compatible BSDF), and stores
- * relevant data (intersection, BSDF data, eta). Stops if max intersections or
+ * relevant data (intersection, BSDF closure, eta). Stops if max intersections or
  * max caster vertices are reached. Also checks path length limits against integrator settings.
  * Returns the number of vertices found in the chain, or 0 if no valid chain is found
  * or path limits are exceeded. */
@@ -94,7 +85,7 @@ ccl_device_forceinline int sms_find_caster_chain(
     ccl_private ShaderData *sd_scratch,               /* Scratch ShaderData for evaluations. */
     ccl_private Ray *probe_ray_out,                   /* Output: Initial probe ray properties. */
     ccl_private Intersection *caster_isects_out,      /* Output: Array for caster intersections. */
-    ccl_private SMSVertexBsdfData *bsdf_data_out,     /* Output: Array for BSDF data. */
+    ccl_private ShaderClosure **compatible_bsdfs_out, /* Output: Array for compatible BSDFs. */
     ccl_private float *compatible_etas_out)           /* Output: Array for compatible etas. */
 {
   /* Setup probe ray from receiver towards light sample. */
@@ -199,15 +190,10 @@ ccl_device_forceinline int sms_find_caster_chain(
             }
           }
 
-          /* If a compatible BSDF was found, store the intersection and BSDF data.
-           * We store the actual BSDF values (not pointers) to avoid dangling pointer
-           * issues when the stack-local ShaderData goes out of scope. */
+          /* If a compatible BSDF was found, store the intersection data. */
           if (found_bsdf) {
-            ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)found_bsdf;
             caster_isects_out[vertex_count] = probe_isect;
-            bsdf_data_out[vertex_count].type = found_bsdf->type;
-            bsdf_data_out[vertex_count].alpha_x = microfacet_bsdf->alpha_x;
-            bsdf_data_out[vertex_count].alpha_y = microfacet_bsdf->alpha_y;
+            compatible_bsdfs_out[vertex_count] = found_bsdf;
             compatible_etas_out[vertex_count] = found_eta;
             vertex_count++; /* Increment the number of found caster vertices. */
             /* Continue searching for subsequent vertices in the chain. */
@@ -282,11 +268,11 @@ integrate_sms_unbiased(KernelGlobals kg,
   /* 1. Find the caster chain and check path limits. */
   Ray probe_ray;
   Intersection caster_isects[MNEE_MAX_CAUSTIC_CASTERS];
-  SMSVertexBsdfData bsdf_data[MNEE_MAX_CAUSTIC_CASTERS];
+  ccl_private ShaderClosure *compatible_bsdfs[MNEE_MAX_CAUSTIC_CASTERS];
   float compatible_etas[MNEE_MAX_CAUSTIC_CASTERS];
 
   int vertex_count = sms_find_caster_chain(
-      kg, state, sd, ls, sd_mnee, &probe_ray, caster_isects, bsdf_data, compatible_etas);
+      kg, state, sd, ls, sd_mnee, &probe_ray, caster_isects, compatible_bsdfs, compatible_etas);
 
   if (vertex_count == 0) {
     return zero_spectrum(); /* No valid chain found or limits exceeded. */
@@ -309,43 +295,26 @@ integrate_sms_unbiased(KernelGlobals kg,
   const int caustics_constraint_derivatives =
       kernel_data.integrator.caustics_constraint_derivatives;
 
-  /* Initialize reference vertices with one set of sampled offsets.
-   * For each vertex, we sample using the stored BSDF data, then re-evaluate
-   * the shader to get a fresh BSDF pointer for vertex setup. This matches
-   * MNEE's pattern where shader evaluation and vertex setup happen together. */
+  /* Initialize reference vertices with one set of sampled offsets. */
   for (int v_idx = 0; v_idx < vertex_count; ++v_idx) {
     h_offsets_ref[v_idx] = zero_float2();
+    ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)
+        compatible_bsdfs[v_idx];
 
-    /* Sample offset using stored BSDF data. */
-    if (bsdf_data[v_idx].alpha_x > 0.0f && bsdf_data[v_idx].alpha_y > 0.0f) {
+    /* Sample offset only if BSDF is rough. */
+    if (microfacet_bsdf->alpha_x > 0.0f && microfacet_bsdf->alpha_y > 0.0f) {
       const float2 bsdf_uv = path_state_rng_2D(kg, rng_state, PRNG_SURFACE_BSDF);
-      h_offsets_ref[v_idx] = mnee_sample_bsdf_dh(bsdf_data[v_idx].type,
-                                                 bsdf_data[v_idx].alpha_x,
-                                                 bsdf_data[v_idx].alpha_y,
+      h_offsets_ref[v_idx] = mnee_sample_bsdf_dh(compatible_bsdfs[v_idx]->type,
+                                                 microfacet_bsdf->alpha_x,
+                                                 microfacet_bsdf->alpha_y,
                                                  bsdf_uv.x,
                                                  bsdf_uv.y);
     }
 
-    /* Re-evaluate shader to get fresh BSDF pointer for vertex setup.
-     * This matches MNEE's pattern of evaluating shader and setting up vertex together. */
-    shader_setup_from_ray(kg, sd_mnee, &probe_ray, &caster_isects[v_idx]);
-    surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
-        kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
-
-    /* Find the compatible BSDF in the freshly evaluated shader data. */
-    ccl_private ShaderClosure *bsdf = nullptr;
-    for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
-      ccl_private ShaderClosure *sc = &sd_mnee->closure[ci];
-      if (CLOSURE_IS_REFRACTION(sc->type) || CLOSURE_IS_GLASS(sc->type)) {
-        bsdf = sc;
-        break;
-      }
-    }
-
-    /* Setup the manifold vertex with the fresh BSDF pointer. */
+    /* Setup the manifold vertex. */
     mnee_setup_manifold_vertex(kg,
                                &vertices_ref[v_idx],
-                               bsdf,
+                               compatible_bsdfs[v_idx],
                                compatible_etas[v_idx],
                                h_offsets_ref[v_idx],
                                &probe_ray,            /* Original probe ray context. */
@@ -393,41 +362,26 @@ integrate_sms_unbiased(KernelGlobals kg,
     ManifoldVertex vertices_trial[MNEE_MAX_CAUSTIC_CASTERS];
     float2 h_offsets_trial[MNEE_MAX_CAUSTIC_CASTERS]; /* Microfacet offsets for this trial. */
 
-    /* Initialize trial vertices with newly sampled offsets.
-     * For each vertex, we sample using the stored BSDF data, then re-evaluate
-     * the shader to get a fresh BSDF pointer for vertex setup. */
+    /* Initialize trial vertices with newly sampled offsets. */
     for (int v_idx = 0; v_idx < vertex_count; ++v_idx) {
       h_offsets_trial[v_idx] = zero_float2();
+      ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)
+          compatible_bsdfs[v_idx];
 
-      /* Sample offset using stored BSDF data. */
-      if (bsdf_data[v_idx].alpha_x > 0.0f && bsdf_data[v_idx].alpha_y > 0.0f) {
+      /* Sample offset only if BSDF is rough. */
+      if (microfacet_bsdf->alpha_x > 0.0f && microfacet_bsdf->alpha_y > 0.0f) {
         const float2 bsdf_uv = path_state_rng_2D(kg, rng_state, PRNG_SURFACE_BSDF);
-        h_offsets_trial[v_idx] = mnee_sample_bsdf_dh(bsdf_data[v_idx].type,
-                                                     bsdf_data[v_idx].alpha_x,
-                                                     bsdf_data[v_idx].alpha_y,
+        h_offsets_trial[v_idx] = mnee_sample_bsdf_dh(compatible_bsdfs[v_idx]->type,
+                                                     microfacet_bsdf->alpha_x,
+                                                     microfacet_bsdf->alpha_y,
                                                      bsdf_uv.x,
                                                      bsdf_uv.y);
       }
 
-      /* Re-evaluate shader to get fresh BSDF pointer for vertex setup. */
-      shader_setup_from_ray(kg, sd_mnee, &probe_ray, &caster_isects[v_idx]);
-      surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
-          kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
-
-      /* Find the compatible BSDF in the freshly evaluated shader data. */
-      ccl_private ShaderClosure *bsdf = nullptr;
-      for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
-        ccl_private ShaderClosure *sc = &sd_mnee->closure[ci];
-        if (CLOSURE_IS_REFRACTION(sc->type) || CLOSURE_IS_GLASS(sc->type)) {
-          bsdf = sc;
-          break;
-        }
-      }
-
-      /* Setup trial vertex with the fresh BSDF pointer. */
+      /* Setup trial vertex. */
       mnee_setup_manifold_vertex(kg,
                                  &vertices_trial[v_idx],
-                                 bsdf,
+                                 compatible_bsdfs[v_idx],
                                  compatible_etas[v_idx],
                                  h_offsets_trial[v_idx],
                                  &probe_ray,
@@ -534,11 +488,12 @@ integrate_sms_biased(KernelGlobals kg,
   /* 1. Find the caster chain and check path limits. */
   Ray probe_ray;
   Intersection caster_isects[MNEE_MAX_CAUSTIC_CASTERS];
-  SMSVertexBsdfData bsdf_data[MNEE_MAX_CAUSTIC_CASTERS];
+  ccl_private ShaderClosure *compatible_bsdfs_storage[MNEE_MAX_CAUSTIC_CASTERS];
+  ccl_private ShaderClosure **compatible_bsdfs = compatible_bsdfs_storage;
   float compatible_etas[MNEE_MAX_CAUSTIC_CASTERS];
 
   int vertex_count = sms_find_caster_chain(
-      kg, state, sd, ls, sd_mnee, &probe_ray, caster_isects, bsdf_data, compatible_etas);
+      kg, state, sd, ls, sd_mnee, &probe_ray, caster_isects, compatible_bsdfs, compatible_etas);
 
   if (vertex_count == 0) {
     return zero_spectrum(); /* No valid chain found or limits exceeded. */
@@ -572,40 +527,25 @@ integrate_sms_biased(KernelGlobals kg,
 
     ManifoldVertex vertices_trial[MNEE_MAX_CAUSTIC_CASTERS];
 
-    /* Initialize the ManifoldVertices for this trial using the stored intersections.
-     * For each vertex, we sample using the stored BSDF data, then re-evaluate
-     * the shader to get a fresh BSDF pointer for vertex setup. */
+    /* Initialize the ManifoldVertices for this trial using the stored intersections. */
     for (int v_idx = 0; v_idx < vertex_count; ++v_idx) {
-      /* Sample microfacet normal offset h_xy for this vertex based on stored BSDF data. */
+      /* Sample microfacet normal offset h_xy for this vertex based on its compatible BSDF. */
       float2 h_offset = zero_float2();
-      if (bsdf_data[v_idx].alpha_x > 0.0f && bsdf_data[v_idx].alpha_y > 0.0f) {
+      ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)
+          compatible_bsdfs[v_idx];
+      if (microfacet_bsdf->alpha_x > 0.0f && microfacet_bsdf->alpha_y > 0.0f) {
         const float2 bsdf_uv = path_state_rng_2D(kg, rng_state, PRNG_SURFACE_BSDF);
-        h_offset = mnee_sample_bsdf_dh(bsdf_data[v_idx].type,
-                                       bsdf_data[v_idx].alpha_x,
-                                       bsdf_data[v_idx].alpha_y,
+        h_offset = mnee_sample_bsdf_dh(compatible_bsdfs[v_idx]->type,
+                                       microfacet_bsdf->alpha_x,
+                                       microfacet_bsdf->alpha_y,
                                        bsdf_uv.x,
                                        bsdf_uv.y);
       }
 
-      /* Re-evaluate shader to get fresh BSDF pointer for vertex setup. */
-      shader_setup_from_ray(kg, sd_mnee, &probe_ray, &caster_isects[v_idx]);
-      surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
-          kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
-
-      /* Find the compatible BSDF in the freshly evaluated shader data. */
-      ccl_private ShaderClosure *bsdf = nullptr;
-      for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
-        ccl_private ShaderClosure *sc = &sd_mnee->closure[ci];
-        if (CLOSURE_IS_REFRACTION(sc->type) || CLOSURE_IS_GLASS(sc->type)) {
-          bsdf = sc;
-          break;
-        }
-      }
-
-      /* Setup trial vertex with the fresh BSDF pointer. */
+      /* Setup trial vertex. */
       mnee_setup_manifold_vertex(kg,
                                  &vertices_trial[v_idx],
-                                 bsdf,
+                                 compatible_bsdfs[v_idx],
                                  compatible_etas[v_idx],
                                  h_offset,
                                  &probe_ray,            /* Original probe ray context. */
