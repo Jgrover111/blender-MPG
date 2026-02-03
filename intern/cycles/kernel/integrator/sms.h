@@ -141,25 +141,26 @@ ccl_device_forceinline int sms_find_caster_chain(
           return 0;
         }
 
-        /* Check surface properties: Requires smooth normals for the solver. */
-        ShaderData sd_caster_check;
-        shader_setup_from_ray(kg, &sd_caster_check, &probe_ray, &probe_isect);
+        /* Check surface properties: Requires smooth normals for the solver.
+         * Use sd_scratch (sd_mnee) for shader evaluation like MNEE does, so BSDF
+         * pointers remain valid (pointing into sd_scratch->closure[]). */
+        shader_setup_from_ray(kg, sd_scratch, &probe_ray, &probe_isect);
 
         /* The MNEE solver requires smooth normals to compute derivatives (dn_du, dn_dv).
          * Flat shaded surfaces lack these derivatives, preventing the solver from working
          * correctly. */
-        if (sd_caster_check.shader & SHADER_SMOOTH_NORMAL) {
+        if (sd_scratch->shader & SHADER_SMOOTH_NORMAL) {
 
           /* Evaluate the surface shader to find compatible BSDF closures. */
           surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
-              kg, state, &sd_caster_check, nullptr, PATH_RAY_DIFFUSE, true);
+              kg, state, sd_scratch, nullptr, PATH_RAY_DIFFUSE, true);
 
           ccl_private ShaderClosure *found_bsdf = nullptr;
           float found_eta = 1.0f; /* Default eta for reflection. */
 
           /* Iterate through closures to find the first compatible one. */
-          for (int ci = 0; ci < sd_caster_check.num_closure; ++ci) {
-            ccl_private ShaderClosure *sc = &sd_caster_check.closure[ci];
+          for (int ci = 0; ci < sd_scratch->num_closure; ++ci) {
+            ccl_private ShaderClosure *sc = &sd_scratch->closure[ci];
 
             // Reflection is not supported for now.
             // if (CLOSURE_IS_SMS_COMPATIBLE(sc->type)) {
@@ -169,7 +170,7 @@ ccl_device_forceinline int sms_find_caster_chain(
 
             //   /* Calculate eta for refraction/glass based on facing direction. */
             //   if (!CLOSURE_IS_REFLECTION(found_bsdf->type)) {
-            //     found_eta = (sd_caster_check.flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior
+            //     found_eta = (sd_scratch.flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior
             //     :
             //                                                          microfacet_bsdf->ior;
             //   }
@@ -183,8 +184,8 @@ ccl_device_forceinline int sms_find_caster_chain(
                   found_bsdf;
 
               /* Calculate eta for refraction/glass based on facing direction. */
-              found_eta = (sd_caster_check.flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior :
-                                                                   microfacet_bsdf->ior;
+              found_eta = (sd_scratch->flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior :
+                                                               microfacet_bsdf->ior;
 
               break; /* Use the first compatible closure found. */
             }
@@ -311,10 +312,7 @@ integrate_sms_unbiased(KernelGlobals kg,
                                                  bsdf_uv.y);
     }
 
-    /* Setup the manifold vertex.
-     * Note: We pass nullptr instead of rng_state to use intersection barycentrics
-     * rather than random barycentrics. This matches MNEE's behavior and avoids
-     * issues with the solver finding incorrect solutions from random starting points. */
+    /* Setup the manifold vertex. */
     mnee_setup_manifold_vertex(kg,
                                &vertices_ref[v_idx],
                                compatible_bsdfs[v_idx],
@@ -323,7 +321,7 @@ integrate_sms_unbiased(KernelGlobals kg,
                                &probe_ray,            /* Original probe ray context. */
                                &caster_isects[v_idx], /* Intersection data for this vertex. */
                                sd_mnee,               /* Scratch ShaderData. */
-                               nullptr);              /* Use intersection barycentrics. */
+                               rng_state);            /* Sample random barycentric coordinates. */
   }
 
   /* Run the Newton solver to find the reference solution path.
@@ -381,9 +379,7 @@ integrate_sms_unbiased(KernelGlobals kg,
                                                      bsdf_uv.y);
       }
 
-      /* Setup trial vertex.
-       * Note: Use nullptr for rng_state to use intersection barycentrics,
-       * matching the reference path setup. */
+      /* Setup trial vertex. */
       mnee_setup_manifold_vertex(kg,
                                  &vertices_trial[v_idx],
                                  compatible_bsdfs[v_idx],
@@ -392,7 +388,7 @@ integrate_sms_unbiased(KernelGlobals kg,
                                  &probe_ray,
                                  &caster_isects[v_idx],
                                  sd_mnee,
-                                 nullptr);
+                                 rng_state);
     }
 
     /* Run solver for the trial path. */
@@ -547,9 +543,7 @@ integrate_sms_biased(KernelGlobals kg,
                                        bsdf_uv.y);
       }
 
-      /* Setup trial vertex.
-       * Note: Use nullptr for rng_state to use intersection barycentrics,
-       * matching MNEE's behavior. */
+      /* Setup trial vertex. */
       mnee_setup_manifold_vertex(kg,
                                  &vertices_trial[v_idx],
                                  compatible_bsdfs[v_idx],
@@ -558,7 +552,7 @@ integrate_sms_biased(KernelGlobals kg,
                                  &probe_ray,            /* Original probe ray context. */
                                  &caster_isects[v_idx], /* Intersection data for this vertex. */
                                  sd_mnee,               /* Scratch ShaderData. */
-                                 nullptr);
+                                 rng_state);
     }
 
     /* Run the Newton solver on the whole chain. */
