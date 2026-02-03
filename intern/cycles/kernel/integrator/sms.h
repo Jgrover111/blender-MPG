@@ -311,7 +311,10 @@ integrate_sms_unbiased(KernelGlobals kg,
                                                  bsdf_uv.y);
     }
 
-    /* Setup the manifold vertex. */
+    /* Setup the manifold vertex.
+     * Note: We pass nullptr instead of rng_state to use intersection barycentrics
+     * rather than random barycentrics. This matches MNEE's behavior and avoids
+     * issues with the solver finding incorrect solutions from random starting points. */
     mnee_setup_manifold_vertex(kg,
                                &vertices_ref[v_idx],
                                compatible_bsdfs[v_idx],
@@ -320,7 +323,7 @@ integrate_sms_unbiased(KernelGlobals kg,
                                &probe_ray,            /* Original probe ray context. */
                                &caster_isects[v_idx], /* Intersection data for this vertex. */
                                sd_mnee,               /* Scratch ShaderData. */
-                               rng_state);            /* Sample random barycentric coordinates. */
+                               nullptr);              /* Use intersection barycentrics. */
   }
 
   /* Run the Newton solver to find the reference solution path.
@@ -378,7 +381,9 @@ integrate_sms_unbiased(KernelGlobals kg,
                                                      bsdf_uv.y);
       }
 
-      /* Setup trial vertex. */
+      /* Setup trial vertex.
+       * Note: Use nullptr for rng_state to use intersection barycentrics,
+       * matching the reference path setup. */
       mnee_setup_manifold_vertex(kg,
                                  &vertices_trial[v_idx],
                                  compatible_bsdfs[v_idx],
@@ -387,7 +392,7 @@ integrate_sms_unbiased(KernelGlobals kg,
                                  &probe_ray,
                                  &caster_isects[v_idx],
                                  sd_mnee,
-                                 rng_state);
+                                 nullptr);
     }
 
     /* Run solver for the trial path. */
@@ -542,7 +547,9 @@ integrate_sms_biased(KernelGlobals kg,
                                        bsdf_uv.y);
       }
 
-      /* Setup trial vertex. */
+      /* Setup trial vertex.
+       * Note: Use nullptr for rng_state to use intersection barycentrics,
+       * matching MNEE's behavior. */
       mnee_setup_manifold_vertex(kg,
                                  &vertices_trial[v_idx],
                                  compatible_bsdfs[v_idx],
@@ -551,7 +558,7 @@ integrate_sms_biased(KernelGlobals kg,
                                  &probe_ray,            /* Original probe ray context. */
                                  &caster_isects[v_idx], /* Intersection data for this vertex. */
                                  sd_mnee,               /* Scratch ShaderData. */
-                                 rng_state);
+                                 nullptr);
     }
 
     /* Run the Newton solver on the whole chain. */
