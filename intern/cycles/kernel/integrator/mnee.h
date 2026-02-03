@@ -414,6 +414,73 @@ bool mnee_compute_hv_constraint_derivatives(
 }
 
 // --- Helper functions for Angle Difference Constraint ---
+
+/* Compute the microfacet normal from the shading normal and the sampled offset.
+ * The offset is in the local tangent frame (s, t) where:
+ *   n_offset.x = cos_phi * sin_theta (s component)
+ *   n_offset.y = sin_phi * sin_theta (t component)
+ * The microfacet normal m = n_offset.x * s + n_offset.y * t + cos_theta * n
+ * where cos_theta = sqrt(1 - sin_theta^2) = sqrt(1 - |n_offset|^2)
+ *
+ * Following the reference implementation, we do NOT re-normalize the result
+ * since the offset components are already from a valid microfacet sample.
+ */
+ccl_device_inline float3 ad_compute_microfacet_normal(const float3 &s,
+                                                       const float3 &t,
+                                                       const float3 &n,
+                                                       const float2 &n_offset)
+{
+  if (n_offset.x == 0.0f && n_offset.y == 0.0f) {
+    return n;  /* No offset, microfacet normal equals shading normal */
+  }
+
+  /* Compute cos_theta from the offset */
+  const float sin_theta_sq = n_offset.x * n_offset.x + n_offset.y * n_offset.y;
+  const float cos_theta = safe_sqrtf(1.0f - sin_theta_sq);
+
+  /* Construct microfacet normal using the pre-computed frame.
+   * Following the reference, we don't re-normalize here. */
+  return n_offset.x * s + n_offset.y * t + cos_theta * n;
+}
+
+/* Compute derivatives of microfacet normal with respect to surface parameters (u, v).
+ * This uses the pre-computed tangent frame and its derivatives, matching the
+ * reference implementation's approach.
+ *
+ * Following the reference, we do NOT apply normalization derivatives since
+ * the microfacet normal is not re-normalized.
+ */
+ccl_device_inline void ad_compute_microfacet_normal_derivatives(const float3 &s,
+                                                                 const float3 &t,
+                                                                 const float3 &n,
+                                                                 const float3 &ds_du,
+                                                                 const float3 &ds_dv,
+                                                                 const float3 &dt_du,
+                                                                 const float3 &dt_dv,
+                                                                 const float3 &dn_du,
+                                                                 const float3 &dn_dv,
+                                                                 const float2 &n_offset,
+                                                                 ccl_private float3 &dm_du,
+                                                                 ccl_private float3 &dm_dv)
+{
+  if (n_offset.x == 0.0f && n_offset.y == 0.0f) {
+    /* No offset, derivatives equal shading normal derivatives */
+    dm_du = dn_du;
+    dm_dv = dn_dv;
+    return;
+  }
+
+  /* Compute cos_theta (constant with respect to surface params since n_offset is fixed) */
+  const float sin_theta_sq = n_offset.x * n_offset.x + n_offset.y * n_offset.y;
+  const float cos_theta = safe_sqrtf(1.0f - sin_theta_sq);
+
+  /* Derivatives of m = n_offset.x * s + n_offset.y * t + cos_theta * n
+   * Following the reference, we use the frame derivatives directly without
+   * applying normalization derivatives. */
+  dm_du = n_offset.x * ds_du + n_offset.y * dt_du + cos_theta * dn_du;
+  dm_dv = n_offset.x * ds_dv + n_offset.y * dt_dv + cos_theta * dn_dv;
+}
+
 ccl_device_inline float3 ad_reflect(const float3 &w, const float3 &n)
 {
   return 2.0f * dot(w, n) * n - w;
@@ -647,10 +714,31 @@ bool mnee_compute_ad_constraint_derivatives(
     // Determine if this interaction is reflection or refraction.
     bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(v_cur.bsdf->type);
 
-    // Normal and its derivatives at current vertex x_cur_p.
-    const float3 n_surf = v_cur.n;
-    const float3 dn_surf_du = v_cur.dn_du;
-    const float3 dn_surf_dv = v_cur.dn_dv;
+    // Compute local shading frame (s, t) and derivatives, matching the HV constraint.
+    // This ensures consistency with the reference implementation.
+    const float dp_du_dot_n = dot(v_cur.dp_du, v_cur.n);
+    float3 s = v_cur.dp_du - dp_du_dot_n * v_cur.n;
+    const float inv_len_s = 1.0f / len(s);
+    s *= inv_len_s;
+    const float3 t = cross(v_cur.n, s);
+
+    // Compute frame derivatives with respect to surface parameters (u, v).
+    float3 ds_du = -inv_len_s * (dot(v_cur.dp_du, v_cur.dn_du) * v_cur.n + dp_du_dot_n * v_cur.dn_du);
+    float3 ds_dv = -inv_len_s * (dot(v_cur.dp_du, v_cur.dn_dv) * v_cur.n + dp_du_dot_n * v_cur.dn_dv);
+    ds_du -= s * dot(s, ds_du);
+    ds_dv -= s * dot(s, ds_dv);
+    const float3 dt_du = cross(v_cur.dn_du, s) + cross(v_cur.n, ds_du);
+    const float3 dt_dv = cross(v_cur.dn_dv, s) + cross(v_cur.n, ds_dv);
+
+    // Compute the microfacet normal from the shading normal and sampled offset.
+    // This uses the stochastically sampled microfacet normal m for scattering.
+    const float3 m_surf = ad_compute_microfacet_normal(s, t, v_cur.n, v_cur.n_offset);
+
+    // Compute microfacet normal derivatives with respect to surface parameters.
+    float3 dm_surf_du, dm_surf_dv;
+    ad_compute_microfacet_normal_derivatives(
+        s, t, v_cur.n, ds_du, ds_dv, dt_du, dt_dv, v_cur.dn_du, v_cur.dn_dv, v_cur.n_offset,
+        dm_surf_du, dm_surf_dv);
 
     bool success_i = false;
 
@@ -670,11 +758,11 @@ bool mnee_compute_ad_constraint_derivatives(
     float3 wio;  // Transformed wi
     bool valid_transform_wi;
     if (reflection_vi) {
-      wio = ad_reflect(wi, n_surf);
+      wio = ad_reflect(wi, m_surf);
       valid_transform_wi = true;  // Reflection is always valid (except grazing, handled by helper)
     }
     else {
-      valid_transform_wi = ad_refract(wi, n_surf, v_cur.eta, wio);  // v_cur.eta is relative IOR
+      valid_transform_wi = ad_refract(wi, m_surf, v_cur.eta, wio);  // v_cur.eta is relative IOR
     }
 
     if (valid_transform_wi) {
@@ -702,16 +790,16 @@ bool mnee_compute_ad_constraint_derivatives(
         float3 dwi_dv_prev = ili * (v_prev.dp_dv - wi * dot(wi, v_prev.dp_dv));
 
         // Derivatives of transformed wi (wio) w.r.t. v_prev's u,v
-        // n_surf and its derivatives (dn_surf_du, dv) are at x_cur, so they don't depend on
+        // m_surf and its derivatives (dm_surf_du, dv) are at x_cur, so they don't depend on
         // v_prev's params.
         float3 dwio_du_prev, dwio_dv_prev;
         if (reflection_vi) {
           ad_d_reflect(wi,
                        dwi_du_prev,
                        dwi_dv_prev,
-                       n_surf,
+                       m_surf,
                        make_float3(0.0f, 0.0f, 0.0f),
-                       make_float3(0.0f, 0.0f, 0.0f), /* dn_du_p, dn_dv_p = 0 */
+                       make_float3(0.0f, 0.0f, 0.0f), /* dm_du_p, dm_dv_p = 0 */
                        dwio_du_prev,
                        dwio_dv_prev);
         }
@@ -719,9 +807,9 @@ bool mnee_compute_ad_constraint_derivatives(
           ad_d_refract(wi,
                        dwi_du_prev,
                        dwi_dv_prev,
-                       n_surf,
+                       m_surf,
                        make_float3(0.0f, 0.0f, 0.0f),
-                       make_float3(0.0f, 0.0f, 0.0f), /* dn_du_p, dn_dv_p = 0 */
+                       make_float3(0.0f, 0.0f, 0.0f), /* dm_du_p, dm_dv_p = 0 */
                        v_cur.eta,
                        dwio_du_prev,
                        dwio_dv_prev);
@@ -745,19 +833,19 @@ bool mnee_compute_ad_constraint_derivatives(
       // Derivatives w.r.t. x_{i} (v_cur's parameters u_c, v_c)
       // dwi_du_cur, dwi_dv_cur are already computed.
       // dwo_du_cur, dwo_dv_cur are already computed.
-      // dn_surf_du, dn_surf_dv are properties of v_cur.
+      // dm_surf_du, dm_surf_dv are the microfacet normal derivatives at v_cur.
       float3 dwio_du_cur, dwio_dv_cur;  // Derivatives of wio w.r.t. v_cur's u,v
       if (reflection_vi) {
         ad_d_reflect(
-            wi, dwi_du_cur, dwi_dv_cur, n_surf, dn_surf_du, dn_surf_dv, dwio_du_cur, dwio_dv_cur);
+            wi, dwi_du_cur, dwi_dv_cur, m_surf, dm_surf_du, dm_surf_dv, dwio_du_cur, dwio_dv_cur);
       }
       else {
         ad_d_refract(wi,
                      dwi_du_cur,
                      dwi_dv_cur,
-                     n_surf,
-                     dn_surf_du,
-                     dn_surf_dv,
+                     m_surf,
+                     dm_surf_du,
+                     dm_surf_dv,
                      v_cur.eta,
                      dwio_du_cur,
                      dwio_dv_cur);
@@ -798,11 +886,11 @@ bool mnee_compute_ad_constraint_derivatives(
       float3 woi;      // Transformed wo
       bool valid_transform_wo;
       if (reflection_vi) {
-        woi = ad_reflect(wo, n_surf);
+        woi = ad_reflect(wo, m_surf);
         valid_transform_wo = true;
       }
       else {
-        valid_transform_wo = ad_refract(wo, n_surf, v_cur.eta, woi);
+        valid_transform_wo = ad_refract(wo, m_surf, v_cur.eta, woi);
       }
 
       if (valid_transform_wo) {
@@ -856,9 +944,9 @@ bool mnee_compute_ad_constraint_derivatives(
           ad_d_reflect(wo,
                        dwo_du_cur,
                        dwo_dv_cur,
-                       n_surf,
-                       dn_surf_du,
-                       dn_surf_dv,
+                       m_surf,
+                       dm_surf_du,
+                       dm_surf_dv,
                        dwoi_du_cur,
                        dwoi_dv_cur);
         }
@@ -866,9 +954,9 @@ bool mnee_compute_ad_constraint_derivatives(
           ad_d_refract(wo,
                        dwo_du_cur,
                        dwo_dv_cur,
-                       n_surf,
-                       dn_surf_du,
-                       dn_surf_dv,
+                       m_surf,
+                       dm_surf_du,
+                       dm_surf_dv,
                        v_cur.eta,
                        dwoi_du_cur,
                        dwoi_dv_cur);
@@ -904,9 +992,9 @@ bool mnee_compute_ad_constraint_derivatives(
             ad_d_reflect(wo,
                          dwo_du_next,
                          dwo_dv_next,
-                         n_surf,
+                         m_surf,
                          make_float3(0.0f, 0.0f, 0.0f),
-                         make_float3(0.0f, 0.0f, 0.0f), /* dn_du_n, dn_dv_n = 0 */
+                         make_float3(0.0f, 0.0f, 0.0f), /* dm_du_n, dm_dv_n = 0 */
                          dwoi_du_next,
                          dwoi_dv_next);
           }
@@ -914,9 +1002,9 @@ bool mnee_compute_ad_constraint_derivatives(
             ad_d_refract(wo,
                          dwo_du_next,
                          dwo_dv_next,
-                         n_surf,
+                         m_surf,
                          make_float3(0.0f, 0.0f, 0.0f),
-                         make_float3(0.0f, 0.0f, 0.0f), /* dn_du_n, dn_dv_n = 0 */
+                         make_float3(0.0f, 0.0f, 0.0f), /* dm_du_n, dm_dv_n = 0 */
                          v_cur.eta,
                          dwoi_du_next,
                          dwoi_dv_next);
@@ -1474,7 +1562,10 @@ ccl_device_forceinline bool mnee_compute_transfer_matrix(const ccl_private Shade
   return true;
 }
 
-/* Calculate the path contribution. */
+/* Calculate the path contribution.
+ * Note: Following the reference implementation, the path contribution uses the HV formulation
+ * regardless of which constraint (HV or AD) was used for the Newton solver. The AD constraint
+ * only affects the solver step, not the contribution evaluation. */
 ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
                                                    IntegratorState state,
                                                    ccl_private ShaderData *sd,
@@ -1522,12 +1613,14 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
   const Spectrum light_eval = light_sample_shader_eval(kg, state, sd_mnee, ls, sd->time);
   bsdf_eval_mul(throughput, light_eval / ls->pdf);
 
-  /* Generalized geometry term. */
+  /* Generalized geometry term.
+   * Note: Following the reference, we always use the HV-based transfer matrix
+   * regardless of which constraint (HV or AD) was used for the solver. */
 
   float dh_dx;
   float dx1_dxlight;
   if (!mnee_compute_transfer_matrix(
-          sd, ls, light_fixed_direction, vertex_count, vertices, &dx1_dxlight, &dh_dx))
+          sd, ls, light_fixed_direction, vertex_count, vertices, &dx1_dxlight, &dh_dx, reflection))
   {
     return false;
   }
@@ -1611,7 +1704,9 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
 
     /* Evaluate product term inside eq.6 at solution interface. vi
      * divided by corresponding sampled pdf:
-     * fr(vi)_do / pdf_dh(vi) x |do/dh| x |n.wo / n.h| */
+     * fr(vi)_do / pdf_dh(vi) x |do/dh| x |n.wo / n.h|
+     * Note: Following the reference, we always use the HV-based BSDF contribution
+     * regardless of which constraint (HV or AD) was used for the solver. */
     const Spectrum bsdf_contribution = mnee_eval_bsdf_contribution(kg, v.bsdf, wi, wo, reflection);
     bsdf_eval_mul(throughput, bsdf_contribution);
   }
@@ -1784,12 +1879,34 @@ ccl_device_forceinline int kernel_path_mnee_sample(KernelGlobals kg,
     }
   }
 
+  /* Get the constraint derivative type (HV or AD). */
+  const int caustics_constraint_derivatives =
+      kernel_data.integrator.caustics_constraint_derivatives;
+
   /* 2. Walk on the specular manifold to find vertices on the casters that satisfy snell's law for
    * each interface. */
-  if (mnee_newton_solver(kg, sd, sd_mnee, ls, light_fixed_direction, vertex_count, vertices)) {
-    /* 3. If a solution exists, calculate contribution of the corresponding path */
-    if (!mnee_path_contribution(
-            kg, state, sd, sd_mnee, ls, light_fixed_direction, vertex_count, vertices, throughput))
+  if (mnee_newton_solver(kg,
+                         sd,
+                         sd_mnee,
+                         ls,
+                         light_fixed_direction,
+                         vertex_count,
+                         vertices,
+                         false /* reflection */,
+                         caustics_constraint_derivatives))
+  {
+    /* 3. If a solution exists, calculate contribution of the corresponding path.
+     * Note: Path contribution always uses HV formulation regardless of constraint type. */
+    if (!mnee_path_contribution(kg,
+                                state,
+                                sd,
+                                sd_mnee,
+                                ls,
+                                light_fixed_direction,
+                                vertex_count,
+                                vertices,
+                                throughput,
+                                false /* reflection */))
     {
       return 0;
     }

@@ -430,7 +430,8 @@ integrate_sms_unbiased(KernelGlobals kg,
     return zero_spectrum();
   }
 
-  /* Calculate the contribution of the *reference path*. */
+  /* Calculate the contribution of the *reference path*.
+   * Note: Path contribution always uses HV formulation regardless of constraint type. */
   bool contribution_success = mnee_path_contribution(
       kg,
       state,
@@ -441,7 +442,7 @@ integrate_sms_unbiased(KernelGlobals kg,
       vertex_count, /* Use actual vertex count. */
       vertices_ref, /* Use the reference vertex chain. */
       out_bsdf_eval,
-      false); /* Use reflection = false. */
+      false /* Use reflection = false. */);
 
   if (!contribution_success) {
     return zero_spectrum(); /* Contribution calculation failed. */
@@ -589,7 +590,7 @@ integrate_sms_biased(KernelGlobals kg,
                                      vertex_count,   /* Pass the actual number of vertices. */
                                      vertices_trial, /* Pass the solved vertex chain. */
                                      out_bsdf_eval,
-                                     false)) /* Use sms_flag = false. */
+                                     false /* Use reflection = false. */))
           {
             Spectrum f_trial = bsdf_eval_sum(out_bsdf_eval);
             /* Only store if the contribution is non-zero. */
