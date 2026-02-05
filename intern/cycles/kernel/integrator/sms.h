@@ -5,6 +5,7 @@
 #pragma once
 
 #include "kernel/integrator/mnee.h"
+#include "kernel/sample/mapping.h"
 
 /*
  * Specular Manifold Sampling (SMS)
@@ -12,6 +13,18 @@
  * This code implements Specular Manifold Sampling for rendering high-frequency caustics.
  * SMS extends Manifold Next Event Estimation (MNEE) by using stochastic initialization
  * instead of deterministic seed paths, enabling unbiased rendering of caustics.
+ *
+ * Key difference from MNEE:
+ * - MNEE uses deterministic seeding: traces directly toward light, finds caustic casters
+ *   only along the receiver→light axis, then applies Newton iteration.
+ * - SMS uses stochastic seeding: randomizes the initial probe direction (angular jittering)
+ *   and samples random positions on found surfaces (random barycentrics), enabling
+ *   discovery of off-axis specular paths that MNEE would miss.
+ *
+ * The Mitsuba reference implementation uses full "global seeding" where it iterates over
+ * all caustic caster shapes and samples uniformly on each. Our implementation approximates
+ * this by using angular jittering within a cone around the light direction, combined with
+ * random surface point sampling, which is more practical within Cycles' architecture.
  *
  * Reference:
  * "Specular Manifold Sampling for Rendering High-Frequency Caustics and Glints"
@@ -25,6 +38,7 @@ CCL_NAMESPACE_BEGIN
 /* SMS algorithm constants. */
 #define SMS_MAX_TRIALS 64
 #define SMS_BIASED_BUDGET 2
+#define SMS_PROBE_CONE_ANGLE 0.5f  /* Half-angle in radians (~28 degrees) for probe ray jittering */
 
 /* Structure for tracking unique solutions in biased SMS. */
 struct SMSUniqueSolution {
@@ -99,7 +113,11 @@ ccl_device_inline void sms_sample_triangle_point(KernelGlobals kg,
   Ng = normalize(cross(tri_b - tri_a, tri_c - tri_a));
 }
 
-/* Find caustic casters along the path from receiver to light. */
+/* Find caustic casters using stochastic probe ray direction.
+ * Unlike deterministic MNEE which traces directly toward the light,
+ * SMS uses angular jittering to discover off-axis specular paths.
+ * This implements a practical approximation of global seeding where
+ * the probe direction is sampled within a cone around the light direction. */
 ccl_device_forceinline int sms_find_caster_chain(KernelGlobals kg,
                                                   IntegratorState state,
                                                   ccl_private ShaderData *sd,
@@ -109,7 +127,32 @@ ccl_device_forceinline int sms_find_caster_chain(KernelGlobals kg,
                                                   const ccl_private RNGState *rng_state,
                                                   bool *has_reflection)
 {
-  /* Setup probe ray from receiver toward light. */
+  /* Base direction toward light. */
+  float3 base_D;
+  float base_tmax;
+  if (ls->t == FLT_MAX) {
+    base_D = ls->D;
+    base_tmax = ls->t;
+  }
+  else {
+    base_D = ls->P - sd->P;
+    base_D = normalize_len(base_D, &base_tmax);
+  }
+
+  /* Apply angular jittering: sample direction within a cone around the light direction.
+   * This allows discovery of caustic casters that don't lie on the direct receiver-light axis,
+   * which is essential for rendering off-axis caustics from complex geometry.
+   *
+   * The cone angle determines how far off-axis we can search. Larger angles allow finding
+   * more diverse caustic paths but may reduce efficiency for simple geometries. */
+  const float2 jitter_rand = path_state_rng_2D(kg, rng_state, PRNG_LIGHT_U);
+  float cos_theta_unused;
+  float pdf_unused;
+  const float one_minus_cos_angle = 1.0f - cosf(SMS_PROBE_CONE_ANGLE);
+  float3 jittered_D = sample_uniform_cone(
+      base_D, one_minus_cos_angle, jitter_rand, &cos_theta_unused, &pdf_unused);
+
+  /* Setup probe ray with jittered direction. */
   Ray probe_ray;
   probe_ray.self.object = sd->object;
   probe_ray.self.prim = sd->prim;
@@ -117,14 +160,9 @@ ccl_device_forceinline int sms_find_caster_chain(KernelGlobals kg,
   probe_ray.self.light_prim = ls->prim;
   probe_ray.P = sd->P;
   probe_ray.tmin = 0.0f;
-  if (ls->t == FLT_MAX) {
-    probe_ray.D = ls->D;
-    probe_ray.tmax = ls->t;
-  }
-  else {
-    probe_ray.D = ls->P - probe_ray.P;
-    probe_ray.D = normalize_len(probe_ray.D, &probe_ray.tmax);
-  }
+  probe_ray.D = jittered_D;
+  /* Extend tmax to account for jittered direction potentially being longer path. */
+  probe_ray.tmax = base_tmax * 2.0f;
   probe_ray.dP = differential_make_compact(sd->dP);
   probe_ray.dD = differential_zero_compact();
   probe_ray.time = sd->time;
@@ -198,8 +236,13 @@ ccl_device_forceinline int sms_find_caster_chain(KernelGlobals kg,
                                     bsdf_uv.y);
           }
 
-          /* Setup differential geometry on vertex. */
-          mnee_setup_manifold_vertex(kg, &mv, bsdf, eta, h, &probe_ray, &probe_isect, sd_mnee);
+          /* Setup differential geometry on vertex with random barycentric sampling.
+           * By passing rng_state, the vertex position is sampled uniformly on the
+           * triangle instead of using the intersection point. This, combined with
+           * angular jittering, provides more comprehensive exploration of the
+           * specular manifold than deterministic MNEE initialization. */
+          mnee_setup_manifold_vertex(
+              kg, &mv, bsdf, eta, h, &probe_ray, &probe_isect, sd_mnee, rng_state);
           break;
         }
       }
