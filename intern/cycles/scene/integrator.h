@@ -58,6 +58,8 @@ class Integrator : public Node {
 
   NODE_SOCKET_API(bool, caustics_reflective)
   NODE_SOCKET_API(bool, caustics_refractive)
+  NODE_SOCKET_API(int, caustics_sampling_strategy)
+  NODE_SOCKET_API(int, caustics_constraint_derivatives)
   NODE_SOCKET_API(float, filter_glossy)
 
   NODE_SOCKET_API(bool, use_direct_light);

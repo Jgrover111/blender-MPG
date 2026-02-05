@@ -195,6 +195,9 @@ KERNEL_STRUCT_MEMBER(integrator, float, sample_clamp_direct)
 KERNEL_STRUCT_MEMBER(integrator, float, sample_clamp_indirect)
 /* Caustics. */
 KERNEL_STRUCT_MEMBER(integrator, int, use_caustics)
+/* Specular Manifold Sampling. */
+KERNEL_STRUCT_MEMBER(integrator, int, caustics_sampling_strategy)
+KERNEL_STRUCT_MEMBER(integrator, int, caustics_constraint_derivatives)
 /* Sampling pattern. */
 KERNEL_STRUCT_MEMBER(integrator, int, sampling_pattern)
 KERNEL_STRUCT_MEMBER(integrator, float, scrambling_distance)

@@ -685,4 +685,54 @@ ccl_device_inline void film_write_surface_emission(KernelGlobals kg,
       kg, state, contribution, buffer, kernel_data.film.pass_emission, lightgroup);
 }
 
+/* Write SMS (Specular Manifold Sampling) direct light contribution to render buffer.
+ * SMS computes the full path contribution without shadow rays, so we write directly. */
+ccl_device_inline void film_write_direct_light_sms(KernelGlobals kg,
+                                                    ConstIntegratorState state,
+                                                    ccl_global float *ccl_restrict render_buffer,
+                                                    const Spectrum contribution)
+{
+  /* Clamp contribution. */
+  Spectrum clamped_contribution = contribution;
+  const int bounce = INTEGRATOR_STATE(state, path, bounce);
+  film_clamp_light(kg, &clamped_contribution, bounce);
+
+  /* Get render buffer for this pixel. */
+  ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
+
+  const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+  const int sample = INTEGRATOR_STATE(state, path, sample);
+
+  /* Write combined pass. */
+  film_write_combined_pass(kg, path_flag, sample, clamped_contribution, buffer);
+
+#ifdef __PASSES__
+  if (kernel_data.film.light_pass_flag & PASS_ANY) {
+    /* Write direct diffuse/glossy/transmission passes.
+     * For SMS caustics, contribution goes to transmission direct pass. */
+    const Spectrum pass_diffuse_weight = zero_spectrum();
+    const Spectrum pass_glossy_weight = zero_spectrum();
+    const Spectrum pass_transmission = clamped_contribution;
+
+    /* Direct diffuse. */
+    if (kernel_data.film.pass_diffuse_direct != PASS_UNUSED) {
+      film_write_pass_spectrum(buffer + kernel_data.film.pass_diffuse_direct,
+                               pass_diffuse_weight * clamped_contribution);
+    }
+
+    /* Direct glossy. */
+    if (kernel_data.film.pass_glossy_direct != PASS_UNUSED) {
+      film_write_pass_spectrum(buffer + kernel_data.film.pass_glossy_direct,
+                               pass_glossy_weight * clamped_contribution);
+    }
+
+    /* Direct transmission. */
+    if (kernel_data.film.pass_transmission_direct != PASS_UNUSED) {
+      film_write_pass_spectrum(buffer + kernel_data.film.pass_transmission_direct,
+                               pass_transmission);
+    }
+  }
+#endif
+}
+
 CCL_NAMESPACE_END

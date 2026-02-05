@@ -92,6 +92,25 @@ NODE_DEFINE(Integrator)
 
   SOCKET_BOOLEAN(caustics_reflective, "Reflective Caustics", true);
   SOCKET_BOOLEAN(caustics_refractive, "Refractive Caustics", true);
+
+  static NodeEnum caustics_sampling_strategy_enum;
+  caustics_sampling_strategy_enum.insert("mnee", CAUSTICS_SAMPLING_STRATEGY_MNEE);
+  caustics_sampling_strategy_enum.insert("sms_unbiased", CAUSTICS_SAMPLING_STRATEGY_SMS_UNBIASED);
+  caustics_sampling_strategy_enum.insert("sms_biased", CAUSTICS_SAMPLING_STRATEGY_SMS_BIASED);
+  SOCKET_ENUM(caustics_sampling_strategy,
+              "Caustics Sampling Strategy",
+              caustics_sampling_strategy_enum,
+              CAUSTICS_SAMPLING_STRATEGY_MNEE);
+
+  static NodeEnum caustics_constraint_derivatives_enum;
+  caustics_constraint_derivatives_enum.insert("half_vector", CAUSTICS_CONSTRAINT_DERIVATIVES_HV);
+  caustics_constraint_derivatives_enum.insert("angle_difference",
+                                              CAUSTICS_CONSTRAINT_DERIVATIVES_AD);
+  SOCKET_ENUM(caustics_constraint_derivatives,
+              "Caustics Constraint Derivatives",
+              caustics_constraint_derivatives_enum,
+              CAUSTICS_CONSTRAINT_DERIVATIVES_HV);
+
   SOCKET_FLOAT(filter_glossy, "Filter Glossy", 0.0f);
 
   SOCKET_BOOLEAN(use_direct_light, "Use Direct Light", true);
@@ -230,6 +249,8 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
 
   kintegrator->caustics_reflective = caustics_reflective;
   kintegrator->caustics_refractive = caustics_refractive;
+  kintegrator->caustics_sampling_strategy = caustics_sampling_strategy;
+  kintegrator->caustics_constraint_derivatives = caustics_constraint_derivatives;
   kintegrator->filter_glossy = (filter_glossy == 0.0f) ? FLT_MAX : 1.0f / filter_glossy;
 
   kintegrator->filter_closures = 0;

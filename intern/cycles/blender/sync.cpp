@@ -355,6 +355,9 @@ void BlenderSync::sync_integrator(BL::ViewLayer &b_view_layer,
 
   integrator->set_caustics_reflective(get_boolean(cscene, "caustics_reflective"));
   integrator->set_caustics_refractive(get_boolean(cscene, "caustics_refractive"));
+  integrator->set_caustics_sampling_strategy(get_enum(cscene, "caustics_sampling_strategy"));
+  integrator->set_caustics_constraint_derivatives(
+      get_enum(cscene, "caustics_constraint_derivatives"));
   integrator->set_filter_glossy(get_float(cscene, "blur_glossy"));
 
   int seed = get_int(cscene, "seed");

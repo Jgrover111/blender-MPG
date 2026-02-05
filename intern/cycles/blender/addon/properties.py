@@ -365,6 +365,32 @@ enum_direct_light_sampling_type = (
      2),
 )
 
+enum_caustics_sampling_strategy = (
+    ('MNEE',
+     "MNEE",
+     "Manifold Next Event Estimation - Original caustics sampling method",
+     0),
+    ('SMS_UNBIASED',
+     "SMS (Unbiased)",
+     "Specular Manifold Sampling - Unbiased mode with geometric series estimator",
+     1),
+    ('SMS_BIASED',
+     "SMS (Biased)",
+     "Specular Manifold Sampling - Biased mode with fixed trial budget",
+     2),
+)
+
+enum_caustics_constraint_derivatives = (
+    ('HALF_VECTOR',
+     "Half-Vector",
+     "Half-vector constraint derivatives (original MNEE method)",
+     0),
+    ('ANGLE_DIFFERENCE',
+     "Angle-Difference",
+     "Angle-difference constraint derivatives (SMS paper method)",
+     1),
+)
+
 
 def update_render_passes(self, context):
     view_layer = context.view_layer
@@ -662,6 +688,20 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         name="Refractive Caustics",
         description="Use refractive caustics, resulting in a brighter image (more noise but added realism)",
         default=True,
+    )
+
+    caustics_sampling_strategy: EnumProperty(
+        name="Caustics Sampling",
+        description="Sampling strategy for rendering caustics",
+        items=enum_caustics_sampling_strategy,
+        default='MNEE',
+    )
+
+    caustics_constraint_derivatives: EnumProperty(
+        name="Constraint Derivatives",
+        description="Method for computing constraint derivatives in manifold walking",
+        items=enum_caustics_constraint_derivatives,
+        default='HALF_VECTOR',
     )
 
     blur_glossy: FloatProperty(

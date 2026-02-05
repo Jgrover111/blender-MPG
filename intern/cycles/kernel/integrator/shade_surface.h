@@ -17,6 +17,7 @@
 #include "kernel/geom/triangle.h"
 
 #include "kernel/integrator/mnee.h"
+#include "kernel/integrator/sms.h"
 
 #include "kernel/integrator/guiding.h"
 #include "kernel/integrator/shadow_linking.h"
@@ -354,6 +355,8 @@ ccl_device
   BsdfEval bsdf_eval ccl_optional_struct_init;
 
   int mnee_vertex_count = 0;  // NOLINT
+  Spectrum sms_contribution = zero_spectrum();
+  bool use_sms = false;
 #ifdef __MNEE__
   IF_KERNEL_FEATURE(MNEE)
   {
@@ -368,13 +371,43 @@ ccl_device
 
         /* Are we on a caustic receiver? */
         if (!is_transmission && (sd->object_flag & SD_OBJECT_CAUSTICS_RECEIVER)) {
-          mnee_vertex_count = kernel_path_mnee_sample(
-              kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+          /* Determine light direction for SMS. */
+          const bool light_fixed_direction = (ls.t == FLT_MAX) ||
+                                             (ls.type == LIGHT_AREA &&
+                                              kernel_data_fetch(lights, ls.prim).area.tan_half_spread == 0.0f);
+
+          const int sampling_strategy = kernel_data.integrator.caustics_sampling_strategy;
+
+          if (sampling_strategy == CAUSTICS_SAMPLING_STRATEGY_SMS_UNBIASED) {
+            /* Unbiased SMS. */
+            use_sms = true;
+            sms_contribution = integrate_sms_unbiased(
+                kg, state, sd, emission_sd, rng_state, &ls, light_fixed_direction);
+          }
+          else if (sampling_strategy == CAUSTICS_SAMPLING_STRATEGY_SMS_BIASED) {
+            /* Biased SMS. */
+            use_sms = true;
+            sms_contribution = integrate_sms_biased(
+                kg, state, sd, emission_sd, rng_state, &ls, light_fixed_direction);
+          }
+          else {
+            /* Original MNEE. */
+            mnee_vertex_count = kernel_path_mnee_sample(
+                kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+          }
         }
       }
     }
   }
-  if (mnee_vertex_count > 0) {
+  if (use_sms) {
+    /* SMS handles its own path contribution evaluation. */
+    if (!is_zero(sms_contribution)) {
+      /* Write SMS contribution directly to film (no shadow ray needed). */
+      film_write_direct_light_sms(kg, state, render_buffer, sms_contribution);
+    }
+    return;
+  }
+  else if (mnee_vertex_count > 0) {
     /* Create shadow ray after successful manifold walk:
      * emission_sd contains the last interface intersection and
      * the light sample ls has been updated */
