@@ -30,7 +30,7 @@ CCL_NAMESPACE_BEGIN
 #define SPOLY_MAX_BEZOUT_SIZE 7 /* max bivariate degree + 1 */
 #define SPOLY_MAX_UNI_COEFFS 20
 #define SPOLY_MAX_BVCOEFFS 7 /* degree+1 for bivariate, max T=6 -> 7 */
-#define SPOLY_MAX_ROOTS 16
+#define SPOLY_MAX_ROOTS 32
 #define SPOLY_BISECT_ITERATIONS 20
 #define SPOLY_ROOT_EPS 1e-6f
 #define SPOLY_NUM_DICHOTOMY_SAMPLES 65
@@ -272,19 +272,21 @@ ccl_device_inline void spoly_biv_scale(ccl_private SPolyBiv *p, float s)
   }
 }
 
-/* Divide all coefficients by the maximum absolute value (normalization). */
+/* Divide all coefficients by max * 1e-6 (matching reference normalization).
+ * The reference uses findMax() (raw max, not abs) scaled by 1e-6.
+ * This effectively upscales coefficients for better numerical conditioning. */
 ccl_device_inline void spoly_biv_divide_by_max(ccl_private SPolyBiv *p)
 {
-  float max_val = 0.0f;
+  float max_val = p->coeffs[0][0];
   for (int i = 0; i < SPOLY_MAX_BVCOEFFS; i++) {
     for (int j = 0; j < SPOLY_MAX_BVCOEFFS; j++) {
-      float av = fabsf(p->coeffs[i][j]);
-      if (av > max_val)
-        max_val = av;
+      if (p->coeffs[i][j] > max_val)
+        max_val = p->coeffs[i][j];
     }
   }
-  if (max_val > 1e-30f) {
-    float inv = 1.0f / max_val;
+  float divisor = max_val * 1e-6f;
+  if (divisor != 0.0f) {
+    float inv = 1.0f / divisor;
     for (int i = 0; i < SPOLY_MAX_BVCOEFFS; i++) {
       for (int j = 0; j < SPOLY_MAX_BVCOEFFS; j++) {
         p->coeffs[i][j] *= inv;
@@ -412,6 +414,37 @@ ccl_device_inline void spoly_bvp3_cross(ccl_private SPolyBVP3 *result,
   spoly_biv_mul(&t1, &a->x, &b->y);
   spoly_biv_mul(&t2, &a->y, &b->x);
   spoly_biv_sub(&result->z, &t1, &t2);
+}
+
+/* Select the BVP3 component with the largest max absolute coefficient.
+ * This avoids the degeneracy of always projecting to x which can fail
+ * for certain triangle orientations. */
+ccl_device_inline void spoly_bvp3_best_component(ccl_private const SPolyBVP3 *p,
+                                                  ccl_private SPolyBiv *result)
+{
+  float max_x = 0.0f, max_y = 0.0f, max_z = 0.0f;
+  for (int i = 0; i < SPOLY_MAX_BVCOEFFS; i++) {
+    for (int j = 0; j < SPOLY_MAX_BVCOEFFS; j++) {
+      float ax = fabsf(p->x.coeffs[i][j]);
+      float ay = fabsf(p->y.coeffs[i][j]);
+      float az = fabsf(p->z.coeffs[i][j]);
+      if (ax > max_x)
+        max_x = ax;
+      if (ay > max_y)
+        max_y = ay;
+      if (az > max_z)
+        max_z = az;
+    }
+  }
+  if (max_x >= max_y && max_x >= max_z) {
+    *result = p->x;
+  }
+  else if (max_y >= max_z) {
+    *result = p->y;
+  }
+  else {
+    *result = p->z;
+  }
 }
 
 /* Scalar-multiply a BVP3 by a bivariate polynomial. */
@@ -738,8 +771,10 @@ ccl_device_inline void spoly_build_reflection_constraints(float3 xD,
   spoly_biv_mul(&term2, &d0_dot_t2, &d1_dot_n);
   spoly_biv_add(Czy, &term1, &term2);
 
-  /* Cxz: cop = (d0 × s) × (n_hat × s), take x-component.
-   * s = xL - xD (constant vector). */
+  /* Cxz: cop = (d0 × s) × (n_hat × s), project to best axis.
+   * s = xL - xD (constant vector).
+   * The reference always uses x-axis but warns it can fail for some orientations.
+   * We pick the component with the largest magnitude for robustness. */
   float3 s = xL - xD;
   SPolyBVP3 s_bvp;
   spoly_bvp3_set_const(&s_bvp, s);
@@ -748,7 +783,7 @@ ccl_device_inline void spoly_build_reflection_constraints(float3 xD,
   spoly_bvp3_cross(&d0_cross_s, &d0, &s_bvp);
   spoly_bvp3_cross(&n_cross_s, &n1_hat, &s_bvp);
   spoly_bvp3_cross(&cop, &d0_cross_s, &n_cross_s);
-  *Cxz = cop.x; /* Project to x-axis. */
+  spoly_bvp3_best_component(&cop, Cxz);
 }
 
 /* ============================================================================
@@ -826,10 +861,10 @@ ccl_device_inline void spoly_build_refraction_constraints(float3 xD,
   SPolyBVP3 c;
   spoly_bvp3_sub(&c, &term1_bvp, &term2_bvp);
 
-  /* Czy = c.x */
-  *Czy = c.x;
+  /* Czy: pick best component of c (reference uses c.bvp[0] = x). */
+  spoly_bvp3_best_component(&c, Czy);
 
-  /* Cxz: same cop formulation as reflection. */
+  /* Cxz: same cop formulation as reflection, best component. */
   float3 s = xL - xD;
   SPolyBVP3 s_bvp;
   spoly_bvp3_set_const(&s_bvp, s);
@@ -837,7 +872,7 @@ ccl_device_inline void spoly_build_refraction_constraints(float3 xD,
   spoly_bvp3_cross(&d0_cross_s, &d0, &s_bvp);
   spoly_bvp3_cross(&n_cross_s, &n1_hat, &s_bvp);
   spoly_bvp3_cross(&cop, &d0_cross_s, &n_cross_s);
-  *Cxz = cop.x;
+  spoly_bvp3_best_component(&cop, Cxz);
 }
 
 /* ============================================================================
@@ -913,9 +948,10 @@ ccl_device_inline int spoly_solve(float3 xD,
       float czy_val = spoly_uni_eval(&czy_u, u);
       float cxz_val = spoly_uni_eval(&cxz_u, u);
 
-      /* Tolerance: the constraint should be near zero. */
-      float scale = fmaxf(1.0f, fmaxf(fabsf(czy_val), fabsf(cxz_val)));
-      if (fabsf(czy_val) > 0.01f * scale && fabsf(cxz_val) > 0.01f * scale)
+      /* Tolerance: BOTH constraints must be near zero for a valid solution.
+       * Use relative tolerance since divideByMax upscales coefficients. */
+      float max_residual = fmaxf(fabsf(czy_val), fabsf(cxz_val));
+      if (max_residual > 1.0f)
         continue;
 
       if (num_solutions < SPOLY_MAX_ROOTS) {
