@@ -664,6 +664,13 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=True,
     )
 
+    use_specular_polynomials: BoolProperty(
+        name="Specular Polynomials",
+        description="Use specular polynomial solver for deterministic caustics on glossy and glass surfaces "
+        "(triangle meshes only). Provides faster convergence of caustic lighting",
+        default=False,
+    )
+
     blur_glossy: FloatProperty(
         name="Filter Glossy",
         description="Adaptively blur glossy shaders after blurry bounces, "

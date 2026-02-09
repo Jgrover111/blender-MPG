@@ -356,6 +356,7 @@ void BlenderSync::sync_integrator(BL::ViewLayer &b_view_layer,
   integrator->set_caustics_reflective(get_boolean(cscene, "caustics_reflective"));
   integrator->set_caustics_refractive(get_boolean(cscene, "caustics_refractive"));
   integrator->set_filter_glossy(get_float(cscene, "blur_glossy"));
+  integrator->set_use_specular_polynomials(get_boolean(cscene, "use_specular_polynomials"));
 
   int seed = get_int(cscene, "seed");
   if (get_boolean(cscene, "use_animated_seed")) {

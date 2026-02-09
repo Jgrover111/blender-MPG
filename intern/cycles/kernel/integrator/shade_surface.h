@@ -17,6 +17,7 @@
 #include "kernel/geom/triangle.h"
 
 #include "kernel/integrator/mnee.h"
+#include "kernel/integrator/spoly.h"
 
 #include "kernel/integrator/guiding.h"
 #include "kernel/integrator/shadow_linking.h"
@@ -383,24 +384,45 @@ ccl_device
   else
 #endif /* __MNEE__ */
   {
-    const Spectrum light_eval = light_sample_shader_eval(kg, state, emission_sd, &ls, sd->time);
-    if (is_zero(light_eval)) {
-      return;
+    /* Try specular polynomial NEE for glossy/glass surfaces on triangle meshes. */
+    bool spoly_success = false;
+    if (kernel_data.integrator.use_specular_polynomials) {
+      spoly_success = kernel_path_spoly_connect(
+          kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
     }
 
-    /* Evaluate BSDF. */
-    const float bsdf_pdf = surface_shader_bsdf_eval(kg, state, sd, ls.D, &bsdf_eval, ls.shader);
-    const float mis_weight = light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
-    bsdf_eval_mul(&bsdf_eval, light_eval / ls.pdf * mis_weight);
+    if (spoly_success) {
+      /* Path termination. */
+      const float terminate = path_state_rng_light_termination(kg, rng_state);
+      if (light_sample_terminate(kg, &bsdf_eval, terminate)) {
+        return;
+      }
 
-    /* Path termination. */
-    const float terminate = path_state_rng_light_termination(kg, rng_state);
-    if (light_sample_terminate(kg, &bsdf_eval, terminate)) {
-      return;
+      /* Create shadow ray. */
+      light_sample_to_surface_shadow_ray(kg, sd, &ls, &ray);
     }
+    else {
+      const Spectrum light_eval = light_sample_shader_eval(
+          kg, state, emission_sd, &ls, sd->time);
+      if (is_zero(light_eval)) {
+        return;
+      }
 
-    /* Create shadow ray. */
-    light_sample_to_surface_shadow_ray(kg, sd, &ls, &ray);
+      /* Evaluate BSDF. */
+      const float bsdf_pdf = surface_shader_bsdf_eval(
+          kg, state, sd, ls.D, &bsdf_eval, ls.shader);
+      const float mis_weight = light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
+      bsdf_eval_mul(&bsdf_eval, light_eval / ls.pdf * mis_weight);
+
+      /* Path termination. */
+      const float terminate = path_state_rng_light_termination(kg, rng_state);
+      if (light_sample_terminate(kg, &bsdf_eval, terminate)) {
+        return;
+      }
+
+      /* Create shadow ray. */
+      light_sample_to_surface_shadow_ray(kg, sd, &ls, &ray);
+    }
   }
 
   if (ray.self.object != OBJECT_NONE) {
