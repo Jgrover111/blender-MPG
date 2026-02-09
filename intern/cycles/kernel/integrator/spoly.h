@@ -932,122 +932,327 @@ ccl_device_inline int spoly_solve(float3 xD,
 }
 
 /* ============================================================================
- * Integrator-level specular polynomial NEE.
+ * Integrator-level specular polynomial caustic sampling.
+ *
+ * Runs on DIFFUSE receiver surfaces (like MNEE). Shoots a probe ray toward
+ * the light to discover specular caster triangles, then solves the polynomial
+ * constraint system on those triangles to find exact specular bounce points.
+ *
+ * Handles both reflection (glossy) and refraction (glass) caustics.
+ * Returns the number of specular vertices found (0 = failure, 1 = success).
+ * On success, throughput contains the full path contribution and emission_sd
+ * is set up at the specular vertex for shadow ray construction.
  * ============================================================================ */
 
-ccl_device_inline bool kernel_path_spoly_connect(KernelGlobals kg,
-                                                 IntegratorState state,
-                                                 ccl_private ShaderData *sd,
-                                                 ccl_private ShaderData *emission_sd,
-                                                 const ccl_private RNGState *rng_state,
-                                                 ccl_private LightSample *ls,
-                                                 ccl_private BsdfEval *bsdf_eval_out)
+ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
+                                                    IntegratorState state,
+                                                    ccl_private ShaderData *sd,
+                                                    ccl_private ShaderData *sd_mnee,
+                                                    const ccl_private RNGState *rng_state,
+                                                    ccl_private LightSample *ls,
+                                                    ccl_private BsdfEval *throughput)
 {
-  /* Only works on triangle meshes with smooth normals. */
-  if (!(sd->type & PRIMITIVE_TRIANGLE))
-    return false;
-  if (!(sd->shader & SHADER_SMOOTH_NORMAL))
-    return false;
-
-  /* Find a glossy or glass closure. */
-  ccl_private const MicrofacetBsdf *microfacet_bsdf = nullptr;
-  bool is_refraction = false;
-  float eta = 1.0f;
-
-  for (int i = 0; i < sd->num_closure; i++) {
-    ccl_private const ShaderClosure *sc = &sd->closure[i];
-    if (CLOSURE_IS_BSDF_MICROFACET(sc->type)) {
-      microfacet_bsdf = (ccl_private const MicrofacetBsdf *)sc;
-      is_refraction = CLOSURE_IS_REFRACTION(sc->type) || CLOSURE_IS_GLASS(sc->type);
-      if (is_refraction) {
-        eta = (sd->flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior : microfacet_bsdf->ior;
-      }
-      break;
-    }
-  }
-
-  if (!microfacet_bsdf)
-    return false;
-
-  /* Only useful for near-specular surfaces (alpha < 0.1). */
-  float max_alpha = fmaxf(microfacet_bsdf->alpha_x, microfacet_bsdf->alpha_y);
-  if (max_alpha > 0.1f)
-    return false;
-
   /* Need a finite light position. */
   if (ls->t == FLT_MAX)
-    return false;
+    return 0;
 
-  float3 xL = ls->P;
-  /* Virtual camera point along the incoming ray direction. */
-  float3 xD = sd->P + sd->wi;
+  /* Setup probe ray from receiver toward the light. */
+  Ray probe_ray;
+  probe_ray.self.object = sd->object;
+  probe_ray.self.prim = sd->prim;
+  probe_ray.self.light_object = ls->object;
+  probe_ray.self.light_prim = ls->prim;
+  probe_ray.P = sd->P;
+  probe_ray.D = normalize_len(ls->P - sd->P, &probe_ray.tmax);
+  probe_ray.tmin = 0.0f;
+  probe_ray.dP = differential_make_compact(sd->dP);
+  probe_ray.dD = differential_zero_compact();
+  probe_ray.time = sd->time;
+  Intersection probe_isect;
 
-  /* Fetch triangle vertices and normals. */
-  float3 P[3], N[3];
-  triangle_vertices_and_normals(kg, sd->prim, P, N);
+  /* Phase 1: Find a specular caustic caster along the probe ray. */
+  bool found_caster = false;
+  bool is_refraction = false;
+  float eta = 1.0f;
+  float3 caster_verts[3];
+  float3 caster_normals[3];
 
-  /* Solve for specular points. */
+  for (int isect_count = 0; isect_count < 10; isect_count++) {
+    const bool hit = scene_intersect(kg, &probe_ray, PATH_RAY_TRANSMIT, &probe_isect);
+    if (!hit) {
+      break;
+    }
+
+    const int object_flags = intersection_get_object_flags(kg, &probe_isect);
+    if (object_flags & SD_OBJECT_CAUSTICS_CASTER) {
+
+      /* Must be a triangle primitive. */
+      if (!(probe_isect.type & PRIMITIVE_TRIANGLE)) {
+        return 0;
+      }
+
+      /* Setup shader data on the caster. */
+      shader_setup_from_ray(kg, sd_mnee, &probe_ray, &probe_isect);
+
+      /* Must have smooth normals. */
+      if (!(sd_mnee->shader & SHADER_SMOOTH_NORMAL)) {
+        return 0;
+      }
+
+      /* Evaluate shader to get closures. */
+      surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
+          kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
+
+      /* Find a glossy or refractive microfacet BSDF on the caster. */
+      for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
+        ccl_private ShaderClosure *bsdf = &sd_mnee->closure[ci];
+        if (CLOSURE_IS_BSDF_MICROFACET(bsdf->type)) {
+          ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)bsdf;
+
+          /* Only useful for near-specular surfaces (low roughness). */
+          if (fmaxf(mbsdf->alpha_x, mbsdf->alpha_y) > 0.075f) {
+            continue;
+          }
+
+          is_refraction = CLOSURE_IS_REFRACTION(bsdf->type) || CLOSURE_IS_GLASS(bsdf->type);
+          if (is_refraction) {
+            eta = (sd_mnee->flag & SD_BACKFACING) ? 1.0f / mbsdf->ior : mbsdf->ior;
+          }
+
+          found_caster = true;
+          break;
+        }
+      }
+
+      if (found_caster) {
+        /* Load triangle vertices and normals. */
+        triangle_vertices_and_normals(kg, sd_mnee->prim, caster_verts, caster_normals);
+
+        /* Apply instance transforms if needed. */
+        if (!(sd_mnee->object_flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+          object_position_transform_auto(kg, sd_mnee, &caster_verts[0]);
+          object_position_transform_auto(kg, sd_mnee, &caster_verts[1]);
+          object_position_transform_auto(kg, sd_mnee, &caster_verts[2]);
+          object_normal_transform_auto(kg, sd_mnee, &caster_normals[0]);
+          object_normal_transform_auto(kg, sd_mnee, &caster_normals[1]);
+          object_normal_transform_auto(kg, sd_mnee, &caster_normals[2]);
+        }
+
+        /* Normalize the transformed normals. */
+        caster_normals[0] = normalize(caster_normals[0]);
+        caster_normals[1] = normalize(caster_normals[1]);
+        caster_normals[2] = normalize(caster_normals[2]);
+
+        break;
+      }
+    }
+
+    /* Continue probing past non-caster intersections. */
+    probe_ray.self.object = probe_isect.object;
+    probe_ray.self.prim = probe_isect.prim;
+    probe_ray.tmin = intersection_t_offset(probe_isect.t);
+  }
+
+  if (!found_caster)
+    return 0;
+
+  /* Phase 2: Solve the specular polynomial system on the caster triangle.
+   * xD = receiver position, xL = light position. */
   SPolySolution solutions[SPOLY_MAX_ROOTS];
-  int num_solutions = spoly_solve(xD, xL, P[0], P[1], P[2], N[0], N[1], N[2],
-                                  is_refraction, eta, solutions);
+  int num_solutions = spoly_solve(sd->P,
+                                  ls->P,
+                                  caster_verts[0],
+                                  caster_verts[1],
+                                  caster_verts[2],
+                                  caster_normals[0],
+                                  caster_normals[1],
+                                  caster_normals[2],
+                                  is_refraction,
+                                  eta,
+                                  solutions);
 
   if (num_solutions == 0)
-    return false;
+    return 0;
 
-  /* Evaluate each solution and pick the one with brightest BSDF contribution. */
-  Spectrum best_contribution = zero_spectrum();
-  float3 best_direction = zero_float3();
-  bool found = false;
+  /* Phase 3: Pick the best valid solution. */
+  float3 best_spec_pos = zero_float3();
+  float best_spec_u = 0.0f, best_spec_v = 0.0f;
+  float best_score = -1.0f;
+  bool found_valid = false;
 
   for (int si = 0; si < num_solutions; si++) {
     float3 spec_pos = solutions[si].position;
-    float3 D = spec_pos - sd->P;
-    float t = len(D);
-    if (t < 1e-8f)
+    float u = solutions[si].u;
+    float v = solutions[si].v;
+
+    /* Direction from receiver to specular point. */
+    float3 to_spec = spec_pos - sd->P;
+    float dist_to_spec = len(to_spec);
+    if (dist_to_spec < 1e-6f)
       continue;
-    D = D / t;
+    to_spec /= dist_to_spec;
 
-    /* Hemisphere check. */
-    bool towards_back = (dot(D, sd->N) < 0.0f);
-    if (!is_refraction && towards_back)
+    /* Direction from specular point to light. */
+    float3 to_light = ls->P - spec_pos;
+    float dist_to_light = len(to_light);
+    if (dist_to_light < 1e-6f)
       continue;
+    to_light /= dist_to_light;
 
-    BsdfEval bsdf_eval_tmp ccl_optional_struct_init;
-    float bsdf_pdf = surface_shader_bsdf_eval(kg, state, sd, D, &bsdf_eval_tmp, ls->shader);
+    /* Interpolated normal at the specular point. */
+    float w = 1.0f - u - v;
+    float3 spec_N = normalize(w * caster_normals[0] + u * caster_normals[1] +
+                              v * caster_normals[2]);
 
-    if (bsdf_pdf <= 0.0f)
-      continue;
+    if (!is_refraction) {
+      /* Reflection: verify half-vector aligns with normal. */
+      float3 wi = -to_spec; /* toward receiver */
+      float3 wo = to_light; /* toward light */
+      float3 H = normalize(wi + wo);
+      float h_dot_n = dot(H, spec_N);
+      if (h_dot_n < 0.95f)
+        continue;
 
-    Spectrum contribution = bsdf_eval_sum(&bsdf_eval_tmp);
-    float lum = reduce_max(fabs(contribution));
+      /* Hemisphere checks. */
+      if (dot(wi, spec_N) < 0.0f || dot(wo, spec_N) < 0.0f)
+        continue;
+    }
+    else {
+      /* Refraction: verify Snell's law approximately holds. */
+      float cos_i = dot(-to_spec, spec_N);
+      if (cos_i < 0.0f) {
+        spec_N = -spec_N;
+        cos_i = -cos_i;
+      }
+    }
 
-    if (lum > reduce_max(fabs(best_contribution))) {
-      best_contribution = contribution;
-      best_direction = D;
-      found = true;
+    /* Score: prefer solutions with larger geometric contribution. */
+    float cos_in = fabsf(dot(-to_spec, spec_N));
+    float cos_out = fabsf(dot(to_light, spec_N));
+    float score = cos_in * cos_out;
+
+    if (score > best_score) {
+      best_score = score;
+      best_spec_pos = spec_pos;
+      best_spec_u = u;
+      best_spec_v = v;
+      found_valid = true;
     }
   }
 
-  if (!found)
-    return false;
+  if (!found_valid)
+    return 0;
 
-  /* Evaluate light and BSDF for the best direction. */
-  const Spectrum light_eval = light_sample_shader_eval(kg, state, emission_sd, ls, sd->time);
-  if (is_zero(light_eval))
-    return false;
+  /* Phase 4: Visibility check - verify line of sight from receiver to specular point. */
+  {
+    Ray vis_ray;
+    vis_ray.P = sd->P;
+    float vis_len;
+    vis_ray.D = normalize_len(best_spec_pos - sd->P, &vis_len);
+    vis_ray.tmin = 0.0f;
+    vis_ray.tmax = vis_len;
+    vis_ray.self.object = sd->object;
+    vis_ray.self.prim = sd->prim;
+    vis_ray.self.light_object = OBJECT_NONE;
+    vis_ray.self.light_prim = PRIM_NONE;
+    vis_ray.dP = differential_make_compact(sd->dP);
+    vis_ray.dD = differential_zero_compact();
+    vis_ray.time = sd->time;
 
-  float bsdf_pdf = surface_shader_bsdf_eval(kg, state, sd, best_direction, bsdf_eval_out,
-                                             ls->shader);
-
-  /* MIS weight. For near-delta specular, weight is 1. For slightly rough, use MIS. */
-  float mis_weight = 1.0f;
-  if (max_alpha > 0.001f) {
-    mis_weight = light_sample_mis_weight_nee(kg, ls->pdf, bsdf_pdf);
+    Intersection vis_isect;
+    if (scene_intersect(kg, &vis_ray, PATH_RAY_TRANSMIT, &vis_isect)) {
+      const int hit_object = (vis_isect.object == OBJECT_NONE) ?
+                                 kernel_data_fetch(prim_object, vis_isect.prim) :
+                                 vis_isect.object;
+      /* Check that we hit the expected caster object. */
+      if (hit_object != sd_mnee->object || fabsf(vis_len - vis_isect.t) > 0.01f) {
+        return 0;
+      }
+    }
   }
 
-  bsdf_eval_mul(bsdf_eval_out, light_eval / ls->pdf * mis_weight);
+  /* Phase 5: Compute path contribution.
+   *
+   * Path: receiver (sd->P) -> specular_point -> light (ls->P)
+   *
+   * Contribution = receiver_bsdf(dir_to_spec)
+   *              * Fresnel_at_spec
+   *              * geometry_factor
+   *              * light_eval / ls->pdf
+   */
 
-  return true;
+  float dist_to_spec;
+  float3 dir_to_spec = normalize_len(best_spec_pos - sd->P, &dist_to_spec);
+
+  /* Evaluate receiver BSDF for the direction toward the specular point. */
+  surface_shader_bsdf_eval(kg, state, sd, dir_to_spec, throughput, ls->shader);
+
+  /* Interpolated normal at specular point. */
+  float w_bary = 1.0f - best_spec_u - best_spec_v;
+  float3 spec_N = normalize(w_bary * caster_normals[0] + best_spec_u * caster_normals[1] +
+                            best_spec_v * caster_normals[2]);
+
+  /* Fresnel at specular point. */
+  float3 dir_to_light = normalize(ls->P - best_spec_pos);
+  float cos_i_spec = dot(-dir_to_spec, spec_N);
+  float F;
+  if (is_refraction) {
+    F = 1.0f - fresnel_dielectric_cos(cos_i_spec, eta);
+  }
+  else {
+    F = fresnel_dielectric_cos(cos_i_spec, 1.5f); /* default IOR for glossy */
+  }
+
+  /* Geometry factor: solid angle subtended by specular point at receiver,
+   * times the geometric coupling to the light.
+   * G = |cos_i_at_spec| / dist_recv_to_spec^2 */
+  float cos_o_spec = fabsf(dot(dir_to_light, spec_N));
+  float G = fabsf(cos_i_spec) * cos_o_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
+
+  /* Clamp for stability (same approach as MNEE). */
+  G = fminf(G, 2.0f);
+
+  bsdf_eval_mul(throughput, F * G);
+
+  /* Update light sample relative to the specular point and evaluate light shader. */
+  const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+
+  /* Save and temporarily adjust bounce info for light shader evaluation. */
+  const int transmission_bounce = INTEGRATOR_STATE(state, path, transmission_bounce);
+  const int diffuse_bounce = INTEGRATOR_STATE(state, path, diffuse_bounce);
+  const int bounce = INTEGRATOR_STATE(state, path, bounce);
+
+  INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce + 1;
+  INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce + 1;
+
+  light_sample_update(kg, ls, best_spec_pos, spec_N, path_flag);
+
+  /* Setup sd_mnee at the specular point for light evaluation and shadow ray.
+   * We use shader_setup_from_sample to properly initialize emission_sd. */
+  shader_setup_from_sample(kg,
+                           sd_mnee,
+                           best_spec_pos,
+                           spec_N,
+                           -dir_to_spec,
+                           sd_mnee->shader,
+                           sd_mnee->object,
+                           sd_mnee->prim,
+                           best_spec_u,
+                           best_spec_v,
+                           dist_to_spec,
+                           sd->time,
+                           false,
+                           false);
+
+  const Spectrum light_eval = light_sample_shader_eval(kg, state, sd_mnee, ls, sd->time);
+  bsdf_eval_mul(throughput, light_eval / ls->pdf);
+
+  /* Restore bounce state. */
+  INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
+  INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce;
+  INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce;
+
+  return 1;
 }
 
 CCL_NAMESPACE_END
