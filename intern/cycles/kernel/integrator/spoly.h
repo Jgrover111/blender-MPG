@@ -20,22 +20,20 @@
  * Zheng et al., SIGGRAPH 2024.
  *
  * For single-bounce reflection (R), the constraint polynomials are degree 4 in (u,v),
- * yielding a 4x4 Bezout matrix and degree-8 resultant.
- * For single-bounce transmission (T), degree 6, yielding 6x6 Bezout matrix and degree-18
- * resultant.
+ * yielding a 4x4 Bezout matrix whose determinant roots give candidate v-values.
+ * For single-bounce transmission (T), degree 6, yielding 6x6 Bezout matrix.
  */
 
 CCL_NAMESPACE_BEGIN
 
 /* Maximum polynomial degrees for single-bounce cases. */
-#define SPOLY_MAX_DEGREE_R 4
-#define SPOLY_MAX_DEGREE_T 6
-#define SPOLY_MAX_BEZOUT_SIZE 6 /* max(R=4, T=6) */
-#define SPOLY_MAX_UNI_COEFFS 19 /* 2*SPOLY_MAX_BEZOUT_SIZE + 1 + padding, for T resultant */
-#define SPOLY_MAX_BVCOEFFS 7    /* degree+1 for bivariate, max T=6 -> 7 */
+#define SPOLY_MAX_BEZOUT_SIZE 7 /* max bivariate degree + 1 */
+#define SPOLY_MAX_UNI_COEFFS 20
+#define SPOLY_MAX_BVCOEFFS 7 /* degree+1 for bivariate, max T=6 -> 7 */
 #define SPOLY_MAX_ROOTS 16
 #define SPOLY_BISECT_ITERATIONS 20
 #define SPOLY_ROOT_EPS 1e-6f
+#define SPOLY_NUM_DICHOTOMY_SAMPLES 65
 
 /* ============================================================================
  * Univariate polynomial: P(t) = c[0] + c[1]*t + ... + c[n]*t^n
@@ -52,6 +50,17 @@ ccl_device_inline void spoly_uni_zero(ccl_private SPolyUni *p)
   for (int i = 0; i < SPOLY_MAX_UNI_COEFFS; i++) {
     p->coeffs[i] = 0.0f;
   }
+}
+
+ccl_device_inline bool spoly_uni_is_zero(ccl_private const SPolyUni *p)
+{
+  if (p->degree < 0)
+    return true;
+  for (int i = 0; i <= p->degree; i++) {
+    if (fabsf(p->coeffs[i]) > 1e-30f)
+      return false;
+  }
+  return true;
 }
 
 ccl_device_inline float spoly_uni_eval(ccl_private const SPolyUni *p, float t)
@@ -137,6 +146,14 @@ ccl_device_inline void spoly_uni_scale(ccl_private SPolyUni *p, float s)
   }
 }
 
+/* Set to constant value 1 (identity for multiplication). */
+ccl_device_inline void spoly_uni_set_one(ccl_private SPolyUni *p)
+{
+  spoly_uni_zero(p);
+  p->coeffs[0] = 1.0f;
+  p->degree = 0;
+}
+
 /* ============================================================================
  * Bivariate polynomial: P(u,v) = sum_{i,j} c[i][j] * u^i * v^j
  * where i is the u-power and j is the v-power.
@@ -179,12 +196,8 @@ ccl_device_inline void spoly_biv_set_linear(ccl_private SPolyBiv *p,
   p->coeffs[0][0] = a;
   p->coeffs[1][0] = b;
   p->coeffs[0][1] = c;
-  p->degree_u = (fabsf(b) > 1e-30f) ? 1 : 0;
-  p->degree_v = (fabsf(c) > 1e-30f) ? 1 : 0;
-  if (fabsf(a) > 1e-30f && p->degree_u < 0)
-    p->degree_u = 0;
-  if (fabsf(a) > 1e-30f && p->degree_v < 0)
-    p->degree_v = 0;
+  p->degree_u = (fabsf(b) > 1e-30f) ? 1 : ((fabsf(a) > 1e-30f) ? 0 : -1);
+  p->degree_v = (fabsf(c) > 1e-30f) ? 1 : ((fabsf(a) > 1e-30f) ? 0 : -1);
 }
 
 ccl_device_inline void spoly_biv_update_degrees(ccl_private SPolyBiv *p)
@@ -212,8 +225,7 @@ ccl_device_inline void spoly_biv_add(ccl_private SPolyBiv *result,
       result->coeffs[i][j] = a->coeffs[i][j] + b->coeffs[i][j];
     }
   }
-  result->degree_u = max(a->degree_u, b->degree_u);
-  result->degree_v = max(a->degree_v, b->degree_v);
+  spoly_biv_update_degrees(result);
 }
 
 ccl_device_inline void spoly_biv_sub(ccl_private SPolyBiv *result,
@@ -225,8 +237,7 @@ ccl_device_inline void spoly_biv_sub(ccl_private SPolyBiv *result,
       result->coeffs[i][j] = a->coeffs[i][j] - b->coeffs[i][j];
     }
   }
-  result->degree_u = max(a->degree_u, b->degree_u);
-  result->degree_v = max(a->degree_v, b->degree_v);
+  spoly_biv_update_degrees(result);
 }
 
 ccl_device_inline void spoly_biv_mul(ccl_private SPolyBiv *result,
@@ -261,6 +272,27 @@ ccl_device_inline void spoly_biv_scale(ccl_private SPolyBiv *p, float s)
   }
 }
 
+/* Divide all coefficients by the maximum absolute value (normalization). */
+ccl_device_inline void spoly_biv_divide_by_max(ccl_private SPolyBiv *p)
+{
+  float max_val = 0.0f;
+  for (int i = 0; i < SPOLY_MAX_BVCOEFFS; i++) {
+    for (int j = 0; j < SPOLY_MAX_BVCOEFFS; j++) {
+      float av = fabsf(p->coeffs[i][j]);
+      if (av > max_val)
+        max_val = av;
+    }
+  }
+  if (max_val > 1e-30f) {
+    float inv = 1.0f / max_val;
+    for (int i = 0; i < SPOLY_MAX_BVCOEFFS; i++) {
+      for (int j = 0; j < SPOLY_MAX_BVCOEFFS; j++) {
+        p->coeffs[i][j] *= inv;
+      }
+    }
+  }
+}
+
 /* Evaluate at a specific v, producing a univariate polynomial in u. */
 ccl_device_inline void spoly_biv_eval_at_v(ccl_private const SPolyBiv *p,
                                            float v,
@@ -282,15 +314,21 @@ ccl_device_inline void spoly_biv_eval_at_v(ccl_private const SPolyBiv *p,
   }
 }
 
-/* Extract row i as a univariate polynomial in v (coefficients of u^i). */
+/* Extract row i as a univariate polynomial in v (coefficients of u^i).
+ * This matches the reference toUnivariatePolynomials(): row i has coefficients
+ * coeffs[i][0..n-i-1] where n is the bivariate size. */
 ccl_device_inline void spoly_biv_row_as_uni(ccl_private const SPolyBiv *p,
                                             int row,
+                                            int biv_size,
                                             ccl_private SPolyUni *result)
 {
   spoly_uni_zero(result);
-  if (row > p->degree_u || row < 0)
+  int max_j = biv_size - row;
+  if (max_j > SPOLY_MAX_UNI_COEFFS)
+    max_j = SPOLY_MAX_UNI_COEFFS;
+  if (row < 0 || row >= SPOLY_MAX_BVCOEFFS)
     return;
-  for (int j = 0; j <= p->degree_v && j < SPOLY_MAX_BVCOEFFS; j++) {
+  for (int j = 0; j < max_j && j < SPOLY_MAX_BVCOEFFS; j++) {
     result->coeffs[j] = p->coeffs[row][j];
     if (fabsf(result->coeffs[j]) > 1e-30f)
       result->degree = j;
@@ -299,7 +337,6 @@ ccl_device_inline void spoly_biv_row_as_uni(ccl_private const SPolyBiv *p,
 
 /* ============================================================================
  * BVP3: Vector of 3 bivariate polynomials (x, y, z components).
- * Used to represent parametric 3D surfaces/vectors as polynomials of (u,v).
  * ============================================================================ */
 
 struct SPolyBVP3 {
@@ -313,7 +350,6 @@ ccl_device_inline void spoly_bvp3_zero(ccl_private SPolyBVP3 *p)
   spoly_biv_zero(&p->z);
 }
 
-/* Set to constant 3D vector. */
 ccl_device_inline void spoly_bvp3_set_const(ccl_private SPolyBVP3 *p, float3 v)
 {
   spoly_biv_set_const(&p->x, v.x);
@@ -321,7 +357,7 @@ ccl_device_inline void spoly_bvp3_set_const(ccl_private SPolyBVP3 *p, float3 v)
   spoly_biv_set_const(&p->z, v.z);
 }
 
-/* Set to linear: v0 + (v1-v0)*u + (v2-v0)*v  (barycentric parameterization). */
+/* Set to barycentric: v0 + (v1-v0)*u + (v2-v0)*v. */
 ccl_device_inline void spoly_bvp3_set_barycentric(ccl_private SPolyBVP3 *p,
                                                   float3 v0,
                                                   float3 v1,
@@ -350,90 +386,74 @@ ccl_device_inline void spoly_bvp3_add(ccl_private SPolyBVP3 *result,
   spoly_biv_add(&result->z, &a->z, &b->z);
 }
 
-/* Dot product: result = a.x*b.x + a.y*b.y + a.z*b.z (bivariate polynomial). */
 ccl_device_inline void spoly_bvp3_dot(ccl_private SPolyBiv *result,
                                       ccl_private const SPolyBVP3 *a,
                                       ccl_private const SPolyBVP3 *b)
 {
-  SPolyBiv tx, ty, tz;
+  SPolyBiv tx, ty, tz, tmp;
   spoly_biv_mul(&tx, &a->x, &b->x);
   spoly_biv_mul(&ty, &a->y, &b->y);
   spoly_biv_mul(&tz, &a->z, &b->z);
-  SPolyBiv tmp;
   spoly_biv_add(&tmp, &tx, &ty);
   spoly_biv_add(result, &tmp, &tz);
 }
 
-/* Cross product: result = a x b (vector of bivariate polynomials). */
 ccl_device_inline void spoly_bvp3_cross(ccl_private SPolyBVP3 *result,
                                         ccl_private const SPolyBVP3 *a,
                                         ccl_private const SPolyBVP3 *b)
 {
   SPolyBiv t1, t2;
-  /* x = a.y*b.z - a.z*b.y */
   spoly_biv_mul(&t1, &a->y, &b->z);
   spoly_biv_mul(&t2, &a->z, &b->y);
   spoly_biv_sub(&result->x, &t1, &t2);
-  /* y = a.z*b.x - a.x*b.z */
   spoly_biv_mul(&t1, &a->z, &b->x);
   spoly_biv_mul(&t2, &a->x, &b->z);
   spoly_biv_sub(&result->y, &t1, &t2);
-  /* z = a.x*b.y - a.y*b.x */
   spoly_biv_mul(&t1, &a->x, &b->y);
   spoly_biv_mul(&t2, &a->y, &b->x);
   spoly_biv_sub(&result->z, &t1, &t2);
 }
 
-/* Scale by scalar. */
-ccl_device_inline void spoly_bvp3_scale(ccl_private SPolyBVP3 *p, float s)
+/* Scalar-multiply a BVP3 by a bivariate polynomial. */
+ccl_device_inline void spoly_bvp3_mul_biv(ccl_private SPolyBVP3 *result,
+                                          ccl_private const SPolyBVP3 *a,
+                                          ccl_private const SPolyBiv *b)
 {
-  spoly_biv_scale(&p->x, s);
-  spoly_biv_scale(&p->y, s);
-  spoly_biv_scale(&p->z, s);
+  spoly_biv_mul(&result->x, &a->x, b);
+  spoly_biv_mul(&result->y, &a->y, b);
+  spoly_biv_mul(&result->z, &a->z, b);
 }
 
 /* ============================================================================
- * Bezout Matrix and Resultant
+ * Bezout Matrix and Determinant
  *
- * Given two bivariate polynomials Czy(u,v) and Cxz(u,v) viewed as univariate
- * polynomials in u with coefficients that are univariate polynomials in v,
- * the Bezout matrix B[i][j] is an n×n matrix of univariate polynomials in v.
- * Its determinant det(B) is the resultant: a univariate polynomial in v only.
- * Roots of det(B) give candidate v values.
+ * The Bezout matrix eliminates u from Czy(u,v) and Cxz(u,v).
+ * Each bivariate polynomial is viewed as a univariate in u with coefficients
+ * that are univariate polynomials in v (extracted via toUnivariatePolynomials).
  * ============================================================================ */
 
 /* Evaluate an n×n matrix of univariate polynomials at a specific v value,
- * returning a plain n×n float matrix. */
-ccl_device_inline void spoly_bezout_eval_matrix(
+ * producing a plain n×n float matrix. Then compute its determinant via
+ * Gaussian elimination. This is the DICHOTOMY method from the reference. */
+ccl_device_inline float spoly_eval_bezout_det_at_v(
     ccl_private SPolyUni bezout[][SPOLY_MAX_BEZOUT_SIZE],
     int n,
-    float v,
-    ccl_private float mat[][SPOLY_MAX_BEZOUT_SIZE])
+    float v)
 {
+  float mat[SPOLY_MAX_BEZOUT_SIZE][SPOLY_MAX_BEZOUT_SIZE];
   for (int i = 0; i < n; i++) {
     for (int j = 0; j < n; j++) {
       mat[i][j] = spoly_uni_eval(&bezout[i][j], v);
     }
   }
-}
 
-/* Compute determinant of n×n float matrix via Gaussian elimination. */
-ccl_device_inline float spoly_matrix_det(ccl_private float mat[][SPOLY_MAX_BEZOUT_SIZE], int n)
-{
-  float tmp[SPOLY_MAX_BEZOUT_SIZE][SPOLY_MAX_BEZOUT_SIZE];
-  for (int i = 0; i < n; i++) {
-    for (int j = 0; j < n; j++) {
-      tmp[i][j] = mat[i][j];
-    }
-  }
-
+  /* Gaussian elimination with partial pivoting. */
   float det = 1.0f;
   for (int col = 0; col < n; col++) {
-    /* Find pivot. */
     int pivot = -1;
     float max_val = 0.0f;
     for (int row = col; row < n; row++) {
-      float av = fabsf(tmp[row][col]);
+      float av = fabsf(mat[row][col]);
       if (av > max_val) {
         max_val = av;
         pivot = row;
@@ -443,21 +463,20 @@ ccl_device_inline float spoly_matrix_det(ccl_private float mat[][SPOLY_MAX_BEZOU
       return 0.0f;
 
     if (pivot != col) {
-      /* Swap rows. */
       for (int j = 0; j < n; j++) {
-        float t = tmp[col][j];
-        tmp[col][j] = tmp[pivot][j];
-        tmp[pivot][j] = t;
+        float t = mat[col][j];
+        mat[col][j] = mat[pivot][j];
+        mat[pivot][j] = t;
       }
       det = -det;
     }
-    det *= tmp[col][col];
-    float inv_pivot = 1.0f / tmp[col][col];
+    det *= mat[col][col];
+    float inv_pivot = 1.0f / mat[col][col];
 
     for (int row = col + 1; row < n; row++) {
-      float factor = tmp[row][col] * inv_pivot;
+      float factor = mat[row][col] * inv_pivot;
       for (int j = col + 1; j < n; j++) {
-        tmp[row][j] -= factor * tmp[col][j];
+        mat[row][j] -= factor * mat[col][j];
       }
     }
   }
@@ -465,178 +484,173 @@ ccl_device_inline float spoly_matrix_det(ccl_private float mat[][SPOLY_MAX_BEZOU
 }
 
 /* Build the Bezout matrix from two bivariate polynomials.
- * The polynomials are treated as univariate in u, with coefficients in v.
- * Bezout matrix entry: B[i][j] = sum_{k} (a[i+k+1]*b[j+k+1-?] - b[i+k+1]*a[j+k+1-?])
- * Actually, the standard Bezout matrix for polys a(u) and b(u) of degree n:
- *   B[i][j] = sum_{k=0}^{min(i,j)} (a[n-i+k]*b[n-j+k] - b[n-i+k]*a[n-j+k]) ... but let's
- * use the correct formulation from the reference.
- *
- * For polynomials f(u) = sum_i a_i u^i and g(u) = sum_i b_i u^i, both of degree n-1,
- * the Bezout matrix B_{i,j} for i,j in [0,n-1]:
- *   B[i][j] = sum_{k=0}^{n-1-max(i,j)} a[i+k+1]*b[j-k+?]...
- *
- * The standard Bezout matrix entry for f,g of degree n:
- *   B[i][j] = sum_{k=0}^{min(i, n-1-j)} (a_{i-k} * b_{j+k+1} - b_{i-k} * a_{j+k+1})
- *   for i,j = 0,...,n-1
+ * Matches the reference implementation exactly:
+ *   Step 1: f[i][j] = a[i]*b[j+1] - b[i]*a[j+1]  (upper triangle)
+ *   Step 2: f[i][j] += f[i-1][j+1]                (delta-Bezout accumulation)
+ *   Step 3: f[i][j] = f[j][i]                      (symmetrize)
+ *   Step 4: Pad zero rows with identity             (numerical stability)
  */
-ccl_device_inline void spoly_build_bezout(ccl_private const SPolyBiv *poly_f,
-                                          ccl_private const SPolyBiv *poly_g,
-                                          int n,
-                                          ccl_private SPolyUni bezout[][SPOLY_MAX_BEZOUT_SIZE])
+ccl_device_inline int spoly_build_bezout(ccl_private const SPolyBiv *poly_f,
+                                         ccl_private const SPolyBiv *poly_g,
+                                         ccl_private SPolyUni bezout[][SPOLY_MAX_BEZOUT_SIZE])
 {
-  /* Extract rows: a[i] is the coefficient of u^i as a univariate polynomial in v. */
-  SPolyUni a[SPOLY_MAX_BVCOEFFS];
-  SPolyUni b[SPOLY_MAX_BVCOEFFS];
-  for (int i = 0; i < SPOLY_MAX_BVCOEFFS; i++) {
-    spoly_biv_row_as_uni(poly_f, i, &a[i]);
-    spoly_biv_row_as_uni(poly_g, i, &b[i]);
+  /* Determine the bivariate polynomial size.
+   * n = max(degree_u of Czy, degree_u of Cxz) + 1 (number of rows). */
+  int size = max(poly_f->degree_u, poly_g->degree_u) + 1;
+  if (size <= 1)
+    return 0;
+  if (size > SPOLY_MAX_BEZOUT_SIZE)
+    size = SPOLY_MAX_BEZOUT_SIZE;
+
+  /* Extract rows: a[i] is the coefficient of u^i as a univariate polynomial in v.
+   * This matches toUnivariatePolynomials() from the reference. */
+  SPolyUni a[SPOLY_MAX_BEZOUT_SIZE + 1];
+  SPolyUni b[SPOLY_MAX_BEZOUT_SIZE + 1];
+  for (int i = 0; i <= size; i++) {
+    spoly_biv_row_as_uni(poly_f, i, size, &a[i]);
+    spoly_biv_row_as_uni(poly_g, i, size, &b[i]);
   }
 
-  /* Build the Bezout matrix.
-   * Entry B[i][j] = sum_{k} (a[k+i+1]*b[k+j+1-?] - ...)
-   *
-   * Using the delta-Bezout formulation:
-   * (f(x)*g(y) - f(y)*g(x)) / (x - y) = sum_{i,j} B[i][j] * x^i * y^j
-   *
-   * B[i][j] = sum_{k=1}^{n-max(i,j)} (a[i+k]*b[j+k-1+1] - b[i+k]*a[j+k-1+1])
-   * Actually, the standard construction:
-   * B[i][j] = sum_{k=0}^{n-1-max(i,j)} (a_{max(i,j)+k+1} * delta)
-   *
-   * Let me use the concrete formulation from the reference implementation:
-   * f[i][j] = a[i] * b[j+1] - b[i] * a[j+1], then symmetrize.
-   * This is the direct Bezout construction for a (n x n) matrix where
-   * i,j range from 0 to n-1.
-   */
+  int n = size - 1; /* Bezout matrix is (n x n) where n = degree */
+  if (n <= 0)
+    return 0;
+  if (n > SPOLY_MAX_BEZOUT_SIZE)
+    n = SPOLY_MAX_BEZOUT_SIZE;
+
+  /* Initialize all entries to zero. */
+  for (int i = 0; i < n; i++) {
+    for (int j = 0; j < n; j++) {
+      spoly_uni_zero(&bezout[i][j]);
+    }
+  }
+
+  /* Step 1: Basic Bezout entries (upper triangle).
+   * f[i][j] = a[i] * b[j+1] - b[i] * a[j+1] */
   for (int i = 0; i < n; i++) {
     for (int j = i; j < n; j++) {
-      /* B[i][j] = sum_{k=0}^{?} ... Using the reference formulation:
-       * f[i][j] = sum for upper triangle. */
-      SPolyUni entry;
-      spoly_uni_zero(&entry);
+      SPolyUni prod1, prod2;
+      spoly_uni_mul(&prod1, &a[i], &b[j + 1]);
+      spoly_uni_mul(&prod2, &b[i], &a[j + 1]);
+      spoly_uni_sub(&bezout[i][j], &prod1, &prod2);
+    }
+  }
 
-      /* The Bezout construction: for each pair, accumulate
-       * a[i+k+1]*b[j-k] - b[i+k+1]*a[j-k] for valid k. */
-      for (int k = 0; k <= i; k++) {
-        /* Index check: need (i-k) >= 0 and (j+k+1) <= n. */
-        int ai = i - k;
-        int bi = j + k + 1;
-        if (bi > n)
-          continue;
-        SPolyUni term;
-        SPolyUni prod1, prod2;
-        spoly_uni_mul(&prod1, &a[ai], &b[bi]);
-        spoly_uni_mul(&prod2, &b[ai], &a[bi]);
-        spoly_uni_sub(&term, &prod1, &prod2);
-        SPolyUni sum;
-        spoly_uni_add(&sum, &entry, &term);
-        entry = sum;
-      }
+  /* Step 2: Delta-Bezout accumulation.
+   * f[i][j] += f[i-1][j+1] for i >= 1, j < n-1 */
+  for (int i = 1; i < n - 1; i++) {
+    for (int j = i; j < n - 1; j++) {
+      SPolyUni sum;
+      spoly_uni_add(&sum, &bezout[i][j], &bezout[i - 1][j + 1]);
+      bezout[i][j] = sum;
+    }
+  }
 
-      bezout[i][j] = entry;
-      if (i != j) {
-        bezout[j][i] = entry; /* Symmetric. */
+  /* Step 3: Symmetrize (fill lower triangle). */
+  for (int i = 0; i < n; i++) {
+    for (int j = 0; j < i; j++) {
+      bezout[i][j] = bezout[j][i];
+    }
+  }
+
+  /* Step 4: Find the actual size (last non-zero row/col) and pad remainder
+   * with identity entries for numerical stability. */
+  int m = -1;
+  for (int i = 0; i < n; i++) {
+    for (int j = 0; j <= i; j++) {
+      if (!spoly_uni_is_zero(&bezout[i][j])) {
+        m = max(m, max(i, j));
       }
     }
   }
-}
-
-/* Compute the resultant polynomial by evaluating the Bezout determinant at
- * multiple v-values and interpolating (Lagrange interpolation approach).
- * This avoids symbolic determinant computation which would be very expensive.
- *
- * For a resultant of degree d, we need d+1 sample points. */
-ccl_device_inline void spoly_resultant_via_interpolation(
-    ccl_private SPolyUni bezout[][SPOLY_MAX_BEZOUT_SIZE],
-    int n,
-    int result_degree,
-    ccl_private SPolyUni *result)
-{
-  spoly_uni_zero(result);
-
-  int num_samples = result_degree + 1;
-  if (num_samples > SPOLY_MAX_UNI_COEFFS)
-    num_samples = SPOLY_MAX_UNI_COEFFS;
-
-  /* Sample points and determinant values. */
-  float sample_v[SPOLY_MAX_UNI_COEFFS];
-  float sample_det[SPOLY_MAX_UNI_COEFFS];
-
-  for (int s = 0; s < num_samples; s++) {
-    /* Spread sample points in [0, 1] range, avoiding exact 0 and 1. */
-    sample_v[s] = (float)(s) / (float)(num_samples - 1);
-    if (num_samples == 1)
-      sample_v[s] = 0.5f;
-
-    /* Evaluate the matrix at this v value. */
-    float mat[SPOLY_MAX_BEZOUT_SIZE][SPOLY_MAX_BEZOUT_SIZE];
-    spoly_bezout_eval_matrix(bezout, n, sample_v[s], mat);
-    sample_det[s] = spoly_matrix_det(mat, n);
+  for (int k = m + 1; k < n; k++) {
+    spoly_uni_set_one(&bezout[k][k]);
   }
 
-  /* Lagrange interpolation to recover polynomial coefficients.
-   * The resultant polynomial in v of degree result_degree. */
-  for (int i = 0; i < num_samples; i++) {
-    /* Compute the i-th Lagrange basis polynomial. */
-    SPolyUni basis;
-    basis.coeffs[0] = 1.0f;
-    basis.degree = 0;
-    for (int k = 1; k < SPOLY_MAX_UNI_COEFFS; k++)
-      basis.coeffs[k] = 0.0f;
-
-    for (int j = 0; j < num_samples; j++) {
-      if (j == i)
-        continue;
-      float denom = sample_v[i] - sample_v[j];
-      if (fabsf(denom) < 1e-30f)
-        continue;
-      float inv_denom = 1.0f / denom;
-
-      /* Multiply basis by (v - sample_v[j]) / (sample_v[i] - sample_v[j]). */
-      SPolyUni factor;
-      spoly_uni_zero(&factor);
-      factor.coeffs[0] = -sample_v[j] * inv_denom;
-      factor.coeffs[1] = inv_denom;
-      factor.degree = 1;
-
-      SPolyUni new_basis;
-      spoly_uni_mul(&new_basis, &basis, &factor);
-      basis = new_basis;
-    }
-
-    /* Add sample_det[i] * basis to result. */
-    spoly_uni_scale(&basis, sample_det[i]);
-    SPolyUni sum;
-    spoly_uni_add(&sum, result, &basis);
-    *result = sum;
-  }
-  result->degree = result_degree;
-  /* Trim trailing near-zeros. */
-  while (result->degree >= 0 && fabsf(result->coeffs[result->degree]) < 1e-20f) {
-    result->degree--;
-  }
+  return n;
 }
 
 /* ============================================================================
- * Root isolation via bisection with sign-change detection.
+ * Root finding via DICHOTOMY method.
+ *
+ * Instead of computing the resultant polynomial symbolically, we directly
+ * evaluate det(Bezout matrix) at sample points in [0,1] and detect sign
+ * changes, then bisect to find roots. This is more numerically stable.
  * ============================================================================ */
 
+ccl_device_inline int spoly_find_roots_dichotomy(
+    ccl_private SPolyUni bezout[][SPOLY_MAX_BEZOUT_SIZE],
+    int n,
+    ccl_private float roots[SPOLY_MAX_ROOTS])
+{
+  int num_roots = 0;
+  const int num_samples = SPOLY_NUM_DICHOTOMY_SAMPLES;
+
+  float prev_val = spoly_eval_bezout_det_at_v(bezout, n, 0.0f);
+
+  if (fabsf(prev_val) < 1e-30f) {
+    if (num_roots < SPOLY_MAX_ROOTS) {
+      roots[num_roots++] = 0.0f;
+    }
+  }
+
+  for (int s = 1; s < num_samples; s++) {
+    float v = (float)s / (float)(num_samples - 1);
+    float val = spoly_eval_bezout_det_at_v(bezout, n, v);
+
+    if (fabsf(val) < 1e-30f) {
+      if (num_roots < SPOLY_MAX_ROOTS) {
+        roots[num_roots++] = v;
+      }
+    }
+    else if (prev_val * val < 0.0f && fabsf(prev_val) > 1e-30f) {
+      /* Sign change detected - bisect to find root. */
+      float lo = (float)(s - 1) / (float)(num_samples - 1);
+      float hi = v;
+      float lo_val = prev_val;
+
+      for (int iter = 0; iter < SPOLY_BISECT_ITERATIONS; iter++) {
+        float mid = 0.5f * (lo + hi);
+        float mid_val = spoly_eval_bezout_det_at_v(bezout, n, mid);
+        if (mid_val * val < 0.0f) {
+          lo = mid;
+          lo_val = mid_val;
+        }
+        else {
+          hi = mid;
+        }
+        (void)lo_val;
+      }
+
+      float root = 0.5f * (lo + hi);
+      if (root >= -SPOLY_ROOT_EPS && root <= 1.0f + SPOLY_ROOT_EPS) {
+        if (num_roots < SPOLY_MAX_ROOTS) {
+          roots[num_roots++] = clamp(root, 0.0f, 1.0f);
+        }
+      }
+    }
+
+    prev_val = val;
+  }
+
+  return num_roots;
+}
+
+/* Root finding in [0,1] for a univariate polynomial (for back-substitution). */
 ccl_device_inline int spoly_find_roots_in_01(ccl_private const SPolyUni *poly,
                                              ccl_private float roots[SPOLY_MAX_ROOTS])
 {
   int num_roots = 0;
+  const int num_samples = SPOLY_NUM_DICHOTOMY_SAMPLES;
 
-  /* Sample the polynomial at many points and detect sign changes. */
-  const int num_samples = 64;
-  float prev_v = 0.0f;
   float prev_val = spoly_uni_eval(poly, 0.0f);
 
-  for (int s = 1; s <= num_samples; s++) {
-    float v = (float)s / (float)num_samples;
+  for (int s = 1; s < num_samples; s++) {
+    float v = (float)s / (float)(num_samples - 1);
     float val = spoly_uni_eval(poly, v);
 
     if (prev_val * val <= 0.0f && (fabsf(prev_val) > 1e-30f || fabsf(val) > 1e-30f)) {
-      /* Sign change detected - bisect. */
-      float lo = prev_v, hi = v;
+      float lo = (float)(s - 1) / (float)(num_samples - 1);
+      float hi = v;
       float lo_val = prev_val;
 
       for (int iter = 0; iter < SPOLY_BISECT_ITERATIONS; iter++) {
@@ -659,7 +673,6 @@ ccl_device_inline int spoly_find_roots_in_01(ccl_private const SPolyUni *poly,
       }
     }
 
-    prev_v = v;
     prev_val = val;
   }
 
@@ -667,28 +680,15 @@ ccl_device_inline int spoly_find_roots_in_01(ccl_private const SPolyUni *poly,
 }
 
 /* ============================================================================
- * Specular constraint formulation for reflection (R).
+ * Specular constraint formulation for reflection (R), chain_type = 1.
  *
- * Given:
- *   - xD: camera/viewer position
- *   - xL: light position
- *   - Triangle with vertices P0, P1, P2 and normals N0, N1, N2
+ * From the reference (resultant.h lines 102-121):
+ *   Czy = (d0·n_hat) * (d1·t_hat2) + (d0·t_hat2) * (d1·n_hat)
+ *   s = xL - xD
+ *   cop = (d0 × s) × (n_hat × s)
+ *   Cxz = cop.x  (projected to x-axis)
  *
- * The point on the triangle: x1(u,v) = P0 + (P1-P0)*u + (P2-P0)*v
- * The normal at point:       n1(u,v) = N0 + (N1-N0)*u + (N2-N0)*v (unnormalized)
- *
- * Reflection constraint (half-vector formulation):
- *   The half-vector h = d0/|d0| + d1/|d1| must be parallel to n.
- *   Equivalently: (d0 * |d1| + d1 * |d0|) × n = 0
- *
- * To avoid square roots, we use the equivalent polynomial constraints:
- *   Czy = (d0·n_hat) * (d1·t2) + (d0·t2) * (d1·n_hat) = 0
- *   Cxz = (d0·n_hat) * (d1·t1) + (d0·t1) * (d1·n_hat) = 0
- *
- * where t1 = n_hat × e1, t2 = n_hat × e2 are tangent vectors derived from
- * the normal and edge vectors, and n_hat is the unnormalized interpolated normal.
- *
- * These are each degree 4 in (u,v) for the reflection case.
+ * where t_hat2 = n_hat × p12 (p12 is the second edge vector).
  * ============================================================================ */
 
 ccl_device_inline void spoly_build_reflection_constraints(float3 xD,
@@ -702,14 +702,12 @@ ccl_device_inline void spoly_build_reflection_constraints(float3 xD,
                                                           ccl_private SPolyBiv *Czy,
                                                           ccl_private SPolyBiv *Cxz)
 {
-  /* Parameterize surface position and normal as bivariate polynomials. */
   SPolyBVP3 x1;
   spoly_bvp3_set_barycentric(&x1, P0, P1, P2);
 
   SPolyBVP3 n1_hat;
   spoly_bvp3_set_barycentric(&n1_hat, N0, N1, N2);
 
-  /* Direction vectors: d0 = x1 - xD, d1 = xL - x1. */
   SPolyBVP3 xD_bvp, xL_bvp;
   spoly_bvp3_set_const(&xD_bvp, xD);
   spoly_bvp3_set_const(&xL_bvp, xL);
@@ -718,54 +716,51 @@ ccl_device_inline void spoly_build_reflection_constraints(float3 xD,
   spoly_bvp3_sub(&d0, &x1, &xD_bvp);
   spoly_bvp3_sub(&d1, &xL_bvp, &x1);
 
-  /* Edge vectors as BVP3 constants. */
-  float3 e1 = P1 - P0;
+  /* Edge vector p12 (second edge). */
   float3 e2 = P2 - P0;
-
-  /* Tangent vectors: t1 = n_hat × e1, t2 = n_hat × e2. */
-  SPolyBVP3 e1_bvp, e2_bvp;
-  spoly_bvp3_set_const(&e1_bvp, e1);
+  SPolyBVP3 e2_bvp;
   spoly_bvp3_set_const(&e2_bvp, e2);
 
-  SPolyBVP3 t1, t2;
-  spoly_bvp3_cross(&t1, &n1_hat, &e1_bvp);
-  spoly_bvp3_cross(&t2, &n1_hat, &e2_bvp);
+  /* Tangent: t_hat2 = n_hat × p12. */
+  SPolyBVP3 t_hat2;
+  spoly_bvp3_cross(&t_hat2, &n1_hat, &e2_bvp);
 
-  /* Dot products for the constraints. */
-  SPolyBiv d0_dot_n, d1_dot_n;
+  /* Dot products for Czy. */
+  SPolyBiv d0_dot_n, d1_dot_n, d0_dot_t2, d1_dot_t2;
   spoly_bvp3_dot(&d0_dot_n, &d0, &n1_hat);
   spoly_bvp3_dot(&d1_dot_n, &d1, &n1_hat);
+  spoly_bvp3_dot(&d0_dot_t2, &d0, &t_hat2);
+  spoly_bvp3_dot(&d1_dot_t2, &d1, &t_hat2);
 
-  SPolyBiv d0_dot_t1, d1_dot_t1;
-  spoly_bvp3_dot(&d0_dot_t1, &d0, &t1);
-  spoly_bvp3_dot(&d1_dot_t1, &d1, &t1);
-
-  SPolyBiv d0_dot_t2, d1_dot_t2;
-  spoly_bvp3_dot(&d0_dot_t2, &d0, &t2);
-  spoly_bvp3_dot(&d1_dot_t2, &d1, &t2);
-
-  /* Constraint: Czy = (d0·n) * (d1·t2) + (d0·t2) * (d1·n) = 0
-   *             Cxz = (d0·n) * (d1·t1) + (d0·t1) * (d1·n) = 0 */
+  /* Czy = d0·n * d1·t2 + d0·t2 * d1·n */
   SPolyBiv term1, term2;
   spoly_biv_mul(&term1, &d0_dot_n, &d1_dot_t2);
   spoly_biv_mul(&term2, &d0_dot_t2, &d1_dot_n);
   spoly_biv_add(Czy, &term1, &term2);
 
-  spoly_biv_mul(&term1, &d0_dot_n, &d1_dot_t1);
-  spoly_biv_mul(&term2, &d0_dot_t1, &d1_dot_n);
-  spoly_biv_add(Cxz, &term1, &term2);
+  /* Cxz: cop = (d0 × s) × (n_hat × s), take x-component.
+   * s = xL - xD (constant vector). */
+  float3 s = xL - xD;
+  SPolyBVP3 s_bvp;
+  spoly_bvp3_set_const(&s_bvp, s);
+
+  SPolyBVP3 d0_cross_s, n_cross_s, cop;
+  spoly_bvp3_cross(&d0_cross_s, &d0, &s_bvp);
+  spoly_bvp3_cross(&n_cross_s, &n1_hat, &s_bvp);
+  spoly_bvp3_cross(&cop, &d0_cross_s, &n_cross_s);
+  *Cxz = cop.x; /* Project to x-axis. */
 }
 
 /* ============================================================================
- * Specular constraint formulation for transmission/refraction (T).
+ * Specular constraint formulation for transmission (T), chain_type = 2.
  *
- * For refraction with IOR eta, the constraint is:
- *   eta * (d0 × n) * |d1| + (d1 × n) * |d0| = 0
- *
- * Squaring to eliminate |d0|, |d1|:
- *   eta^2 * |d0×n|^2 * |d1|^2 - |d1×n|^2 * |d0|^2 = 0
- *
- * Projected onto tangent vectors, this gives degree-6 constraints.
+ * From the reference (resultant.h lines 123-141):
+ *   c0 = d0 × n_hat, c1 = d1 × n_hat
+ *   c = c0*c0*|d1|^2*eta^2 - c1*c1*|d0|^2
+ *   Czy = c.x  (x-component of the BVP3)
+ *   s = xL - xD
+ *   cop = (d0 × s) × (n_hat × s)
+ *   Cxz = cop.x
  * ============================================================================ */
 
 ccl_device_inline void spoly_build_refraction_constraints(float3 xD,
@@ -794,227 +789,108 @@ ccl_device_inline void spoly_build_refraction_constraints(float3 xD,
   spoly_bvp3_sub(&d0, &x1, &xD_bvp);
   spoly_bvp3_sub(&d1, &xL_bvp, &x1);
 
-  float3 e1 = P1 - P0;
-  float3 e2 = P2 - P0;
-  SPolyBVP3 e1_bvp, e2_bvp;
-  spoly_bvp3_set_const(&e1_bvp, e1);
-  spoly_bvp3_set_const(&e2_bvp, e2);
-
-  SPolyBVP3 t1, t2;
-  spoly_bvp3_cross(&t1, &n1_hat, &e1_bvp);
-  spoly_bvp3_cross(&t2, &n1_hat, &e2_bvp);
-
   /* c0 = d0 × n_hat, c1 = d1 × n_hat. */
   SPolyBVP3 c0, c1;
   spoly_bvp3_cross(&c0, &d0, &n1_hat);
   spoly_bvp3_cross(&c1, &d1, &n1_hat);
-
-  /* |c0|^2, |c1|^2. */
-  SPolyBiv c0_sq, c1_sq;
-  spoly_bvp3_dot(&c0_sq, &c0, &c0);
-  spoly_bvp3_dot(&c1_sq, &c1, &c1);
 
   /* |d0|^2, |d1|^2. */
   SPolyBiv d0_sq, d1_sq;
   spoly_bvp3_dot(&d0_sq, &d0, &d0);
   spoly_bvp3_dot(&d1_sq, &d1, &d1);
 
-  /* Constraint: eta^2 * |c0|^2 * |d1|^2 - |c1|^2 * |d0|^2 = 0
-   * But this is a single scalar constraint. For two constraints we
-   * project onto the two tangent directions.
-   *
-   * Actually, for refraction the approach is:
-   * Constraint along t2: (eta*d0·t2*|d1| + d1·t2*|d0|) = 0
-   * Squared: eta^2*(d0·t2)^2*|d1|^2 = (d1·t2)^2*|d0|^2
-   * Rewritten: eta^2*(d0·t2)^2*(d1·d1) - (d1·t2)^2*(d0·d0) = 0
-   *
-   * Similarly for t1. */
-
-  SPolyBiv d0_dot_t1, d1_dot_t1, d0_dot_t2, d1_dot_t2;
-  spoly_bvp3_dot(&d0_dot_t1, &d0, &t1);
-  spoly_bvp3_dot(&d1_dot_t1, &d1, &t1);
-  spoly_bvp3_dot(&d0_dot_t2, &d0, &t2);
-  spoly_bvp3_dot(&d1_dot_t2, &d1, &t2);
-
+  /* c = c0*c0*d1_norm2*eta^2 - c1*c1*d0_norm2
+   * Here c0*c0 means element-wise: BVP3 where each component is c0.comp * c0.comp.
+   * This is NOT a dot product; it's component-wise multiplication yielding a BVP3. */
   float eta2 = eta * eta;
-  SPolyBiv dt0_sq, dt1_sq;
+  SPolyBVP3 c0_sq_bvp, c1_sq_bvp;
+  spoly_biv_mul(&c0_sq_bvp.x, &c0.x, &c0.x);
+  spoly_biv_mul(&c0_sq_bvp.y, &c0.y, &c0.y);
+  spoly_biv_mul(&c0_sq_bvp.z, &c0.z, &c0.z);
+  spoly_biv_mul(&c1_sq_bvp.x, &c1.x, &c1.x);
+  spoly_biv_mul(&c1_sq_bvp.y, &c1.y, &c1.y);
+  spoly_biv_mul(&c1_sq_bvp.z, &c1.z, &c1.z);
 
-  /* Czy: eta^2 * (d0·t2)^2 * |d1|^2 - (d1·t2)^2 * |d0|^2 */
-  spoly_biv_mul(&dt0_sq, &d0_dot_t2, &d0_dot_t2);
-  spoly_biv_mul(&dt1_sq, &d1_dot_t2, &d1_dot_t2);
-  SPolyBiv term1, term2;
-  spoly_biv_mul(&term1, &dt0_sq, &d1_sq);
-  spoly_biv_scale(&term1, eta2);
-  spoly_biv_mul(&term2, &dt1_sq, &d0_sq);
-  spoly_biv_sub(Czy, &term1, &term2);
+  /* c0*c0 * d1_norm2 * eta^2 */
+  SPolyBVP3 term1_bvp;
+  spoly_bvp3_mul_biv(&term1_bvp, &c0_sq_bvp, &d1_sq);
+  spoly_biv_scale(&term1_bvp.x, eta2);
+  spoly_biv_scale(&term1_bvp.y, eta2);
+  spoly_biv_scale(&term1_bvp.z, eta2);
 
-  /* Cxz: eta^2 * (d0·t1)^2 * |d1|^2 - (d1·t1)^2 * |d0|^2 */
-  spoly_biv_mul(&dt0_sq, &d0_dot_t1, &d0_dot_t1);
-  spoly_biv_mul(&dt1_sq, &d1_dot_t1, &d1_dot_t1);
-  spoly_biv_mul(&term1, &dt0_sq, &d1_sq);
-  spoly_biv_scale(&term1, eta2);
-  spoly_biv_mul(&term2, &dt1_sq, &d0_sq);
-  spoly_biv_sub(Cxz, &term1, &term2);
+  /* c1*c1 * d0_norm2 */
+  SPolyBVP3 term2_bvp;
+  spoly_bvp3_mul_biv(&term2_bvp, &c1_sq_bvp, &d0_sq);
+
+  /* c = term1 - term2 */
+  SPolyBVP3 c;
+  spoly_bvp3_sub(&c, &term1_bvp, &term2_bvp);
+
+  /* Czy = c.x */
+  *Czy = c.x;
+
+  /* Cxz: same cop formulation as reflection. */
+  float3 s = xL - xD;
+  SPolyBVP3 s_bvp;
+  spoly_bvp3_set_const(&s_bvp, s);
+  SPolyBVP3 d0_cross_s, n_cross_s, cop;
+  spoly_bvp3_cross(&d0_cross_s, &d0, &s_bvp);
+  spoly_bvp3_cross(&n_cross_s, &n1_hat, &s_bvp);
+  spoly_bvp3_cross(&cop, &d0_cross_s, &n_cross_s);
+  *Cxz = cop.x;
 }
 
 /* ============================================================================
  * Main solver: find specular points on a triangle.
- *
- * Returns the number of valid solutions found.
- * Each solution is a (u, v) barycentric coordinate on the triangle.
  * ============================================================================ */
 
 struct SPolySolution {
-  float u, v;      /* Barycentric coordinates on the triangle. */
-  float3 position; /* World-space position of the specular point. */
+  float u, v;
+  float3 position;
 };
 
-ccl_device_inline int spoly_solve_reflection(float3 xD,
-                                             float3 xL,
-                                             float3 P0,
-                                             float3 P1,
-                                             float3 P2,
-                                             float3 N0,
-                                             float3 N1,
-                                             float3 N2,
-                                             ccl_private SPolySolution solutions[SPOLY_MAX_ROOTS])
+ccl_device_inline int spoly_solve(float3 xD,
+                                  float3 xL,
+                                  float3 P0,
+                                  float3 P1,
+                                  float3 P2,
+                                  float3 N0,
+                                  float3 N1,
+                                  float3 N2,
+                                  bool is_refraction,
+                                  float eta,
+                                  ccl_private SPolySolution solutions[SPOLY_MAX_ROOTS])
 {
   SPolyBiv Czy, Cxz;
-  spoly_build_reflection_constraints(xD, xL, P0, P1, P2, N0, N1, N2, &Czy, &Cxz);
 
-  /* Build Bezout matrix: n = max(degree_u of Czy, degree_u of Cxz). */
-  int n = max(Czy.degree_u, Cxz.degree_u);
+  if (is_refraction) {
+    spoly_build_refraction_constraints(xD, xL, P0, P1, P2, N0, N1, N2, eta, &Czy, &Cxz);
+  }
+  else {
+    spoly_build_reflection_constraints(xD, xL, P0, P1, P2, N0, N1, N2, &Czy, &Cxz);
+  }
+
+  /* Normalize constraints for numerical stability. */
+  spoly_biv_divide_by_max(&Czy);
+  spoly_biv_divide_by_max(&Cxz);
+
+  /* Build Bezout matrix. */
+  SPolyUni bezout[SPOLY_MAX_BEZOUT_SIZE][SPOLY_MAX_BEZOUT_SIZE];
+  int n = spoly_build_bezout(&Czy, &Cxz, bezout);
   if (n <= 0)
     return 0;
-  if (n > SPOLY_MAX_BEZOUT_SIZE)
-    n = SPOLY_MAX_BEZOUT_SIZE;
 
-  /* Pad to same degree in u (fill missing rows with zero). */
-  SPolyUni bezout[SPOLY_MAX_BEZOUT_SIZE][SPOLY_MAX_BEZOUT_SIZE];
-  for (int i = 0; i < n; i++) {
-    for (int j = 0; j < n; j++) {
-      spoly_uni_zero(&bezout[i][j]);
-    }
-  }
-  spoly_build_bezout(&Czy, &Cxz, n, bezout);
-
-  /* Resultant degree is at most 2*n*(degree_v).
-   * For reflection: degree_u = 4, degree_v = 4, so resultant is up to degree 8. */
-  int result_degree = 2 * max(Czy.degree_v, Cxz.degree_v) * (n > 0 ? 1 : 0);
-  /* More accurate: resultant degree = n * max_v_degree. */
-  result_degree = n * max(Czy.degree_v, Cxz.degree_v);
-  if (result_degree <= 0)
-    return 0;
-  if (result_degree >= SPOLY_MAX_UNI_COEFFS)
-    result_degree = SPOLY_MAX_UNI_COEFFS - 1;
-
-  SPolyUni resultant;
-  spoly_resultant_via_interpolation(bezout, n, result_degree, &resultant);
-
-  if (resultant.degree < 0)
-    return 0;
-
-  /* Find roots of the resultant in [0, 1]. */
+  /* Find v-roots via DICHOTOMY method (sign-change detection + bisection
+   * on numerical determinant evaluations). */
   float v_roots[SPOLY_MAX_ROOTS];
-  int num_v_roots = spoly_find_roots_in_01(&resultant, v_roots);
+  int num_v_roots = spoly_find_roots_dichotomy(bezout, n, v_roots);
 
   int num_solutions = 0;
 
-  /* For each v root, find u root by back-substitution. */
+  /* Back-substitution: for each v-root, solve Cxz(u, v) = 0 for u. */
   for (int ri = 0; ri < num_v_roots; ri++) {
     float v = v_roots[ri];
 
-    /* Evaluate Cxz at this v to get a univariate polynomial in u. */
-    SPolyUni cxz_u;
-    spoly_biv_eval_at_v(&Cxz, v, &cxz_u);
-
-    /* Find roots of this polynomial in u. */
-    float u_roots[SPOLY_MAX_ROOTS];
-    int num_u_roots = spoly_find_roots_in_01(&cxz_u, u_roots);
-
-    for (int ui = 0; ui < num_u_roots; ui++) {
-      float u = u_roots[ui];
-
-      /* Check barycentric constraint: u + v <= 1, u >= 0, v >= 0. */
-      if (u < -SPOLY_ROOT_EPS || v < -SPOLY_ROOT_EPS || (u + v) > 1.0f + SPOLY_ROOT_EPS)
-        continue;
-
-      u = clamp(u, 0.0f, 1.0f);
-      v = clamp(v, 0.0f, 1.0f - u);
-
-      /* Verify: also check Czy is close to zero. */
-      SPolyUni czy_u;
-      spoly_biv_eval_at_v(&Czy, v, &czy_u);
-      float czy_val = spoly_uni_eval(&czy_u, u);
-
-      /* Use relative tolerance based on constraint magnitudes. */
-      float cxz_val = spoly_uni_eval(&cxz_u, u);
-      float tolerance = 1e-3f * fmaxf(1.0f, fmaxf(fabsf(czy_val), fabsf(cxz_val)));
-      if (fabsf(czy_val) > tolerance)
-        continue;
-
-      if (num_solutions < SPOLY_MAX_ROOTS) {
-        /* Compute world position. */
-        float w = 1.0f - u - v;
-        solutions[num_solutions].u = u;
-        solutions[num_solutions].v = v;
-        solutions[num_solutions].position = w * P0 + u * P1 + v * P2;
-        num_solutions++;
-      }
-    }
-  }
-
-  return num_solutions;
-}
-
-ccl_device_inline int spoly_solve_refraction(float3 xD,
-                                             float3 xL,
-                                             float3 P0,
-                                             float3 P1,
-                                             float3 P2,
-                                             float3 N0,
-                                             float3 N1,
-                                             float3 N2,
-                                             float eta,
-                                             ccl_private SPolySolution
-                                                 solutions[SPOLY_MAX_ROOTS])
-{
-  SPolyBiv Czy, Cxz;
-  spoly_build_refraction_constraints(xD, xL, P0, P1, P2, N0, N1, N2, eta, &Czy, &Cxz);
-
-  int n = max(Czy.degree_u, Cxz.degree_u);
-  if (n <= 0)
-    return 0;
-  if (n > SPOLY_MAX_BEZOUT_SIZE)
-    n = SPOLY_MAX_BEZOUT_SIZE;
-
-  SPolyUni bezout[SPOLY_MAX_BEZOUT_SIZE][SPOLY_MAX_BEZOUT_SIZE];
-  for (int i = 0; i < n; i++) {
-    for (int j = 0; j < n; j++) {
-      spoly_uni_zero(&bezout[i][j]);
-    }
-  }
-  spoly_build_bezout(&Czy, &Cxz, n, bezout);
-
-  int result_degree = n * max(Czy.degree_v, Cxz.degree_v);
-  if (result_degree <= 0)
-    return 0;
-  if (result_degree >= SPOLY_MAX_UNI_COEFFS)
-    result_degree = SPOLY_MAX_UNI_COEFFS - 1;
-
-  SPolyUni resultant;
-  spoly_resultant_via_interpolation(bezout, n, result_degree, &resultant);
-
-  if (resultant.degree < 0)
-    return 0;
-
-  float v_roots[SPOLY_MAX_ROOTS];
-  int num_v_roots = spoly_find_roots_in_01(&resultant, v_roots);
-
-  int num_solutions = 0;
-
-  for (int ri = 0; ri < num_v_roots; ri++) {
-    float v = v_roots[ri];
     SPolyUni cxz_u;
     spoly_biv_eval_at_v(&Cxz, v, &cxz_u);
 
@@ -1024,18 +900,22 @@ ccl_device_inline int spoly_solve_refraction(float3 xD,
     for (int ui = 0; ui < num_u_roots; ui++) {
       float u = u_roots[ui];
 
+      /* Check barycentric constraint: u + v <= 1. */
       if (u < -SPOLY_ROOT_EPS || v < -SPOLY_ROOT_EPS || (u + v) > 1.0f + SPOLY_ROOT_EPS)
         continue;
 
       u = clamp(u, 0.0f, 1.0f);
       v = clamp(v, 0.0f, 1.0f - u);
 
+      /* Verify the other constraint is also satisfied. */
       SPolyUni czy_u;
       spoly_biv_eval_at_v(&Czy, v, &czy_u);
       float czy_val = spoly_uni_eval(&czy_u, u);
       float cxz_val = spoly_uni_eval(&cxz_u, u);
-      float tolerance = 1e-3f * fmaxf(1.0f, fmaxf(fabsf(czy_val), fabsf(cxz_val)));
-      if (fabsf(czy_val) > tolerance)
+
+      /* Tolerance: the constraint should be near zero. */
+      float scale = fmaxf(1.0f, fmaxf(fabsf(czy_val), fabsf(cxz_val)));
+      if (fabsf(czy_val) > 0.01f * scale && fabsf(cxz_val) > 0.01f * scale)
         continue;
 
       if (num_solutions < SPOLY_MAX_ROOTS) {
@@ -1053,27 +933,8 @@ ccl_device_inline int spoly_solve_refraction(float3 xD,
 
 /* ============================================================================
  * Integrator-level specular polynomial NEE.
- *
- * Called during direct lighting when the camera ray hits a glossy/glass surface
- * on a triangle mesh. For each triangle light in the scene (or sampled light
- * that illuminates specularly), we solve for the exact specular path.
- *
- * This provides deterministic specular NEE that replaces the near-zero
- * stochastic evaluation that standard path tracing gives for sharp specular
- * surfaces.
  * ============================================================================ */
 
-/* Main entry point: attempt specular polynomial NEE on a glossy/glass surface.
- *
- * Returns true if we successfully found and evaluated a specular connection,
- * in which case bsdf_eval_out is filled with the contribution and ray_out
- * contains the shadow ray to trace.
- *
- * This function is called from integrate_surface_direct_light() when:
- * 1. The setting is enabled (kernel_data.integrator.use_specular_polynomials)
- * 2. The surface has a glossy/glass BSDF
- * 3. The surface is on a triangle mesh (PRIMITIVE_TRIANGLE)
- */
 ccl_device_inline bool kernel_path_spoly_connect(KernelGlobals kg,
                                                  IntegratorState state,
                                                  ccl_private ShaderData *sd,
@@ -1082,11 +943,9 @@ ccl_device_inline bool kernel_path_spoly_connect(KernelGlobals kg,
                                                  ccl_private LightSample *ls,
                                                  ccl_private BsdfEval *bsdf_eval_out)
 {
-  /* Only works on triangle meshes. */
+  /* Only works on triangle meshes with smooth normals. */
   if (!(sd->type & PRIMITIVE_TRIANGLE))
     return false;
-
-  /* Must have smooth normals for meaningful interpolated normals. */
   if (!(sd->shader & SHADER_SMOOTH_NORMAL))
     return false;
 
@@ -1110,22 +969,17 @@ ccl_device_inline bool kernel_path_spoly_connect(KernelGlobals kg,
   if (!microfacet_bsdf)
     return false;
 
-  /* For rough surfaces, the polynomial solver won't help much -
-   * standard sampling works well enough. Only use for sharp specular.
-   * Threshold: roughness < 0.1 (alpha < 0.01). */
+  /* Only useful for near-specular surfaces (alpha < 0.1). */
   float max_alpha = fmaxf(microfacet_bsdf->alpha_x, microfacet_bsdf->alpha_y);
   if (max_alpha > 0.1f)
     return false;
 
-  /* Get light position. For distant/env lights, we can't do spoly
-   * (would need a direction, not a position). */
+  /* Need a finite light position. */
   if (ls->t == FLT_MAX)
     return false;
 
   float3 xL = ls->P;
-  /* Use a virtual camera point along the incoming ray direction.
-   * The solver needs 3D positions, not just directions. Place the
-   * virtual eye at unit distance along the incoming direction. */
+  /* Virtual camera point along the incoming ray direction. */
   float3 xD = sd->P + sd->wi;
 
   /* Fetch triangle vertices and normals. */
@@ -1134,22 +988,13 @@ ccl_device_inline bool kernel_path_spoly_connect(KernelGlobals kg,
 
   /* Solve for specular points. */
   SPolySolution solutions[SPOLY_MAX_ROOTS];
-  int num_solutions = 0;
-
-  if (is_refraction) {
-    num_solutions = spoly_solve_refraction(xD, xL, P[0], P[1], P[2], N[0], N[1], N[2], eta,
-                                           solutions);
-  }
-  else {
-    num_solutions = spoly_solve_reflection(xD, xL, P[0], P[1], P[2], N[0], N[1], N[2],
-                                           solutions);
-  }
+  int num_solutions = spoly_solve(xD, xL, P[0], P[1], P[2], N[0], N[1], N[2],
+                                  is_refraction, eta, solutions);
 
   if (num_solutions == 0)
     return false;
 
-  /* Pick the best solution (closest to the actual shading point, or with
-   * the highest BSDF value). For now, evaluate all and pick the brightest. */
+  /* Evaluate each solution and pick the one with brightest BSDF contribution. */
   Spectrum best_contribution = zero_spectrum();
   float3 best_direction = zero_float3();
   bool found = false;
@@ -1162,12 +1007,11 @@ ccl_device_inline bool kernel_path_spoly_connect(KernelGlobals kg,
       continue;
     D = D / t;
 
-    /* Check that the direction is in the correct hemisphere. */
+    /* Hemisphere check. */
     bool towards_back = (dot(D, sd->N) < 0.0f);
     if (!is_refraction && towards_back)
       continue;
 
-    /* Evaluate BSDF for this direction. */
     BsdfEval bsdf_eval_tmp ccl_optional_struct_init;
     float bsdf_pdf = surface_shader_bsdf_eval(kg, state, sd, D, &bsdf_eval_tmp, ls->shader);
 
@@ -1187,21 +1031,17 @@ ccl_device_inline bool kernel_path_spoly_connect(KernelGlobals kg,
   if (!found)
     return false;
 
-  /* Now evaluate the light contribution along this direction. */
+  /* Evaluate light and BSDF for the best direction. */
   const Spectrum light_eval = light_sample_shader_eval(kg, state, emission_sd, ls, sd->time);
   if (is_zero(light_eval))
     return false;
 
-  /* For spoly connections, we use the BSDF evaluation at the found specular direction.
-   * The PDF is the light PDF only (no BSDF MIS since the spoly solver is deterministic). */
   float bsdf_pdf = surface_shader_bsdf_eval(kg, state, sd, best_direction, bsdf_eval_out,
                                              ls->shader);
 
-  /* Apply light contribution. The MIS weight for deterministic spoly is 1
-   * (we found the exact specular path, so the BSDF PDF is essentially a delta). */
+  /* MIS weight. For near-delta specular, weight is 1. For slightly rough, use MIS. */
   float mis_weight = 1.0f;
   if (max_alpha > 0.001f) {
-    /* For slightly rough surfaces, use MIS with the light PDF. */
     mis_weight = light_sample_mis_weight_nee(kg, ls->pdf, bsdf_pdf);
   }
 
