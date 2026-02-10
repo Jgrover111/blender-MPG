@@ -593,6 +593,49 @@ void ObjectManager::device_update_prim_offsets(Device *device, DeviceScene *dsce
   dscene->object_prim_offset.clear_modified();
 }
 
+void ObjectManager::device_update_spoly_casters(DeviceScene *dscene, Scene *scene)
+{
+  /* Build a compact list of caustic caster objects and their triangle counts
+   * so the specular polynomials kernel can iterate over all caster triangles. */
+  vector<uint> caster_indices;
+  vector<uint> caster_prim_counts;
+
+  for (Object *ob : scene->objects) {
+    if (!ob->get_is_caustics_caster()) {
+      continue;
+    }
+    Geometry *geom = ob->geometry;
+    if (!geom || geom->is_hair() || geom->is_pointcloud() || geom->is_volume()) {
+      continue;
+    }
+    Mesh *mesh = static_cast<Mesh *>(geom);
+    const size_t num_tris = mesh->num_triangles();
+    if (num_tris == 0) {
+      continue;
+    }
+    caster_indices.push_back(ob->get_device_index());
+    caster_prim_counts.push_back((uint)num_tris);
+  }
+
+  const size_t num_casters = caster_indices.size();
+  dscene->data.integrator.num_spoly_caster_objects = (int)num_casters;
+
+  if (num_casters > 0) {
+    uint *idx = dscene->spoly_caster_object_index.alloc(num_casters);
+    uint *cnt = dscene->spoly_caster_prim_count.alloc(num_casters);
+    for (size_t i = 0; i < num_casters; i++) {
+      idx[i] = caster_indices[i];
+      cnt[i] = caster_prim_counts[i];
+    }
+    dscene->spoly_caster_object_index.copy_to_device();
+    dscene->spoly_caster_prim_count.copy_to_device();
+  }
+  else {
+    dscene->spoly_caster_object_index.free();
+    dscene->spoly_caster_prim_count.free();
+  }
+}
+
 void ObjectManager::device_update_transforms(DeviceScene *dscene, Scene *scene, Progress &progress)
 {
   UpdateObjectTransformState state;
@@ -757,6 +800,9 @@ void ObjectManager::device_update(Device *device,
     device_update_transforms(dscene, scene, progress);
   }
 
+  /* Build specular polynomial caustic caster list. */
+  device_update_spoly_casters(dscene, scene);
+
   for (Object *object : scene->objects) {
     object->clear_modified();
   }
@@ -904,6 +950,8 @@ void ObjectManager::device_free(Device * /*unused*/, DeviceScene *dscene, bool f
   dscene->object_motion.free_if_need_realloc(force_free);
   dscene->object_flag.free_if_need_realloc(force_free);
   dscene->object_prim_offset.free_if_need_realloc(force_free);
+  dscene->spoly_caster_object_index.free_if_need_realloc(force_free);
+  dscene->spoly_caster_prim_count.free_if_need_realloc(force_free);
 }
 
 void ObjectManager::apply_static_transforms(DeviceScene *dscene, Scene *scene, Progress &progress)

@@ -160,6 +160,7 @@ class ObjectManager {
   void device_update(Device *device, DeviceScene *dscene, Scene *scene, Progress &progress);
   void device_update_transforms(DeviceScene *dscene, Scene *scene, Progress &progress);
   void device_update_prim_offsets(Device *device, DeviceScene *dscene, Scene *scene);
+  void device_update_spoly_casters(DeviceScene *dscene, Scene *scene);
 
   void device_update_flags(Device *device,
                            DeviceScene *dscene,
