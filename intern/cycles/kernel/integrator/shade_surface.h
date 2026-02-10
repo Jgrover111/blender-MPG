@@ -357,52 +357,53 @@ ccl_device
   int mnee_vertex_count = 0;  // NOLINT
   int spoly_vertex_count = 0;
 
-#ifdef __MNEE__
-  IF_KERNEL_FEATURE(MNEE)
-  {
+  const bool use_spoly = kernel_data.integrator.use_specular_polynomials;
+
+  if (use_spoly) {
+    /* When Specular Polynomials is enabled, it REPLACES MNEE entirely.
+     * This ensures any caustics are the result of spoly, not MNEE. */
     if (ls.type != LIGHT_TRIANGLE) {
-      /* Is this a caustic light? */
       const bool use_caustics = kernel_data_fetch(lights, ls.prim).use_caustics;
       if (use_caustics) {
-        /* Are we on a caustic caster? */
+        /* Are we on a caustic caster? Skip direct lighting (same as MNEE). */
         if (is_transmission && (sd->object_flag & SD_OBJECT_CAUSTICS_CASTER)) {
           return;
         }
 
-        /* Are we on a caustic receiver? */
+        /* Are we on a caustic receiver? Run spoly. */
         if (!is_transmission && (sd->object_flag & SD_OBJECT_CAUSTICS_RECEIVER)) {
-          mnee_vertex_count = kernel_path_mnee_sample(
+          spoly_vertex_count = kernel_path_spoly_sample(
               kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
         }
       }
     }
   }
-#endif /* __MNEE__ */
+  else {
+#ifdef __MNEE__
+    IF_KERNEL_FEATURE(MNEE)
+    {
+      if (ls.type != LIGHT_TRIANGLE) {
+        /* Is this a caustic light? */
+        const bool use_caustics = kernel_data_fetch(lights, ls.prim).use_caustics;
+        if (use_caustics) {
+          /* Are we on a caustic caster? */
+          if (is_transmission && (sd->object_flag & SD_OBJECT_CAUSTICS_CASTER)) {
+            return;
+          }
 
-  /* Try specular polynomials if MNEE didn't find a path.
-   * Spoly handles both reflection and refraction caustics.
-   * Like MNEE, it runs on caustic receivers and discovers caster triangles
-   * via a probe ray toward the light. */
-  if (mnee_vertex_count == 0 && kernel_data.integrator.use_specular_polynomials) {
-    if (ls.type != LIGHT_TRIANGLE) {
-      const bool use_caustics = kernel_data_fetch(lights, ls.prim).use_caustics;
-      if (use_caustics && !is_transmission &&
-          (sd->object_flag & SD_OBJECT_CAUSTICS_RECEIVER))
-      {
-        spoly_vertex_count = kernel_path_spoly_sample(
-            kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+          /* Are we on a caustic receiver? */
+          if (!is_transmission && (sd->object_flag & SD_OBJECT_CAUSTICS_RECEIVER)) {
+            mnee_vertex_count = kernel_path_mnee_sample(
+                kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+          }
+        }
       }
     }
+#endif /* __MNEE__ */
   }
 
-  if (mnee_vertex_count > 0) {
-    /* Create shadow ray after successful manifold walk:
-     * emission_sd contains the last interface intersection and
-     * the light sample ls has been updated. */
-    light_sample_to_surface_shadow_ray(kg, emission_sd, &ls, &ray);
-  }
-  else if (spoly_vertex_count > 0) {
-    /* Create shadow ray after successful specular polynomial solve:
+  if (mnee_vertex_count > 0 || spoly_vertex_count > 0) {
+    /* Create shadow ray after successful manifold walk or spoly solve:
      * emission_sd contains the specular vertex and
      * the light sample ls has been updated. */
     light_sample_to_surface_shadow_ray(kg, emission_sd, &ls, &ray);
