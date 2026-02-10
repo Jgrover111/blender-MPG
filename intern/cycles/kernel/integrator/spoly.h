@@ -1049,9 +1049,9 @@ ccl_device_inline float2 spoly_iv3_dot(float2 ax,
 /* Check if a tree node could contain a valid single-bounce reflection path.
  *
  * Pruning checks (conservative — may allow false positives but no false negatives):
- * 1. Hemisphere test (receiver): dot(norBox, recv_P - posBox).max > 0
- * 2. Hemisphere test (light):    dot(norBox, light_P - posBox).max > 0
- * 3. Half-vector alignment: max dot(H_center, norBox) + angular_margin > 0
+ * 1. Hemisphere test (receiver): dot(norBox, recv_P - posBox).max > threshold
+ * 2. Hemisphere test (light):    dot(norBox, light_P - posBox).max > threshold
+ * 3. Half-vector alignment: max dot(H_center, norBox) > threshold - angular_margin
  *
  * Returns true if the node passes all checks (cannot be pruned). */
 ccl_device_inline bool spoly_tree_node_valid_reflection(const SPolyTreeNode &node,
@@ -1069,9 +1069,10 @@ ccl_device_inline bool spoly_tree_node_valid_reflection(const SPolyTreeNode &nod
   const float2 dry = make_float2(recv_P.y - node.pos_max.y, recv_P.y - node.pos_min.y);
   const float2 drz = make_float2(recv_P.z - node.pos_max.z, recv_P.z - node.pos_min.z);
 
-  /* Check 1: Hemisphere test — some normal must face the receiver. */
+  /* Check 1: Hemisphere test — some normal must face the receiver.
+   * Use a small positive threshold to reject grazing configurations. */
   const float2 dot_recv = spoly_iv3_dot(nx, ny, nz, drx, dry, drz);
-  if (dot_recv.y <= 0.0f) {
+  if (dot_recv.y <= 0.001f) {
     return false;
   }
 
@@ -1082,7 +1083,7 @@ ccl_device_inline bool spoly_tree_node_valid_reflection(const SPolyTreeNode &nod
 
   /* Check 2: Hemisphere test — some normal must face the light. */
   const float2 dot_light = spoly_iv3_dot(nx, ny, nz, dlx, dly, dlz);
-  if (dot_light.y <= 0.0f) {
+  if (dot_light.y <= 0.001f) {
     return false;
   }
 
@@ -1109,14 +1110,16 @@ ccl_device_inline bool spoly_tree_node_valid_reflection(const SPolyTreeNode &nod
                            fmaxf(H_center.z * node.nor_min.z, H_center.z * node.nor_max.z);
 
   /* Angular spread: how much H varies across the posBox.
-   * Approximately extent / min_distance (in radians). */
+   * Clamp to avoid overly permissive margin on large/close nodes. */
   const float3 extent = node.pos_max - node.pos_min;
   const float diag = len(extent);
   const float min_dist = fminf(len_recv, len_light);
-  const float angular_spread = diag / fmaxf(min_dist, 1e-6f);
+  const float angular_spread = fminf(diag / fmaxf(min_dist, 1e-6f), 0.5f);
 
-  /* If the best possible alignment plus margin is negative, prune. */
-  if (h_dot_max + angular_spread < 0.0f) {
+  /* Require that the best possible alignment exceeds a meaningful threshold.
+   * This is stricter than just checking > 0, matching the old per-triangle
+   * prefilter behavior (dot(H, avg_N) > 0.5) but conservatively loosened. */
+  if (h_dot_max + angular_spread < 0.1f) {
     return false;
   }
 
@@ -1128,6 +1131,10 @@ ccl_device_inline bool spoly_tree_node_valid_reflection(const SPolyTreeNode &nod
  * 4 children per level, so max entries = 4 * max_depth.
  * 64 supports up to ~4M triangles per caster. */
 #define SPOLY_TREE_STACK_SIZE 64
+
+/* Maximum solver calls per shading point across all casters.
+ * Prevents pathological runtime on meshes where pruning is weak. */
+#define SPOLY_MAX_SOLVER_CALLS 256
 
 /* ============================================================================
  * Integrator-level specular polynomial caustic sampling.
@@ -1160,6 +1167,9 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
   const float3 recv_P = sd->P;
   const float3 light_P = ls->P;
 
+  /* Global solver call budget across all casters. */
+  int total_solver_calls = 0;
+
   /* Iterate over each caustic caster object's 4-ary tree. */
   for (int ci = 0; ci < num_caster_objects; ci++) {
     const int caster_object = (int)kernel_data_fetch(spoly_caster_object_index, ci);
@@ -1186,20 +1196,36 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
     const bool is_refraction = false;
     const float eta = 1.0f;
 
-    /* Stack-based tree traversal with interval-arithmetic pruning. */
-    int stack[SPOLY_TREE_STACK_SIZE];
+    /* Object-level culling: check root node's AABB before entering traversal.
+     * This avoids tree traversal overhead for geometrically irrelevant casters. */
+    {
+      const SPolyTreeNode root = spoly_tree_node_fetch(kg, tree_offset);
+      if (!is_refraction && !spoly_tree_node_valid_reflection(root, recv_P, light_P)) {
+        continue;
+      }
+    }
+
+    /* Stack-based tree traversal with interval-arithmetic pruning.
+     * Stack entries: (node_index, triangle_prim). When prim >= 0, the entry
+     * is a leaf and we skip the tree node re-fetch, solving directly.
+     * When prim == -1, the entry is an internal node that needs expansion. */
+    int stack_node[SPOLY_TREE_STACK_SIZE];
+    int stack_prim[SPOLY_TREE_STACK_SIZE];
     int stack_top = 0;
-    stack[stack_top++] = tree_offset; /* Push root node. */
+    stack_node[stack_top] = tree_offset;
+    stack_prim[stack_top] = -1;
+    stack_top++;
 
-    while (stack_top > 0) {
-      const int node_idx = stack[--stack_top];
-      const SPolyTreeNode node = spoly_tree_node_fetch(kg, node_idx);
+    while (stack_top > 0 && total_solver_calls < SPOLY_MAX_SOLVER_CALLS) {
+      stack_top--;
+      const int node_idx = stack_node[stack_top];
+      const int entry_prim = stack_prim[stack_top];
 
-      if (node.num_children == 0) {
-        /* Leaf node: solve polynomial constraint on this triangle. */
-        const int prim = node.triangle_prim;
-        if (prim < 0)
-          continue;
+      if (entry_prim >= 0) {
+        /* Leaf entry: solve polynomial constraint on this triangle.
+         * The prim index was cached when pushed, avoiding a re-fetch. */
+        const int prim = entry_prim;
+        total_solver_calls++;
 
         /* Load triangle vertices and normals from kernel arrays. */
         float3 verts[3], normals[3];
@@ -1371,12 +1397,22 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
         }
       }
       else {
-        /* Internal node: check each child with interval pruning. */
+        /* Internal node: fetch and expand children with interval pruning. */
+        const SPolyTreeNode node = spoly_tree_node_fetch(kg, node_idx);
+
+        /* Collect children that pass pruning, with distance for front-to-back ordering. */
+        int valid_children[4];
+        int valid_prims[4];
+        float valid_dist[4];
+        int num_valid = 0;
+
+        const float3 midpoint = (recv_P + light_P) * 0.5f;
+
         for (int c = 0; c < node.num_children; c++) {
           const int child_idx = node.child_offset + c;
           const SPolyTreeNode child = spoly_tree_node_fetch(kg, child_idx);
 
-          /* Apply interval-arithmetic pruning to all children (leaf and internal). */
+          /* Apply interval-arithmetic pruning. */
           if (!is_refraction) {
             if (!spoly_tree_node_valid_reflection(child, recv_P, light_P)) {
               continue;
@@ -1387,8 +1423,39 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
             continue; /* Empty leaf. */
           }
 
+          /* Distance heuristic for front-to-back ordering:
+           * closer children are more likely to produce valid paths. */
+          const float3 child_center = (child.pos_min + child.pos_max) * 0.5f;
+          const float d = len(child_center - midpoint);
+
+          valid_children[num_valid] = child_idx;
+          valid_prims[num_valid] = (child.num_children == 0) ? child.triangle_prim : -1;
+          valid_dist[num_valid] = d;
+          num_valid++;
+        }
+
+        /* Push in farthest-first order so closest children are popped first.
+         * Simple insertion sort is fine for at most 4 elements. */
+        for (int i = 1; i < num_valid; i++) {
+          for (int j = i; j > 0 && valid_dist[j] > valid_dist[j - 1]; j--) {
+            /* Swap j and j-1 (push farther ones first). */
+            int tmp_c = valid_children[j];
+            valid_children[j] = valid_children[j - 1];
+            valid_children[j - 1] = tmp_c;
+            int tmp_p = valid_prims[j];
+            valid_prims[j] = valid_prims[j - 1];
+            valid_prims[j - 1] = tmp_p;
+            float tmp_d = valid_dist[j];
+            valid_dist[j] = valid_dist[j - 1];
+            valid_dist[j - 1] = tmp_d;
+          }
+        }
+
+        for (int i = 0; i < num_valid; i++) {
           if (stack_top < SPOLY_TREE_STACK_SIZE) {
-            stack[stack_top++] = child_idx;
+            stack_node[stack_top] = valid_children[i];
+            stack_prim[stack_top] = valid_prims[i];
+            stack_top++;
           }
         }
       }
