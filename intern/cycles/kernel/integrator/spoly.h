@@ -992,101 +992,125 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
   if (ls->t == FLT_MAX)
     return 0;
 
-  /* Setup probe ray from receiver toward the light. */
-  Ray probe_ray;
-  probe_ray.self.object = sd->object;
-  probe_ray.self.prim = sd->prim;
-  probe_ray.self.light_object = ls->object;
-  probe_ray.self.light_prim = ls->prim;
-  probe_ray.P = sd->P;
-  probe_ray.D = normalize_len(ls->P - sd->P, &probe_ray.tmax);
-  probe_ray.tmin = 0.0f;
-  probe_ray.dP = differential_make_compact(sd->dP);
-  probe_ray.dD = differential_zero_compact();
-  probe_ray.time = sd->time;
-  Intersection probe_isect;
-
-  /* Phase 1: Find a specular caustic caster along the probe ray. */
+  /* Phase 1: Find a specular caustic caster via probe rays.
+   *
+   * Unlike MNEE which only handles refraction (caster between receiver and light),
+   * spoly also handles reflection caustics where the caster is NOT on the
+   * receiver-to-light path. We use two probe strategies:
+   *   1. Receiver -> Light: finds refraction casters (like MNEE)
+   *   2. Light -> Receiver: finds reflection casters (light bounces off caster toward receiver)
+   */
   bool found_caster = false;
   bool is_refraction = false;
   float eta = 1.0f;
   float3 caster_verts[3];
   float3 caster_normals[3];
 
-  for (int isect_count = 0; isect_count < 10; isect_count++) {
-    const bool hit = scene_intersect(kg, &probe_ray, PATH_RAY_TRANSMIT, &probe_isect);
-    if (!hit) {
-      break;
+  Ray probe_ray;
+  probe_ray.dP = differential_make_compact(sd->dP);
+  probe_ray.dD = differential_zero_compact();
+  probe_ray.time = sd->time;
+  Intersection probe_isect;
+
+  /* Try two probe directions to discover caustic casters. */
+  for (int probe_dir = 0; probe_dir < 2 && !found_caster; probe_dir++) {
+    if (probe_dir == 0) {
+      /* Probe 1: Receiver -> Light (finds refraction casters). */
+      probe_ray.P = sd->P;
+      probe_ray.D = normalize_len(ls->P - sd->P, &probe_ray.tmax);
+      probe_ray.self.object = sd->object;
+      probe_ray.self.prim = sd->prim;
+      probe_ray.self.light_object = ls->object;
+      probe_ray.self.light_prim = ls->prim;
     }
+    else {
+      /* Probe 2: Light -> Receiver (finds reflection casters).
+       * For reflection caustics, light hits the caster and reflects toward the
+       * receiver. The caster is along the light-to-receiver path. */
+      probe_ray.P = ls->P;
+      probe_ray.D = normalize_len(sd->P - ls->P, &probe_ray.tmax);
+      probe_ray.self.object = ls->object;
+      probe_ray.self.prim = ls->prim;
+      probe_ray.self.light_object = sd->object;
+      probe_ray.self.light_prim = sd->prim;
+    }
+    probe_ray.tmin = 0.0f;
 
-    const int object_flags = intersection_get_object_flags(kg, &probe_isect);
-    if (object_flags & SD_OBJECT_CAUSTICS_CASTER) {
-
-      /* Must be a triangle primitive. */
-      if (!(probe_isect.type & PRIMITIVE_TRIANGLE)) {
-        return 0;
+    for (int isect_count = 0; isect_count < 10; isect_count++) {
+      const bool hit = scene_intersect(kg, &probe_ray, PATH_RAY_TRANSMIT, &probe_isect);
+      if (!hit) {
+        break;
       }
 
-      /* Setup shader data on the caster. */
-      shader_setup_from_ray(kg, sd_mnee, &probe_ray, &probe_isect);
+      const int object_flags = intersection_get_object_flags(kg, &probe_isect);
+      if (object_flags & SD_OBJECT_CAUSTICS_CASTER) {
 
-      /* Must have smooth normals. */
-      if (!(sd_mnee->shader & SHADER_SMOOTH_NORMAL)) {
-        return 0;
-      }
+        /* Must be a triangle primitive. */
+        if (!(probe_isect.type & PRIMITIVE_TRIANGLE)) {
+          break; /* Try next probe direction. */
+        }
 
-      /* Evaluate shader to get closures. */
-      surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
-          kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
+        /* Setup shader data on the caster. */
+        shader_setup_from_ray(kg, sd_mnee, &probe_ray, &probe_isect);
 
-      /* Find a glossy or refractive microfacet BSDF on the caster. */
-      for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
-        ccl_private ShaderClosure *bsdf = &sd_mnee->closure[ci];
-        if (CLOSURE_IS_BSDF_MICROFACET(bsdf->type)) {
-          ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)bsdf;
+        /* Must have smooth normals. */
+        if (!(sd_mnee->shader & SHADER_SMOOTH_NORMAL)) {
+          break; /* Try next probe direction. */
+        }
 
-          /* Only useful for near-specular surfaces (low roughness). */
-          if (fmaxf(mbsdf->alpha_x, mbsdf->alpha_y) > 0.075f) {
-            continue;
+        /* Evaluate shader to get closures. */
+        surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
+            kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
+
+        /* Find a glossy or refractive microfacet BSDF on the caster. */
+        for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
+          ccl_private ShaderClosure *bsdf = &sd_mnee->closure[ci];
+          if (CLOSURE_IS_BSDF_MICROFACET(bsdf->type)) {
+            ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)bsdf;
+
+            /* Only useful for near-specular surfaces (low roughness). */
+            if (fmaxf(mbsdf->alpha_x, mbsdf->alpha_y) > 0.075f) {
+              continue;
+            }
+
+            is_refraction = CLOSURE_IS_REFRACTION(bsdf->type) || CLOSURE_IS_GLASS(bsdf->type);
+            if (is_refraction) {
+              eta = (sd_mnee->flag & SD_BACKFACING) ? 1.0f / mbsdf->ior : mbsdf->ior;
+            }
+
+            found_caster = true;
+            break;
+          }
+        }
+
+        if (found_caster) {
+          /* Load triangle vertices and normals. */
+          triangle_vertices_and_normals(kg, sd_mnee->prim, caster_verts, caster_normals);
+
+          /* Apply instance transforms if needed. */
+          if (!(sd_mnee->object_flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+            object_position_transform_auto(kg, sd_mnee, &caster_verts[0]);
+            object_position_transform_auto(kg, sd_mnee, &caster_verts[1]);
+            object_position_transform_auto(kg, sd_mnee, &caster_verts[2]);
+            object_normal_transform_auto(kg, sd_mnee, &caster_normals[0]);
+            object_normal_transform_auto(kg, sd_mnee, &caster_normals[1]);
+            object_normal_transform_auto(kg, sd_mnee, &caster_normals[2]);
           }
 
-          is_refraction = CLOSURE_IS_REFRACTION(bsdf->type) || CLOSURE_IS_GLASS(bsdf->type);
-          if (is_refraction) {
-            eta = (sd_mnee->flag & SD_BACKFACING) ? 1.0f / mbsdf->ior : mbsdf->ior;
-          }
+          /* Normalize the transformed normals. */
+          caster_normals[0] = normalize(caster_normals[0]);
+          caster_normals[1] = normalize(caster_normals[1]);
+          caster_normals[2] = normalize(caster_normals[2]);
 
-          found_caster = true;
           break;
         }
       }
 
-      if (found_caster) {
-        /* Load triangle vertices and normals. */
-        triangle_vertices_and_normals(kg, sd_mnee->prim, caster_verts, caster_normals);
-
-        /* Apply instance transforms if needed. */
-        if (!(sd_mnee->object_flag & SD_OBJECT_TRANSFORM_APPLIED)) {
-          object_position_transform_auto(kg, sd_mnee, &caster_verts[0]);
-          object_position_transform_auto(kg, sd_mnee, &caster_verts[1]);
-          object_position_transform_auto(kg, sd_mnee, &caster_verts[2]);
-          object_normal_transform_auto(kg, sd_mnee, &caster_normals[0]);
-          object_normal_transform_auto(kg, sd_mnee, &caster_normals[1]);
-          object_normal_transform_auto(kg, sd_mnee, &caster_normals[2]);
-        }
-
-        /* Normalize the transformed normals. */
-        caster_normals[0] = normalize(caster_normals[0]);
-        caster_normals[1] = normalize(caster_normals[1]);
-        caster_normals[2] = normalize(caster_normals[2]);
-
-        break;
-      }
+      /* Continue probing past non-caster intersections. */
+      probe_ray.self.object = probe_isect.object;
+      probe_ray.self.prim = probe_isect.prim;
+      probe_ray.tmin = intersection_t_offset(probe_isect.t);
     }
-
-    /* Continue probing past non-caster intersections. */
-    probe_ray.self.object = probe_isect.object;
-    probe_ray.self.prim = probe_isect.prim;
-    probe_ray.tmin = intersection_t_offset(probe_isect.t);
   }
 
   if (!found_caster)
