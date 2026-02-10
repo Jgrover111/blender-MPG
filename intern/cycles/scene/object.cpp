@@ -19,6 +19,9 @@
 
 #include "util/log.h"
 #include "util/map.h"
+#include "util/math.h"
+
+#include <algorithm>
 #include "util/murmurhash.h"
 #include "util/progress.h"
 #include "util/set.h"
@@ -593,12 +596,289 @@ void ObjectManager::device_update_prim_offsets(Device *device, DeviceScene *dsce
   dscene->object_prim_offset.clear_modified();
 }
 
+/* ======================================================================
+ * Specular Polynomials: 4-ary tree building for hierarchical pruning.
+ *
+ * Each caustic caster mesh gets a 4-ary spatial tree built via double-median
+ * splits. The tree enables efficient interval-arithmetic pruning on the GPU,
+ * reducing solver calls from O(N) to O(log4(N)) per pixel.
+ *
+ * Tree node layout in flat float4 array (4 float4s per node):
+ *   [i*4+0] = (pos_min.x, pos_min.y, pos_min.z, pos_max.x)
+ *   [i*4+1] = (pos_max.y, pos_max.z, nor_min.x, nor_min.y)
+ *   [i*4+2] = (nor_min.z, nor_max.x, nor_max.y, nor_max.z)
+ *   [i*4+3] = (int_as_float(child_offset), int_as_float(num_children),
+ *              int_as_float(triangle_prim), pos_area)
+ *
+ * Leaf nodes: num_children=0, triangle_prim >= 0, pos_area = -1
+ * Internal nodes: num_children=1..4, triangle_prim = -1, pos_area >= 0
+ * Children of a node are contiguous: child_offset .. child_offset+num_children-1
+ * ====================================================================== */
+
+namespace {
+
+struct SPolyTriData {
+  float3 centroid;
+  float3 verts[3];
+  float3 normals[3];
+  int global_prim;
+};
+
+struct SPolyBuildNode {
+  float3 pos_min, pos_max;
+  float3 nor_min, nor_max;
+  int triangle_prim; /* global prim for leaf, -1 for internal */
+  float pos_area;    /* AABB surface area for internal, -1 for leaf */
+  int children[4];   /* indices into build_nodes, -1 if unused */
+  int num_children;
+};
+
+static int spoly_largest_axis(float3 extent)
+{
+  if (extent.x >= extent.y && extent.x >= extent.z)
+    return 0;
+  if (extent.y >= extent.z)
+    return 1;
+  return 2;
+}
+
+static float spoly_centroid_component(const SPolyTriData &tri, int axis)
+{
+  return (&tri.centroid.x)[axis];
+}
+
+static void spoly_compute_bounds(SPolyBuildNode &node,
+                                 const vector<SPolyTriData> &tris,
+                                 int start,
+                                 int count)
+{
+  node.pos_min = make_float3(FLT_MAX, FLT_MAX, FLT_MAX);
+  node.pos_max = make_float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+  node.nor_min = make_float3(FLT_MAX, FLT_MAX, FLT_MAX);
+  node.nor_max = make_float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+
+  for (int i = start; i < start + count; i++) {
+    for (int v = 0; v < 3; v++) {
+      node.pos_min = min(node.pos_min, tris[i].verts[v]);
+      node.pos_max = max(node.pos_max, tris[i].verts[v]);
+      node.nor_min = min(node.nor_min, tris[i].normals[v]);
+      node.nor_max = max(node.nor_max, tris[i].normals[v]);
+    }
+  }
+
+  float3 ext = node.pos_max - node.pos_min;
+  node.pos_area = 2.0f * (ext.x * ext.y + ext.y * ext.z + ext.z * ext.x);
+}
+
+/* Recursively build a 4-ary tree via double-median splits.
+ * Returns node index in the build_nodes array. */
+static int spoly_build_tree(vector<SPolyBuildNode> &nodes,
+                            vector<SPolyTriData> &tris,
+                            int start,
+                            int count)
+{
+  if (count <= 0)
+    return -1;
+
+  int node_idx = (int)nodes.size();
+  nodes.emplace_back();
+
+  SPolyBuildNode &node = nodes[node_idx];
+  node.triangle_prim = -1;
+  node.num_children = 0;
+  for (int i = 0; i < 4; i++)
+    node.children[i] = -1;
+
+  if (count <= 4) {
+    /* Base case: create internal node with up to 4 leaf children. */
+    spoly_compute_bounds(node, tris, start, count);
+
+    for (int i = 0; i < count; i++) {
+      int leaf_idx = (int)nodes.size();
+      nodes.emplace_back();
+      SPolyBuildNode &leaf = nodes[leaf_idx];
+
+      const SPolyTriData &tri = tris[start + i];
+      leaf.pos_min = min(min(tri.verts[0], tri.verts[1]), tri.verts[2]);
+      leaf.pos_max = max(max(tri.verts[0], tri.verts[1]), tri.verts[2]);
+      leaf.nor_min = min(min(tri.normals[0], tri.normals[1]), tri.normals[2]);
+      leaf.nor_max = max(max(tri.normals[0], tri.normals[1]), tri.normals[2]);
+      leaf.triangle_prim = tri.global_prim;
+      leaf.pos_area = -1.0f;
+      leaf.num_children = 0;
+      for (int j = 0; j < 4; j++)
+        leaf.children[j] = -1;
+
+      /* Note: nodes[node_idx] may have been invalidated by emplace_back,
+       * so we access through node_idx at the end. */
+    }
+
+    /* Re-access after all emplace_backs. */
+    nodes[node_idx].num_children = count;
+    /* Children are at node_idx+1 .. node_idx+count. */
+    for (int i = 0; i < count; i++) {
+      nodes[node_idx].children[i] = node_idx + 1 + i;
+    }
+
+    return node_idx;
+  }
+
+  /* Recursive case: double-median split into 4 groups. */
+
+  /* Find centroid AABB and largest axis. */
+  float3 cmin = make_float3(FLT_MAX, FLT_MAX, FLT_MAX);
+  float3 cmax = make_float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+  for (int i = start; i < start + count; i++) {
+    cmin = min(cmin, tris[i].centroid);
+    cmax = max(cmax, tris[i].centroid);
+  }
+  int axis0 = spoly_largest_axis(cmax - cmin);
+
+  /* Split at median along primary axis. */
+  int mid = start + count / 2;
+  std::nth_element(
+      tris.begin() + start,
+      tris.begin() + mid,
+      tris.begin() + start + count,
+      [axis0](const SPolyTriData &a, const SPolyTriData &b) {
+        return spoly_centroid_component(a, axis0) < spoly_centroid_component(b, axis0);
+      });
+
+  /* Split left half [start, mid) along its largest axis. */
+  float3 lcmin = make_float3(FLT_MAX, FLT_MAX, FLT_MAX);
+  float3 lcmax = make_float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+  for (int i = start; i < mid; i++) {
+    lcmin = min(lcmin, tris[i].centroid);
+    lcmax = max(lcmax, tris[i].centroid);
+  }
+  int axis1 = spoly_largest_axis(lcmax - lcmin);
+  int left_mid = start + (mid - start) / 2;
+  std::nth_element(
+      tris.begin() + start,
+      tris.begin() + left_mid,
+      tris.begin() + mid,
+      [axis1](const SPolyTriData &a, const SPolyTriData &b) {
+        return spoly_centroid_component(a, axis1) < spoly_centroid_component(b, axis1);
+      });
+
+  /* Split right half [mid, start+count) along its largest axis. */
+  float3 rcmin = make_float3(FLT_MAX, FLT_MAX, FLT_MAX);
+  float3 rcmax = make_float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+  for (int i = mid; i < start + count; i++) {
+    rcmin = min(rcmin, tris[i].centroid);
+    rcmax = max(rcmax, tris[i].centroid);
+  }
+  int axis2 = spoly_largest_axis(rcmax - rcmin);
+  int right_mid = mid + (start + count - mid) / 2;
+  std::nth_element(
+      tris.begin() + mid,
+      tris.begin() + right_mid,
+      tris.begin() + start + count,
+      [axis2](const SPolyTriData &a, const SPolyTriData &b) {
+        return spoly_centroid_component(a, axis2) < spoly_centroid_component(b, axis2);
+      });
+
+  /* 4 groups: [start,left_mid), [left_mid,mid), [mid,right_mid), [right_mid,start+count) */
+  int g_start[4] = {start, left_mid, mid, right_mid};
+  int g_count[4] = {left_mid - start,
+                    mid - left_mid,
+                    right_mid - mid,
+                    start + count - right_mid};
+
+  /* Compute bounds for this node from all triangles. */
+  spoly_compute_bounds(nodes[node_idx], tris, start, count);
+  nodes[node_idx].triangle_prim = -1;
+
+  /* Recursively build children. */
+  int child_count = 0;
+  for (int g = 0; g < 4; g++) {
+    if (g_count[g] > 0) {
+      int child_idx = spoly_build_tree(nodes, tris, g_start[g], g_count[g]);
+      nodes[node_idx].children[child_count] = child_idx;
+      child_count++;
+    }
+  }
+  nodes[node_idx].num_children = child_count;
+
+  return node_idx;
+}
+
+/* Serialize the pointer-based build tree into a flat float4 array using BFS.
+ * BFS ensures that children of each node are contiguous in the output.
+ * Returns the number of nodes written.
+ * flat_offset is the starting index in the global flat array for this tree. */
+static int spoly_flatten_tree(const vector<SPolyBuildNode> &build_nodes,
+                              int root_idx,
+                              vector<float4> &flat,
+                              int flat_offset)
+{
+  if (root_idx < 0)
+    return 0;
+
+  /* BFS: map from build_node index to flat node index. */
+  vector<int> bfs_order;
+  bfs_order.reserve(build_nodes.size());
+  bfs_order.push_back(root_idx);
+
+  size_t head = 0;
+  while (head < bfs_order.size()) {
+    int bi = bfs_order[head++];
+    const SPolyBuildNode &bn = build_nodes[bi];
+    for (int c = 0; c < bn.num_children; c++) {
+      if (bn.children[c] >= 0) {
+        bfs_order.push_back(bn.children[c]);
+      }
+    }
+  }
+
+  /* Build mapping from build index to flat index. */
+  map<int, int> build_to_flat;
+  for (size_t i = 0; i < bfs_order.size(); i++) {
+    build_to_flat[bfs_order[i]] = flat_offset + (int)i;
+  }
+
+  /* Write nodes in BFS order. Each node = 4 float4s. */
+  int num_nodes = (int)bfs_order.size();
+  size_t base = flat.size();
+  flat.resize(base + num_nodes * 4);
+
+  for (size_t i = 0; i < bfs_order.size(); i++) {
+    const SPolyBuildNode &bn = build_nodes[bfs_order[i]];
+    size_t idx = base + i * 4;
+
+    /* Find flat child offset (first child in BFS order). */
+    int child_flat_offset = 0;
+    if (bn.num_children > 0 && bn.children[0] >= 0) {
+      child_flat_offset = build_to_flat[bn.children[0]];
+    }
+
+    flat[idx + 0] = make_float4(
+        bn.pos_min.x, bn.pos_min.y, bn.pos_min.z, bn.pos_max.x);
+    flat[idx + 1] = make_float4(
+        bn.pos_max.y, bn.pos_max.z, bn.nor_min.x, bn.nor_min.y);
+    flat[idx + 2] = make_float4(
+        bn.nor_min.z, bn.nor_max.x, bn.nor_max.y, bn.nor_max.z);
+    flat[idx + 3] = make_float4(
+        __int_as_float(child_flat_offset),
+        __int_as_float(bn.num_children),
+        __int_as_float(bn.triangle_prim),
+        bn.pos_area);
+  }
+
+  return num_nodes;
+}
+
+} /* anonymous namespace */
+
 void ObjectManager::device_update_spoly_casters(DeviceScene *dscene, Scene *scene)
 {
-  /* Build a compact list of caustic caster objects and their triangle counts
-   * so the specular polynomials kernel can iterate over all caster triangles. */
+  /* Build 4-ary trees for all caustic caster meshes and upload to GPU.
+   * Each caster gets its own tree stored contiguously in spoly_tree_nodes. */
   vector<uint> caster_indices;
-  vector<uint> caster_prim_counts;
+  vector<uint> caster_tree_offsets;
+  vector<float4> all_tree_nodes;
+
+  int total_node_offset = 0;
 
   for (Object *ob : scene->objects) {
     if (!ob->get_is_caustics_caster()) {
@@ -613,8 +893,65 @@ void ObjectManager::device_update_spoly_casters(DeviceScene *dscene, Scene *scen
     if (num_tris == 0) {
       continue;
     }
+
+    /* Get object transform. */
+    const Transform tfm = ob->get_tfm();
+    const Transform itfm = transform_inverse(tfm);
+    const bool do_transform = !geom->transform_applied;
+
+    /* Get vertex normals. */
+    Attribute *attr_vN = mesh->attributes.find(ATTR_STD_VERTEX_NORMAL);
+    if (attr_vN == nullptr) {
+      continue;
+    }
+    const float3 *vN = attr_vN->data_float3();
+    const float3 *verts_data = mesh->verts.data();
+    const int *tri_data = mesh->triangles.data();
+    const int prim_offset = (int)geom->prim_offset;
+
+    /* Collect triangle data in world space. */
+    vector<SPolyTriData> tri_infos(num_tris);
+    for (size_t ti = 0; ti < num_tris; ti++) {
+      SPolyTriData &td = tri_infos[ti];
+      const int v0 = tri_data[ti * 3 + 0];
+      const int v1 = tri_data[ti * 3 + 1];
+      const int v2 = tri_data[ti * 3 + 2];
+
+      td.verts[0] = verts_data[v0];
+      td.verts[1] = verts_data[v1];
+      td.verts[2] = verts_data[v2];
+      td.normals[0] = vN[v0];
+      td.normals[1] = vN[v1];
+      td.normals[2] = vN[v2];
+
+      if (do_transform) {
+        for (int v = 0; v < 3; v++) {
+          td.verts[v] = transform_point(&tfm, td.verts[v]);
+          td.normals[v] = safe_normalize(transform_direction_transposed(&itfm, td.normals[v]));
+        }
+      }
+      else {
+        for (int v = 0; v < 3; v++) {
+          td.normals[v] = safe_normalize(td.normals[v]);
+        }
+      }
+
+      td.centroid = (td.verts[0] + td.verts[1] + td.verts[2]) * (1.0f / 3.0f);
+      td.global_prim = prim_offset + (int)ti;
+    }
+
+    /* Build 4-ary tree. */
+    vector<SPolyBuildNode> build_nodes;
+    build_nodes.reserve(num_tris * 2);
+    int root = spoly_build_tree(build_nodes, tri_infos, 0, (int)num_tris);
+
+    /* Record caster info. */
     caster_indices.push_back(ob->get_device_index());
-    caster_prim_counts.push_back((uint)num_tris);
+    caster_tree_offsets.push_back((uint)total_node_offset);
+
+    /* Flatten and append to global array. */
+    int num_flat_nodes = spoly_flatten_tree(build_nodes, root, all_tree_nodes, total_node_offset);
+    total_node_offset += num_flat_nodes;
   }
 
   const size_t num_casters = caster_indices.size();
@@ -622,17 +959,26 @@ void ObjectManager::device_update_spoly_casters(DeviceScene *dscene, Scene *scen
 
   if (num_casters > 0) {
     uint *idx = dscene->spoly_caster_object_index.alloc(num_casters);
-    uint *cnt = dscene->spoly_caster_prim_count.alloc(num_casters);
+    uint *off = dscene->spoly_caster_tree_offset.alloc(num_casters);
     for (size_t i = 0; i < num_casters; i++) {
       idx[i] = caster_indices[i];
-      cnt[i] = caster_prim_counts[i];
+      off[i] = caster_tree_offsets[i];
     }
     dscene->spoly_caster_object_index.copy_to_device();
-    dscene->spoly_caster_prim_count.copy_to_device();
+    dscene->spoly_caster_tree_offset.copy_to_device();
+
+    /* Upload tree nodes. */
+    const size_t num_float4s = all_tree_nodes.size();
+    if (num_float4s > 0) {
+      float4 *nodes_data = dscene->spoly_tree_nodes.alloc(num_float4s);
+      memcpy(nodes_data, all_tree_nodes.data(), num_float4s * sizeof(float4));
+      dscene->spoly_tree_nodes.copy_to_device();
+    }
   }
   else {
     dscene->spoly_caster_object_index.free();
-    dscene->spoly_caster_prim_count.free();
+    dscene->spoly_caster_tree_offset.free();
+    dscene->spoly_tree_nodes.free();
   }
 }
 
@@ -951,7 +1297,8 @@ void ObjectManager::device_free(Device * /*unused*/, DeviceScene *dscene, bool f
   dscene->object_flag.free_if_need_realloc(force_free);
   dscene->object_prim_offset.free_if_need_realloc(force_free);
   dscene->spoly_caster_object_index.free_if_need_realloc(force_free);
-  dscene->spoly_caster_prim_count.free_if_need_realloc(force_free);
+  dscene->spoly_caster_tree_offset.free_if_need_realloc(force_free);
+  dscene->spoly_tree_nodes.free_if_need_realloc(force_free);
 }
 
 void ObjectManager::apply_static_transforms(DeviceScene *dscene, Scene *scene, Progress &progress)

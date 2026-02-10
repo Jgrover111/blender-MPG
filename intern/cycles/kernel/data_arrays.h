@@ -25,9 +25,10 @@ KERNEL_DATA_ARRAY(DecomposedTransform, object_motion)
 KERNEL_DATA_ARRAY(uint, object_flag)
 KERNEL_DATA_ARRAY(uint, object_prim_offset)
 
-/* specular polynomials caustic casters: (object_index, num_prims) pairs */
+/* specular polynomials caustic casters and 4-ary tree */
 KERNEL_DATA_ARRAY(uint, spoly_caster_object_index)
-KERNEL_DATA_ARRAY(uint, spoly_caster_prim_count)
+KERNEL_DATA_ARRAY(uint, spoly_caster_tree_offset)
+KERNEL_DATA_ARRAY(float4, spoly_tree_nodes)
 
 /* cameras */
 KERNEL_DATA_ARRAY(DecomposedTransform, camera_motion)

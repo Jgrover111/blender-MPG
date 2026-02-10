@@ -44,9 +44,10 @@ class DeviceScene {
   device_vector<uint> object_flag;
   device_vector<uint> object_prim_offset;
 
-  /* specular polynomials caustic caster data */
+  /* specular polynomials caustic caster data and 4-ary tree */
   device_vector<uint> spoly_caster_object_index;
-  device_vector<uint> spoly_caster_prim_count;
+  device_vector<uint> spoly_caster_tree_offset;
+  device_vector<float4> spoly_tree_nodes;
 
   /* cameras */
   device_vector<DecomposedTransform> camera_motion;
