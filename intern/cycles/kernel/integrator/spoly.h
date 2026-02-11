@@ -1337,18 +1337,27 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
 
           /* === Valid specular path found. Compute contribution. === */
 
-          /* Direction from specular point toward receiver and light. */
-          const float3 wi = -dir_to_spec;   /* spec -> receiver */
-          const float3 wo = dir_to_light;   /* spec -> light */
-
-          /* Evaluate receiver BSDF toward the specular point (includes |cos_recv|). */
+          /* Evaluate receiver BSDF toward the specular point. */
           surface_shader_bsdf_eval(kg, state, sd, dir_to_spec, throughput, ls->shader);
+
+          /* Fresnel at specular point. */
+          const float cos_i_spec = fabsf(dot(-dir_to_spec, spec_N));
+          float F;
+          if (is_refraction) {
+            F = 1.0f - fresnel_dielectric_cos(cos_i_spec, eta);
+          }
+          else {
+            F = fresnel_dielectric_cos(cos_i_spec, 1.5f);
+          }
+
+          /* Geometry factor (solid angle Jacobian). */
+          const float dw0_dx1 = cos_i_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
+          const float G = fminf(dw0_dx1, 1e8f);
+
+          bsdf_eval_mul(throughput, F * G);
 
           /* Update light sample relative to specular point. */
           const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
-          light_sample_update(kg, ls, spec_pos, spec_N, path_flag);
-
-          /* Save and update bounce info. */
           const int transmission_bounce = INTEGRATOR_STATE(state, path, transmission_bounce);
           const int diffuse_bounce = INTEGRATOR_STATE(state, path, diffuse_bounce);
           const int bounce = INTEGRATOR_STATE(state, path, bounce);
@@ -1356,13 +1365,15 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce + 1;
           INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce + 1;
 
+          light_sample_update(kg, ls, spec_pos, spec_N, path_flag);
+
           /* Setup sd_mnee at specular point for light evaluation. */
           const int tri_shader_val = kernel_data_fetch(tri_shader, prim);
           shader_setup_from_sample(kg,
                                    sd_mnee,
                                    spec_pos,
                                    spec_N,
-                                   wi,
+                                   -dir_to_spec,
                                    tri_shader_val,
                                    caster_object,
                                    prim,
@@ -1373,114 +1384,9 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
                                    false,
                                    false);
 
-          /* Evaluate light shader from specular point. */
           const Spectrum light_eval = light_sample_shader_eval(
               kg, state, sd_mnee, ls, sd->time);
           bsdf_eval_mul(throughput, light_eval / ls->pdf);
-
-          /* Specular interface reflectance.
-           * TODO: evaluate actual surface shader at specular point using
-           * surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE> to get the
-           * material's real IOR and Fresnel. For now, use dielectric Fresnel
-           * with default IOR. */
-          const float cos_i_spec = fabsf(dot(wi, spec_N));
-          float F;
-          if (is_refraction) {
-            F = 1.0f - fresnel_dielectric_cos(cos_i_spec, 1.5f);
-          }
-          else {
-            F = fresnel_dielectric_cos(cos_i_spec, 1.5f);
-          }
-
-          /* Generalized geometry term.
-           * dw0_dx1: solid angle Jacobian from receiver to specular point.
-           * dx1_dxlight: transfer matrix determinant for the specular path. */
-          const float dw0_dx1 = cos_i_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
-
-          /* Compute dx1_dxlight: transfer matrix for single-bounce reflection.
-           * This accounts for how light perturbations map through the specular surface.
-           * For flat surfaces (zero normal curvature), dx1_dxlight = 1.0. */
-          float dx1_dxlight = 1.0f;
-          {
-            /* Triangle tangent vectors (position derivatives WRT barycentric coords). */
-            const float3 dp_du = verts[1] - verts[0];
-            const float3 dp_dv = verts[2] - verts[0];
-
-            /* Normal derivatives WRT barycentric coords. */
-            float n_len;
-            const float3 n_interp = normalize_len(
-                w * normals[0] + u * normals[1] + v * normals[2], &n_len);
-            const float inv_n_len = 1.0f / fmaxf(n_len, 1e-8f);
-            float3 dn_du = inv_n_len * (normals[1] - normals[0]);
-            float3 dn_dv = inv_n_len * (normals[2] - normals[0]);
-            dn_du -= n_interp * dot(n_interp, dn_du);
-            dn_dv -= n_interp * dot(n_interp, dn_dv);
-
-            /* Half vector for reflection: H = normalize(wi + wo). */
-            float3 H = wi + wo;
-            const float ilh = 1.0f / fmaxf(len(H), 1e-8f);
-            H *= ilh;
-
-            const float ili = ilh / fmaxf(dist_to_spec, 1e-8f);
-            const float ilo = ilh / fmaxf(dist_to_light, 1e-8f);
-
-            /* Local shading frame at specular point. */
-            const float dp_du_dot_n = dot(dp_du, spec_N);
-            float3 s = dp_du - dp_du_dot_n * spec_N;
-            const float inv_len_s = 1.0f / fmaxf(len(s), 1e-8f);
-            s *= inv_len_s;
-            const float3 t = cross(spec_N, s);
-
-            /* Constraint derivatives WRT specular vertex position (B matrix). */
-            float3 dH_du_b = -dp_du * (ili + ilo) + wi * (dot(wi, dp_du) * ili) +
-                             wo * (dot(wo, dp_du) * ilo);
-            float3 dH_dv_b = -dp_dv * (ili + ilo) + wi * (dot(wi, dp_dv) * ili) +
-                             wo * (dot(wo, dp_dv) * ilo);
-            dH_du_b -= H * dot(dH_du_b, H);
-            dH_dv_b -= H * dot(dH_dv_b, H);
-            dH_du_b = -dH_du_b;
-            dH_dv_b = -dH_dv_b;
-
-            /* Normal curvature contributions to B. */
-            float3 ds_du = -inv_len_s * (dot(dp_du, dn_du) * spec_N + dp_du_dot_n * dn_du);
-            float3 ds_dv = -inv_len_s * (dot(dp_du, dn_dv) * spec_N + dp_du_dot_n * dn_dv);
-            ds_du -= s * dot(s, ds_du);
-            ds_dv -= s * dot(s, ds_dv);
-            const float3 dt_du = cross(dn_du, s) + cross(spec_N, ds_du);
-            const float3 dt_dv = cross(dn_dv, s) + cross(spec_N, ds_dv);
-
-            const float4 B = make_float4(dot(dH_du_b, s) + dot(H, ds_du),
-                                         dot(dH_dv_b, s) + dot(H, ds_dv),
-                                         dot(dH_du_b, t) + dot(H, dt_du),
-                                         dot(dH_dv_b, t) + dot(H, dt_dv));
-
-            /* Constraint derivatives WRT light position (C matrix).
-             * Light tangent frame from ls->Ng. */
-            float3 dp_du_light, dp_dv_light;
-            make_orthonormals(ls->Ng, &dp_du_light, &dp_dv_light);
-
-            float3 dH_du_c = (dp_du_light - wo * dot(wo, dp_du_light)) * ilo;
-            float3 dH_dv_c = (dp_dv_light - wo * dot(wo, dp_dv_light)) * ilo;
-            dH_du_c -= H * dot(dH_du_c, H);
-            dH_dv_c -= H * dot(dH_dv_c, H);
-            dH_du_c = -dH_du_c;
-            dH_dv_c = -dH_dv_c;
-
-            const float4 C = make_float4(
-                dot(dH_du_c, s), dot(dH_dv_c, s), dot(dH_du_c, t), dot(dH_dv_c, t));
-
-            /* Transfer matrix: Tp = -B^{-1} * C */
-            float4 Bi;
-            const float B_det = mat22_inverse(B, Bi);
-            if (fabsf(B_det) > 1e-10f) {
-              const float4 Tp = mat22_mult(Bi, C);  /* Note: -(-C) = C */
-              dx1_dxlight = fabsf(mat22_determinant(Tp));
-            }
-          }
-
-          /* Clamp to avoid fireflies from numerical instability. */
-          const float G = fminf(dw0_dx1 * dx1_dxlight, 1e8f);
-          bsdf_eval_mul(throughput, F * G);
 
           /* Restore bounce state. */
           INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
