@@ -1146,9 +1146,6 @@ void ObjectManager::device_update(Device *device,
     device_update_transforms(dscene, scene, progress);
   }
 
-  /* Build specular polynomial caustic caster list. */
-  device_update_spoly_casters(dscene, scene);
-
   for (Object *object : scene->objects) {
     object->clear_modified();
   }

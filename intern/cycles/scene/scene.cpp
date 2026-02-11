@@ -318,6 +318,16 @@ void Scene::device_update(Device *device_, Progress &progress)
     return;
   }
 
+  /* Build specular polynomial caustic caster trees.
+   * Must run after geometry_manager->device_update() which sets prim_offset,
+   * and after device_update_prim_offsets() which uploads them to the device. */
+  progress.set_status("Updating Specular Polynomial Casters");
+  object_manager->device_update_spoly_casters(&dscene, this);
+
+  if (progress.get_cancel() || device->have_error()) {
+    return;
+  }
+
   /* Images last, as they should be more likely to use host memory fallback than geometry.
    * Some images may have been uploaded early for displacement already at this point. */
   progress.set_status("Updating Images");
