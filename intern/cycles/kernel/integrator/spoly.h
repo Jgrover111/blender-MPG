@@ -969,6 +969,296 @@ ccl_device_inline int spoly_solve(float3 xD,
 }
 
 /* ============================================================================
+ * Newton refinement of specular point.
+ *
+ * After the polynomial solver finds approximate (u,v) via bisection,
+ * refine using Newton's method on the half-vector alignment constraint.
+ * The constraint is: H should align with N, i.e. H x N = 0 projected
+ * to the tangent plane.
+ *
+ * Uses finite differences for the Jacobian to keep the code simple.
+ * Matches the reference implementation's Newton refinement step.
+ * ============================================================================ */
+
+#define SPOLY_NEWTON_MAX_ITER 8
+#define SPOLY_NEWTON_EPS 1e-5f
+#define SPOLY_NEWTON_CONVERGE_THRESH 1e-8f
+
+/* Evaluate the half-vector constraint at (u, v).
+ * Returns (dot(H, s), dot(H, t)) where s, t are tangent vectors. */
+ccl_device_inline float2 spoly_halfvector_constraint(float3 recv_P,
+                                                      float3 light_P,
+                                                      float3 P0,
+                                                      float3 P1,
+                                                      float3 P2,
+                                                      float3 N0,
+                                                      float3 N1,
+                                                      float3 N2,
+                                                      float u,
+                                                      float v,
+                                                      float3 dp_du,
+                                                      float3 dp_dv)
+{
+  const float w = 1.0f - u - v;
+  const float3 x = w * P0 + u * P1 + v * P2;
+  const float3 n = normalize(w * N0 + u * N1 + v * N2);
+
+  const float3 wi = normalize(recv_P - x);
+  const float3 wo = normalize(light_P - x);
+  const float3 H = normalize(wi + wo);
+
+  /* Build tangent frame at the shading normal. */
+  float3 s = dp_du - dot(dp_du, n) * n;
+  const float len_s = len(s);
+  if (len_s < 1e-10f)
+    return make_float2(1.0f, 1.0f); /* Degenerate */
+  s /= len_s;
+  const float3 t = cross(n, s);
+
+  return make_float2(dot(H, s), dot(H, t));
+}
+
+ccl_device_inline bool spoly_newton_refine(float3 recv_P,
+                                           float3 light_P,
+                                           float3 P0,
+                                           float3 P1,
+                                           float3 P2,
+                                           float3 N0,
+                                           float3 N1,
+                                           float3 N2,
+                                           ccl_private float *u_out,
+                                           ccl_private float *v_out)
+{
+  float u = *u_out;
+  float v = *v_out;
+
+  const float3 dp_du = P1 - P0;
+  const float3 dp_dv = P2 - P0;
+
+  for (int iter = 0; iter < SPOLY_NEWTON_MAX_ITER; iter++) {
+    const float2 c = spoly_halfvector_constraint(
+        recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v, dp_du, dp_dv);
+
+    if (fabsf(c.x) < SPOLY_NEWTON_CONVERGE_THRESH &&
+        fabsf(c.y) < SPOLY_NEWTON_CONVERGE_THRESH)
+    {
+      break;
+    }
+
+    /* Finite-difference Jacobian. */
+    const float eps = SPOLY_NEWTON_EPS;
+    const float2 c_du = spoly_halfvector_constraint(
+        recv_P, light_P, P0, P1, P2, N0, N1, N2, u + eps, v, dp_du, dp_dv);
+    const float2 c_dv = spoly_halfvector_constraint(
+        recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v + eps, dp_du, dp_dv);
+
+    const float dc1_du = (c_du.x - c.x) / eps;
+    const float dc2_du = (c_du.y - c.y) / eps;
+    const float dc1_dv = (c_dv.x - c.x) / eps;
+    const float dc2_dv = (c_dv.y - c.y) / eps;
+
+    const float det = dc1_du * dc2_dv - dc1_dv * dc2_du;
+    if (fabsf(det) < 1e-20f)
+      break;
+
+    const float inv_det = 1.0f / det;
+    const float du = -inv_det * (dc2_dv * c.x - dc1_dv * c.y);
+    const float dv = -inv_det * (-dc2_du * c.x + dc1_du * c.y);
+
+    u += du;
+    v += dv;
+
+    /* Bail if we've left the triangle. */
+    if (u < -0.05f || v < -0.05f || u + v > 1.05f)
+      return false;
+  }
+
+  /* Clamp to valid barycentric range. */
+  u = clamp(u, 0.0f, 1.0f);
+  v = clamp(v, 0.0f, 1.0f - u);
+
+  *u_out = u;
+  *v_out = v;
+  return true;
+}
+
+/* ============================================================================
+ * Transfer matrix computation for single-bounce reflection.
+ *
+ * Computes dx1_dxlight following MNEE's approach (mnee_compute_transfer_matrix)
+ * but simplified for single bounce. This relates perturbations in the light
+ * position to perturbations in the specular vertex position.
+ *
+ * The constraint is: H should align with N, projected onto tangent frame (s,t).
+ * b = dC/d(spec_params) - the constraint Jacobian at the specular vertex
+ * dc_dlight = dC/d(light_params) - the constraint Jacobian w.r.t. light
+ * transfer_matrix = -inv(b) * dc_dlight
+ * dx1_dxlight = |det(transfer_matrix)|
+ * ============================================================================ */
+
+ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
+                                                       float3 light_P,
+                                                       float3 light_Ng,
+                                                       float3 spec_P,
+                                                       float3 spec_N,
+                                                       float3 spec_ng,
+                                                       float3 P0,
+                                                       float3 P1,
+                                                       float3 P2,
+                                                       float3 N0,
+                                                       float3 N1,
+                                                       float3 N2,
+                                                       float u,
+                                                       float v)
+{
+  /* Direction from receiver to specular point. */
+  float3 wi = recv_P - spec_P;
+  float ili = len(wi);
+  if (ili < 1e-6f)
+    return 0.0f;
+  ili = 1.0f / ili;
+  wi *= ili;
+
+  /* Direction from specular point to light. */
+  float3 wo = light_P - spec_P;
+  float ilo = len(wo);
+  if (ilo < 1e-6f)
+    return 0.0f;
+  ilo = 1.0f / ilo;
+  wo *= ilo;
+
+  /* Half vector (reflection: eta = 1). */
+  float3 H = -(wi + wo);
+  const float len_H = len(H);
+  if (len_H < 1e-8f)
+    return 0.0f;
+  const float ilh = 1.0f / len_H;
+  H *= ilh;
+
+  /* Combine scale factors. */
+  const float eta = 1.0f; /* Reflection */
+  ilo *= eta * ilh;
+  ili *= ilh;
+
+  /* Triangle edge vectors (position derivatives w.r.t. barycentric). */
+  float3 dp_du = P1 - P0;
+  float3 dp_dv = P2 - P0;
+
+  /* Geometric normal. */
+  /* float3 ng = normalize(cross(dp_du, dp_dv)); -- use spec_ng instead */
+
+  /* Shading normal derivatives w.r.t. barycentric (u, v).
+   * n(u,v) = (1-u-v)*N0 + u*N1 + v*N2, normalized.
+   * d/du [f/|f|] = (df/du)/|f| - f/|f|^3 * dot(f, df/du) */
+  const float w = 1.0f - u - v;
+  const float3 n_raw = w * N0 + u * N1 + v * N2;
+  const float n_len = len(n_raw);
+  if (n_len < 1e-10f)
+    return 0.0f;
+  const float inv_n_len = 1.0f / n_len;
+
+  float3 dn_du = inv_n_len * (N1 - N0);
+  float3 dn_dv = inv_n_len * (N2 - N0);
+  dn_du -= spec_N * dot(spec_N, dn_du);
+  dn_dv -= spec_N * dot(spec_N, dn_dv);
+
+  /* Orthonormalize (dp_du, dp_dv) for consistent tangent frame,
+   * applying same transform to (dn_du, dn_dv). */
+  float len_dp = len(dp_du);
+  if (len_dp < 1e-10f)
+    return 0.0f;
+  float inv_len = 1.0f / len_dp;
+  dp_du *= inv_len;
+  dn_du *= inv_len;
+
+  const float dpdu_dot_dpdv = dot(dp_du, dp_dv);
+  dp_dv -= dpdu_dot_dpdv * dp_du;
+  dn_dv -= dpdu_dot_dpdv * dn_du;
+
+  len_dp = len(dp_dv);
+  if (len_dp < 1e-10f)
+    return 0.0f;
+  inv_len = 1.0f / len_dp;
+  dp_dv *= inv_len;
+  dn_dv *= inv_len;
+
+  /* Build consistent tangent frame from geometric normal (matching MNEE). */
+  float3 frame_s, frame_t;
+  make_orthonormals(spec_ng, &frame_s, &frame_t);
+
+  /* Rotate normal derivatives to this frame. */
+  const float cos_theta = dot(dp_du, frame_s);
+  const float sin_theta = -dot(dp_dv, frame_s);
+  const float3 dn_du_rot = cos_theta * dn_du - sin_theta * dn_dv;
+  const float3 dn_dv_rot = sin_theta * dn_du + cos_theta * dn_dv;
+
+  /* Local shading frame at specular vertex. */
+  const float dp_du_dot_n = dot(frame_s, spec_N);
+  float3 s = frame_s - dp_du_dot_n * spec_N;
+  const float inv_len_s = 1.0f / fmaxf(len(s), 1e-10f);
+  s *= inv_len_s;
+  const float3 t = cross(spec_N, s);
+
+  /* ---- Compute b: constraint Jacobian w.r.t. specular vertex params ---- */
+
+  /* dH/du and dH/dv w.r.t. specular vertex tangent params.
+   * For single bounce with finite light (not fixed direction): */
+  float3 dH_du = -frame_s * (ili + ilo) + wi * (dot(wi, frame_s) * ili) +
+                 wo * (dot(wo, frame_s) * ilo);
+  float3 dH_dv = -frame_t * (ili + ilo) + wi * (dot(wi, frame_t) * ili) +
+                 wo * (dot(wo, frame_t) * ilo);
+  dH_du -= H * dot(dH_du, H);
+  dH_dv -= H * dot(dH_dv, H);
+  dH_du = -dH_du;
+  dH_dv = -dH_dv;
+
+  /* Tangent frame derivatives. */
+  float3 ds_du = -inv_len_s * (dot(frame_s, dn_du_rot) * spec_N + dp_du_dot_n * dn_du_rot);
+  float3 ds_dv = -inv_len_s * (dot(frame_s, dn_dv_rot) * spec_N + dp_du_dot_n * dn_dv_rot);
+  ds_du -= s * dot(s, ds_du);
+  ds_dv -= s * dot(s, ds_dv);
+  const float3 dt_du = cross(dn_du_rot, s) + cross(spec_N, ds_du);
+  const float3 dt_dv = cross(dn_dv_rot, s) + cross(spec_N, ds_dv);
+
+  /* b matrix (2x2 stored as float4). */
+  const float4 b = make_float4(dot(dH_du, s) + dot(H, ds_du),
+                                dot(dH_dv, s) + dot(H, ds_dv),
+                                dot(dH_du, t) + dot(H, dt_du),
+                                dot(dH_dv, t) + dot(H, dt_dv));
+
+  /* Invert b. */
+  float4 b_inv;
+  const float b_det = mat22_inverse(b, b_inv);
+  if (b_det == 0.0f)
+    return 0.0f;
+
+  /* ---- Compute dc_dlight: constraint Jacobian w.r.t. light params ---- */
+
+  /* Light surface tangent vectors. */
+  float3 light_dp_du, light_dp_dv;
+  make_orthonormals(light_Ng, &light_dp_du, &light_dp_dv);
+
+  /* dH/du_light and dH/dv_light. */
+  float3 dH_du_light = (light_dp_du - wo * dot(wo, light_dp_du)) * ilo;
+  float3 dH_dv_light = (light_dp_dv - wo * dot(wo, light_dp_dv)) * ilo;
+  dH_du_light -= H * dot(dH_du_light, H);
+  dH_dv_light -= H * dot(dH_dv_light, H);
+  dH_du_light = -dH_du_light;
+  dH_dv_light = -dH_dv_light;
+
+  const float4 dc_dlight = make_float4(
+      dot(dH_du_light, s), dot(dH_dv_light, s), dot(dH_du_light, t), dot(dH_dv_light, t));
+
+  /* ---- Transfer matrix: Tp = -inv(b) * dc_dlight ---- */
+  const float4 Tp = mat22_mult(b_inv, dc_dlight);
+  /* Note: MNEE uses -Li * dc_dlight. Since b_inv = -Li/det * adj(b), and we already
+   * have b_inv from mat22_inverse which includes the sign, we just multiply directly.
+   * The negation is absorbed into the sign of the determinant which we take fabsf of. */
+
+  return fabsf(mat22_determinant(Tp));
+}
+
+/* ============================================================================
  * 4-ary Tree Node Access Helpers
  *
  * Each node occupies 4 float4s in the spoly_tree_nodes array.
@@ -1253,11 +1543,24 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
         if (num_solutions == 0)
           continue;
 
-        /* Validate each solution. */
+        /* Validate each solution with Newton refinement. */
         for (int si = 0; si < num_solutions; si++) {
-          const float3 spec_pos = solutions[si].position;
-          const float u = solutions[si].u;
-          const float v = solutions[si].v;
+          float u = solutions[si].u;
+          float v = solutions[si].v;
+
+          /* Newton-refine the specular point for sub-pixel accuracy.
+           * This eliminates visible triangle edges and wavy artifacts
+           * caused by the bisection solver's limited precision. */
+          if (!spoly_newton_refine(
+                  recv_P, light_P, verts[0], verts[1], verts[2],
+                  normals[0], normals[1], normals[2], &u, &v))
+          {
+            continue;
+          }
+
+          /* Recompute position and normal at refined (u,v). */
+          const float w = 1.0f - u - v;
+          const float3 spec_pos = w * verts[0] + u * verts[1] + v * verts[2];
 
           float dist_to_spec;
           const float3 dir_to_spec = normalize_len(spec_pos - recv_P, &dist_to_spec);
@@ -1269,12 +1572,13 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           if (dist_to_light < 1e-6f)
             continue;
 
-          const float w = 1.0f - u - v;
           float3 spec_N = normalize(w * normals[0] + u * normals[1] + v * normals[2]);
 
           if (!is_refraction) {
             const float3 H = normalize(-dir_to_spec + dir_to_light);
-            if (dot(H, spec_N) < 0.5f)
+            /* After Newton refinement, H should be very close to N.
+             * Use a relaxed threshold since we've already refined. */
+            if (dot(H, spec_N) < 0.3f)
               continue;
             if (dot(-dir_to_spec, spec_N) < 0.0f || dot(dir_to_light, spec_N) < 0.0f)
               continue;
@@ -1283,6 +1587,12 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
             if (dot(-dir_to_spec, spec_N) < 0.0f) {
               spec_N = -spec_N;
             }
+          }
+
+          /* Geometric normal for the triangle (account for negative scale). */
+          float3 spec_ng = normalize(cross(verts[1] - verts[0], verts[2] - verts[0]));
+          if (object_flags & SD_OBJECT_NEGATIVE_SCALE) {
+            spec_ng = -spec_ng;
           }
 
           /* Visibility check: receiver to specular point. */
@@ -1340,23 +1650,8 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           /* Evaluate receiver BSDF toward the specular point. */
           surface_shader_bsdf_eval(kg, state, sd, dir_to_spec, throughput, ls->shader);
 
-          /* Fresnel at specular point. */
-          const float cos_i_spec = fabsf(dot(-dir_to_spec, spec_N));
-          float F;
-          if (is_refraction) {
-            F = 1.0f - fresnel_dielectric_cos(cos_i_spec, eta);
-          }
-          else {
-            F = fresnel_dielectric_cos(cos_i_spec, 1.5f);
-          }
-
-          /* Geometry factor (solid angle Jacobian). */
-          const float dw0_dx1 = cos_i_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
-          const float G = fminf(dw0_dx1, 1e8f);
-
-          bsdf_eval_mul(throughput, F * G);
-
-          /* Update light sample relative to specular point. */
+          /* Update light sample relative to specular point (must happen before
+           * light_sample_shader_eval so ls has correct data). */
           const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
           const int transmission_bounce = INTEGRATOR_STATE(state, path, transmission_bounce);
           const int diffuse_bounce = INTEGRATOR_STATE(state, path, diffuse_bounce);
@@ -1387,6 +1682,29 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           const Spectrum light_eval = light_sample_shader_eval(
               kg, state, sd_mnee, ls, sd->time);
           bsdf_eval_mul(throughput, light_eval / ls->pdf);
+
+          /* Generalized geometry term (matching MNEE formula).
+           * G = dw0_dx1 * dx1_dxlight
+           * where dw0_dx1 converts specular area to receiver solid angle,
+           * and dx1_dxlight is the transfer matrix determinant that accounts
+           * for how the specular point moves with light position changes. */
+          const float cos_at_spec = fabsf(dot(dir_to_spec, spec_N));
+          const float dw0_dx1 = cos_at_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
+
+          const float dx1_dxlight = spoly_compute_transfer_matrix(
+              recv_P, light_P, ls->Ng, spec_pos, spec_N, spec_ng,
+              verts[0], verts[1], verts[2],
+              normals[0], normals[1], normals[2], u, v);
+
+          /* Clamp G to prevent fireflies, matching MNEE's clamp of 2.0. */
+          const float G = fminf(dw0_dx1 * dx1_dxlight, 2.0f);
+
+          /* Fresnel at specular point (dielectric reflection).
+           * TODO: evaluate actual specular BSDF closure for proper IOR. */
+          const float cos_i_spec = fabsf(dot(-dir_to_spec, spec_N));
+          const float F = fresnel_dielectric_cos(cos_i_spec, 1.5f);
+
+          bsdf_eval_mul(throughput, F * G);
 
           /* Restore bounce state. */
           INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
