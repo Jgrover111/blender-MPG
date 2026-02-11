@@ -1356,8 +1356,7 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce + 1;
           INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce + 1;
 
-          /* Setup sd_mnee at specular point and evaluate surface shader to get closures.
-           * This must happen before light_sample_shader_eval which may overwrite sd_mnee. */
+          /* Setup sd_mnee at specular point for light evaluation. */
           const int tri_shader_val = kernel_data_fetch(tri_shader, prim);
           shader_setup_from_sample(kg,
                                    sd_mnee,
@@ -1374,54 +1373,28 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
                                    false,
                                    false);
 
-          /* Evaluate surface shader at specular point to get actual BSDF closures. */
-          surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
-              kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
-
-          /* Find a glossy or glass closure for the specular interface BSDF. */
-          Spectrum spec_bsdf_weight = zero_spectrum();
-          bool found_spec_bsdf = false;
-          for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
-            ccl_private ShaderClosure *bsdf = &sd_mnee->closure[ci];
-            if (CLOSURE_IS_BSDF_GLOSSY(bsdf->type) || CLOSURE_IS_GLASS(bsdf->type)) {
-              ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)bsdf;
-
-              /* Compute Fresnel reflectance using material's actual IOR. */
-              const float cosHI = dot(spec_N, wi);
-              Spectrum reflectance, transmittance;
-              microfacet_fresnel(kg, mbsdf, cosHI, nullptr, &reflectance, &transmittance);
-
-              if (is_refraction) {
-                spec_bsdf_weight = bsdf->weight * transmittance;
-              }
-              else {
-                spec_bsdf_weight = bsdf->weight * reflectance;
-              }
-              found_spec_bsdf = true;
-              break;
-            }
-          }
-
-          if (!found_spec_bsdf) {
-            /* Fallback: use simple Fresnel with default IOR. */
-            const float cos_i_spec_fb = fabsf(dot(wi, spec_N));
-            const float F = is_refraction ?
-                                (1.0f - fresnel_dielectric_cos(cos_i_spec_fb, 1.5f)) :
-                                fresnel_dielectric_cos(cos_i_spec_fb, 1.5f);
-            spec_bsdf_weight = make_spectrum(F);
-          }
-
-          /* Evaluate light shader from specular point.
-           * Note: this may overwrite sd_mnee with light geometry, so it must
-           * come after we've extracted the specular BSDF closure info above. */
+          /* Evaluate light shader from specular point. */
           const Spectrum light_eval = light_sample_shader_eval(
               kg, state, sd_mnee, ls, sd->time);
           bsdf_eval_mul(throughput, light_eval / ls->pdf);
 
+          /* Specular interface reflectance.
+           * TODO: evaluate actual surface shader at specular point using
+           * surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE> to get the
+           * material's real IOR and Fresnel. For now, use dielectric Fresnel
+           * with default IOR. */
+          const float cos_i_spec = fabsf(dot(wi, spec_N));
+          float F;
+          if (is_refraction) {
+            F = 1.0f - fresnel_dielectric_cos(cos_i_spec, 1.5f);
+          }
+          else {
+            F = fresnel_dielectric_cos(cos_i_spec, 1.5f);
+          }
+
           /* Generalized geometry term.
            * dw0_dx1: solid angle Jacobian from receiver to specular point.
            * dx1_dxlight: transfer matrix determinant for the specular path. */
-          const float cos_i_spec = fabsf(dot(wi, spec_N));
           const float dw0_dx1 = cos_i_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
 
           /* Compute dx1_dxlight: transfer matrix for single-bounce reflection.
@@ -1507,7 +1480,7 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
 
           /* Clamp to avoid fireflies from numerical instability. */
           const float G = fminf(dw0_dx1 * dx1_dxlight, 1e8f);
-          bsdf_eval_mul(throughput, spec_bsdf_weight * G);
+          bsdf_eval_mul(throughput, F * G);
 
           /* Restore bounce state. */
           INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
