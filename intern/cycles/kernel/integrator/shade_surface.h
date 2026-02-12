@@ -355,13 +355,15 @@ ccl_device
   BsdfEval bsdf_eval ccl_optional_struct_init;
 
   int mnee_vertex_count = 0;  // NOLINT
-  int spoly_vertex_count = 0;
 
   const bool use_spoly = kernel_data.integrator.use_specular_polynomials;
 
   if (use_spoly) {
     /* When Specular Polynomials is enabled, it REPLACES MNEE entirely.
-     * This ensures any caustics are the result of spoly, not MNEE. */
+     * Spoly caustics are ADDITIVE: they launch a separate shadow ray
+     * for the caustic contribution and let regular direct lighting proceed.
+     * This is correct for reflection caustics where the direct path to the
+     * light is usually not blocked by the caster. */
     if (ls.type != LIGHT_TRIANGLE) {
       const bool use_caustics = kernel_data_fetch(lights, ls.prim).use_caustics;
       if (use_caustics) {
@@ -372,8 +374,56 @@ ccl_device
 
         /* Are we on a caustic receiver? Run spoly. */
         if (!is_transmission && (sd->object_flag & SD_OBJECT_CAUSTICS_RECEIVER)) {
-          spoly_vertex_count = kernel_path_spoly_sample(
-              kg, state, sd, emission_sd, rng_state, &ls, &bsdf_eval);
+          /* Use a copy of ls since spoly modifies it via light_sample_update.
+           * The original ls is preserved for regular direct lighting below. */
+          LightSample ls_spoly = ls;
+          BsdfEval spoly_eval ccl_optional_struct_init;
+
+          const int spoly_found = kernel_path_spoly_sample(
+              kg, state, sd, emission_sd, rng_state, &ls_spoly, &spoly_eval);
+
+          if (spoly_found > 0) {
+            /* Launch a separate shadow ray for the caustic contribution. */
+            Ray spoly_ray ccl_optional_struct_init;
+            light_sample_to_surface_shadow_ray(kg, emission_sd, &ls_spoly, &spoly_ray);
+
+            IntegratorShadowState spoly_shadow = integrate_direct_light_shadow_init_common(
+                kg,
+                state,
+                &spoly_ray,
+                bsdf_eval_sum(&spoly_eval),
+                ls_spoly.group,
+                spoly_found);
+
+            uint32_t spoly_shadow_flag = INTEGRATOR_STATE(state, path, flag);
+            if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) {
+              PackedSpectrum pass_diffuse_weight;
+              PackedSpectrum pass_glossy_weight;
+              if (spoly_shadow_flag & PATH_RAY_ANY_PASS) {
+                pass_diffuse_weight = INTEGRATOR_STATE(state, path, pass_diffuse_weight);
+                pass_glossy_weight = INTEGRATOR_STATE(state, path, pass_glossy_weight);
+              }
+              else {
+                spoly_shadow_flag |= PATH_RAY_SURFACE_PASS;
+                pass_diffuse_weight = PackedSpectrum(
+                    bsdf_eval_pass_diffuse_weight(&spoly_eval));
+                pass_glossy_weight = PackedSpectrum(
+                    bsdf_eval_pass_glossy_weight(&spoly_eval));
+              }
+              INTEGRATOR_STATE_WRITE(
+                  spoly_shadow, shadow_path, pass_diffuse_weight) = pass_diffuse_weight;
+              INTEGRATOR_STATE_WRITE(
+                  spoly_shadow, shadow_path, pass_glossy_weight) = pass_glossy_weight;
+            }
+            INTEGRATOR_STATE_WRITE(spoly_shadow, shadow_path, flag) = spoly_shadow_flag;
+
+            if (is_transmission) {
+#ifdef __VOLUME__
+              volume_stack_enter_exit<true>(kg, spoly_shadow, sd);
+#endif
+            }
+          }
+          /* Fall through to regular direct lighting with the original ls. */
         }
       }
     }
@@ -402,8 +452,8 @@ ccl_device
 #endif /* __MNEE__ */
   }
 
-  if (mnee_vertex_count > 0 || spoly_vertex_count > 0) {
-    /* Create shadow ray after successful manifold walk or spoly solve:
+  if (mnee_vertex_count > 0) {
+    /* Create shadow ray after successful manifold walk:
      * emission_sd contains the specular vertex and
      * the light sample ls has been updated. */
     light_sample_to_surface_shadow_ray(kg, emission_sd, &ls, &ray);
@@ -438,7 +488,7 @@ ccl_device
 
   /* Branch off shadow kernel. */
   IntegratorShadowState shadow_state = integrate_direct_light_shadow_init_common(
-      kg, state, &ray, bsdf_eval_sum(&bsdf_eval), ls.group, mnee_vertex_count + spoly_vertex_count);
+      kg, state, &ray, bsdf_eval_sum(&bsdf_eval), ls.group, mnee_vertex_count);
 
   if (is_transmission) {
 #ifdef __VOLUME__

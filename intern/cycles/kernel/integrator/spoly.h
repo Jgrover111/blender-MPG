@@ -1063,7 +1063,7 @@ ccl_device_inline bool spoly_newton_refine(float3 recv_P,
 
     /* Degenerate constraint evaluation (NaN guard). */
     if (c.x == FLT_MAX)
-      return false;
+      return false; /* Don't update u_out/v_out — caller keeps bisection result. */
 
     if (fabsf(c.x) < SPOLY_NEWTON_CONVERGE_THRESH &&
         fabsf(c.y) < SPOLY_NEWTON_CONVERGE_THRESH)
@@ -1589,16 +1589,20 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           float v = solutions[si].v;
 
           /* Newton-refine the specular point for sub-pixel accuracy.
-           * This eliminates visible triangle edges and wavy artifacts
-           * caused by the bisection solver's limited precision. */
-          if (!spoly_newton_refine(
-                  recv_P, light_P, verts[0], verts[1], verts[2],
-                  normals[0], normals[1], normals[2], &u, &v))
-          {
-            continue;
-          }
+           * If Newton fails to converge, fall back to the bisection result
+           * rather than discarding the solution entirely. */
+          spoly_newton_refine(recv_P,
+                              light_P,
+                              verts[0],
+                              verts[1],
+                              verts[2],
+                              normals[0],
+                              normals[1],
+                              normals[2],
+                              &u,
+                              &v);
 
-          /* Recompute position and normal at refined (u,v). */
+          /* Recompute position and normal at (possibly refined) (u,v). */
           const float w = 1.0f - u - v;
           const float3 spec_pos = w * verts[0] + u * verts[1] + v * verts[2];
 
