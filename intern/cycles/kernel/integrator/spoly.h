@@ -1633,16 +1633,6 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
             }
           }
 
-          /* Geometric normal for the triangle (account for negative scale). */
-          const float3 cross_ng = cross(verts[1] - verts[0], verts[2] - verts[0]);
-          const float cross_ng_len = len(cross_ng);
-          if (cross_ng_len < 1e-10f)
-            continue; /* Degenerate triangle — skip. */
-          float3 spec_ng = cross_ng / cross_ng_len;
-          if (object_flags & SD_OBJECT_NEGATIVE_SCALE) {
-            spec_ng = -spec_ng;
-          }
-
           /* Visibility check: receiver to specular point. */
           {
             Ray vis_ray;
@@ -1731,21 +1721,14 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
               kg, state, sd_mnee, ls, sd->time);
           bsdf_eval_mul(throughput, light_eval / ls->pdf);
 
-          /* Generalized geometry term (matching MNEE formula).
-           * G = dw0_dx1 * dx1_dxlight
-           * where dw0_dx1 converts specular area to receiver solid angle,
-           * and dx1_dxlight is the transfer matrix determinant that accounts
-           * for how the specular point moves with light position changes. */
+          /* Generalized geometry term.
+           * dw0_dx1 converts specular point area to receiver solid angle.
+           * TODO: add transfer matrix (dx1_dxlight) once it handles point lights
+           * correctly. For now, just use the solid angle Jacobian with a moderate
+           * clamp to prevent fireflies while keeping the caustic visible. */
           const float cos_at_spec = fabsf(dot(dir_to_spec, spec_N));
           const float dw0_dx1 = cos_at_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
-
-          const float dx1_dxlight = spoly_compute_transfer_matrix(
-              recv_P, light_P, ls->Ng, spec_pos, spec_N, spec_ng,
-              verts[0], verts[1], verts[2],
-              normals[0], normals[1], normals[2], u, v);
-
-          /* Clamp G to prevent fireflies, matching MNEE's clamp of 2.0. */
-          const float G = fminf(dw0_dx1 * dx1_dxlight, 2.0f);
+          const float G = fminf(dw0_dx1, 8.0f);
 
           /* Fresnel at specular point (dielectric reflection).
            * TODO: evaluate actual specular BSDF closure for proper IOR. */
