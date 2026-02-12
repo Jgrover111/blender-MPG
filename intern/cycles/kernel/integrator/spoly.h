@@ -985,7 +985,8 @@ ccl_device_inline int spoly_solve(float3 xD,
 #define SPOLY_NEWTON_CONVERGE_THRESH 1e-8f
 
 /* Evaluate the half-vector constraint at (u, v).
- * Returns (dot(H, s), dot(H, t)) where s, t are tangent vectors. */
+ * Returns (dot(H, s), dot(H, t)) where s, t are tangent vectors.
+ * Returns (FLT_MAX, FLT_MAX) on degenerate configurations. */
 ccl_device_inline float2 spoly_halfvector_constraint(float3 recv_P,
                                                       float3 light_P,
                                                       float3 P0,
@@ -1001,17 +1002,36 @@ ccl_device_inline float2 spoly_halfvector_constraint(float3 recv_P,
 {
   const float w = 1.0f - u - v;
   const float3 x = w * P0 + u * P1 + v * P2;
-  const float3 n = normalize(w * N0 + u * N1 + v * N2);
 
-  const float3 wi = normalize(recv_P - x);
-  const float3 wo = normalize(light_P - x);
-  const float3 H = normalize(wi + wo);
+  /* Guard against degenerate interpolated normal. */
+  const float3 n_raw = w * N0 + u * N1 + v * N2;
+  const float n_len = len(n_raw);
+  if (n_len < 1e-10f)
+    return make_float2(FLT_MAX, FLT_MAX);
+  const float3 n = n_raw / n_len;
+
+  const float3 d_recv = recv_P - x;
+  const float3 d_light = light_P - x;
+  const float len_recv = len(d_recv);
+  const float len_light = len(d_light);
+  if (len_recv < 1e-10f || len_light < 1e-10f)
+    return make_float2(FLT_MAX, FLT_MAX);
+
+  const float3 wi = d_recv / len_recv;
+  const float3 wo = d_light / len_light;
+
+  /* Guard against near-opposite directions (grazing angle). */
+  const float3 H_raw = wi + wo;
+  const float len_H = len(H_raw);
+  if (len_H < 1e-8f)
+    return make_float2(FLT_MAX, FLT_MAX);
+  const float3 H = H_raw / len_H;
 
   /* Build tangent frame at the shading normal. */
   float3 s = dp_du - dot(dp_du, n) * n;
   const float len_s = len(s);
   if (len_s < 1e-10f)
-    return make_float2(1.0f, 1.0f); /* Degenerate */
+    return make_float2(FLT_MAX, FLT_MAX);
   s /= len_s;
   const float3 t = cross(n, s);
 
@@ -1035,13 +1055,20 @@ ccl_device_inline bool spoly_newton_refine(float3 recv_P,
   const float3 dp_du = P1 - P0;
   const float3 dp_dv = P2 - P0;
 
+  bool converged = false;
+
   for (int iter = 0; iter < SPOLY_NEWTON_MAX_ITER; iter++) {
     const float2 c = spoly_halfvector_constraint(
         recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v, dp_du, dp_dv);
 
+    /* Degenerate constraint evaluation (NaN guard). */
+    if (c.x == FLT_MAX)
+      return false;
+
     if (fabsf(c.x) < SPOLY_NEWTON_CONVERGE_THRESH &&
         fabsf(c.y) < SPOLY_NEWTON_CONVERGE_THRESH)
     {
+      converged = true;
       break;
     }
 
@@ -1052,6 +1079,10 @@ ccl_device_inline bool spoly_newton_refine(float3 recv_P,
     const float2 c_dv = spoly_halfvector_constraint(
         recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v + eps, dp_du, dp_dv);
 
+    /* Degenerate Jacobian evaluations. */
+    if (c_du.x == FLT_MAX || c_dv.x == FLT_MAX)
+      return false;
+
     const float dc1_du = (c_du.x - c.x) / eps;
     const float dc2_du = (c_du.y - c.y) / eps;
     const float dc1_dv = (c_dv.x - c.x) / eps;
@@ -1059,7 +1090,7 @@ ccl_device_inline bool spoly_newton_refine(float3 recv_P,
 
     const float det = dc1_du * dc2_dv - dc1_dv * dc2_du;
     if (fabsf(det) < 1e-20f)
-      break;
+      return false; /* Singular Jacobian — not a valid specular point. */
 
     const float inv_det = 1.0f / det;
     const float du = -inv_det * (dc2_dv * c.x - dc1_dv * c.y);
@@ -1070,6 +1101,15 @@ ccl_device_inline bool spoly_newton_refine(float3 recv_P,
 
     /* Bail if we've left the triangle. */
     if (u < -0.05f || v < -0.05f || u + v > 1.05f)
+      return false;
+  }
+
+  if (!converged) {
+    /* Did not converge within iteration limit.
+     * Check if final residual is at least reasonably small. */
+    const float2 c_final = spoly_halfvector_constraint(
+        recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v, dp_du, dp_dv);
+    if (c_final.x == FLT_MAX || fabsf(c_final.x) > 1e-4f || fabsf(c_final.y) > 1e-4f)
       return false;
   }
 
@@ -1590,7 +1630,11 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           }
 
           /* Geometric normal for the triangle (account for negative scale). */
-          float3 spec_ng = normalize(cross(verts[1] - verts[0], verts[2] - verts[0]));
+          const float3 cross_ng = cross(verts[1] - verts[0], verts[2] - verts[0]);
+          const float cross_ng_len = len(cross_ng);
+          if (cross_ng_len < 1e-10f)
+            continue; /* Degenerate triangle — skip. */
+          float3 spec_ng = cross_ng / cross_ng_len;
           if (object_flags & SD_OBJECT_NEGATIVE_SCALE) {
             spec_ng = -spec_ng;
           }
