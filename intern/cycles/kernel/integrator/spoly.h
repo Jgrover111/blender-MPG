@@ -1583,6 +1583,11 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
         if (num_solutions == 0)
           continue;
 
+        /* Track accepted (u,v) for duplicate detection (reference uses L1 < 1e-3). */
+        float accepted_u[SPOLY_MAX_ROOTS];
+        float accepted_v[SPOLY_MAX_ROOTS];
+        int num_accepted = 0;
+
         /* Validate each solution with Newton refinement. */
         for (int si = 0; si < num_solutions; si++) {
           float u = solutions[si].u;
@@ -1602,6 +1607,19 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
                               &u,
                               &v);
 
+          /* Skip duplicate solutions (multiple roots converging to same point). */
+          {
+            bool is_duplicate = false;
+            for (int di = 0; di < num_accepted; di++) {
+              if (fabsf(u - accepted_u[di]) + fabsf(v - accepted_v[di]) < 1e-3f) {
+                is_duplicate = true;
+                break;
+              }
+            }
+            if (is_duplicate)
+              continue;
+          }
+
           /* Recompute position and normal at (possibly refined) (u,v). */
           const float w = 1.0f - u - v;
           const float3 spec_pos = w * verts[0] + u * verts[1] + v * verts[2];
@@ -1620,9 +1638,10 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
 
           if (!is_refraction) {
             const float3 H = normalize(-dir_to_spec + dir_to_light);
-            /* After Newton refinement, H should be very close to N.
-             * Use a relaxed threshold since we've already refined. */
-            if (dot(H, spec_N) < 0.3f)
+            /* After Newton refinement, H should be nearly aligned with N.
+             * The reference implementation uses residual < 1e-5 which
+             * corresponds to dot(H, N) very close to 1.0. */
+            if (dot(H, spec_N) < 0.95f)
               continue;
             if (dot(-dir_to_spec, spec_N) < 0.0f || dot(dir_to_light, spec_N) < 0.0f)
               continue;
@@ -1683,6 +1702,13 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
             }
           }
 
+          /* Record this solution for duplicate detection. */
+          if (num_accepted < SPOLY_MAX_ROOTS) {
+            accepted_u[num_accepted] = u;
+            accepted_v[num_accepted] = v;
+            num_accepted++;
+          }
+
           /* === Valid specular path found. Compute contribution. === */
 
           /* Evaluate receiver BSDF toward the specular point. */
@@ -1730,12 +1756,56 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           const float dw0_dx1 = cos_at_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
           const float G = fminf(dw0_dx1, 8.0f);
 
-          /* Fresnel at specular point (dielectric reflection).
-           * TODO: evaluate actual specular BSDF closure for proper IOR. */
-          const float cos_i_spec = fabsf(dot(-dir_to_spec, spec_N));
-          const float F = fresnel_dielectric_cos(cos_i_spec, 1.5f);
+          /* Evaluate specular BSDF at the specular point.
+           * Re-setup sd_mnee at the specular vertex (light_sample_shader_eval
+           * overwrote it) and evaluate the shader to get closures. */
+          shader_setup_from_sample(kg,
+                                   sd_mnee,
+                                   spec_pos,
+                                   spec_N,
+                                   -dir_to_spec,
+                                   tri_shader_val,
+                                   caster_object,
+                                   prim,
+                                   u,
+                                   v,
+                                   dist_to_spec,
+                                   sd->time,
+                                   false,
+                                   false);
 
-          bsdf_eval_mul(throughput, F * G);
+          surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
+              kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
+
+          /* Find the specular/glossy closure and evaluate its Fresnel contribution.
+           * This replaces the hardcoded IOR=1.5, properly handling Glass BSDF,
+           * Glossy BSDF, Principled BSDF, and metallic materials. */
+          Spectrum spec_contribution = zero_spectrum();
+          for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
+            ccl_private ShaderClosure *sc = &sd_mnee->closure[ci];
+            if (CLOSURE_IS_BSDF_GLOSSY(sc->type) || CLOSURE_IS_GLASS(sc->type)) {
+              ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)sc;
+              const float cos_i = fabsf(dot(-dir_to_spec, spec_N));
+              Spectrum reflectance, transmittance;
+              microfacet_fresnel(kg, mbsdf, cos_i, nullptr, &reflectance, &transmittance);
+
+              if (!is_refraction) {
+                spec_contribution = sc->weight * reflectance;
+              }
+              else {
+                spec_contribution = sc->weight * transmittance;
+              }
+              break;
+            }
+          }
+
+          /* Fallback: if no specular closure found, use basic dielectric Fresnel. */
+          if (is_zero(spec_contribution)) {
+            const float cos_i = fabsf(dot(-dir_to_spec, spec_N));
+            spec_contribution = make_spectrum(fresnel_dielectric_cos(cos_i, 1.5f));
+          }
+
+          bsdf_eval_mul(throughput, spec_contribution * G);
 
           /* Restore bounce state. */
           INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
