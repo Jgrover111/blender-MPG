@@ -356,14 +356,19 @@ ccl_device
 
   int mnee_vertex_count = 0;  // NOLINT
 
+  /* Spoly caustic contribution to be added to regular direct lighting.
+   * Computed before MNEE/regular path so we can merge both into one shadow ray. */
+  BsdfEval spoly_eval ccl_optional_struct_init;
+  bool has_spoly_contribution = false;
+
   const bool use_spoly = kernel_data.integrator.use_specular_polynomials;
 
   if (use_spoly) {
     /* When Specular Polynomials is enabled, it REPLACES MNEE entirely.
-     * Spoly caustics are ADDITIVE: they launch a separate shadow ray
-     * for the caustic contribution and let regular direct lighting proceed.
-     * This is correct for reflection caustics where the direct path to the
-     * light is usually not blocked by the caster. */
+     * The spoly caustic contribution is ADDITIVE: it gets merged into
+     * the regular direct lighting bsdf_eval so both share one shadow ray.
+     * For reflection caustics the direct recv->light path is unblocked
+     * (the mirror reflects but doesn't occlude), so this is correct. */
     if (ls.type != LIGHT_TRIANGLE) {
       const bool use_caustics = kernel_data_fetch(lights, ls.prim).use_caustics;
       if (use_caustics) {
@@ -377,51 +382,12 @@ ccl_device
           /* Use a copy of ls since spoly modifies it via light_sample_update.
            * The original ls is preserved for regular direct lighting below. */
           LightSample ls_spoly = ls;
-          BsdfEval spoly_eval ccl_optional_struct_init;
 
           const int spoly_found = kernel_path_spoly_sample(
               kg, state, sd, emission_sd, rng_state, &ls_spoly, &spoly_eval);
 
           if (spoly_found > 0) {
-            /* Launch a separate shadow ray for the caustic contribution. */
-            Ray spoly_ray ccl_optional_struct_init;
-            light_sample_to_surface_shadow_ray(kg, emission_sd, &ls_spoly, &spoly_ray);
-
-            IntegratorShadowState spoly_shadow = integrate_direct_light_shadow_init_common(
-                kg,
-                state,
-                &spoly_ray,
-                bsdf_eval_sum(&spoly_eval),
-                ls_spoly.group,
-                spoly_found);
-
-            uint32_t spoly_shadow_flag = INTEGRATOR_STATE(state, path, flag);
-            if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) {
-              PackedSpectrum pass_diffuse_weight;
-              PackedSpectrum pass_glossy_weight;
-              if (spoly_shadow_flag & PATH_RAY_ANY_PASS) {
-                pass_diffuse_weight = INTEGRATOR_STATE(state, path, pass_diffuse_weight);
-                pass_glossy_weight = INTEGRATOR_STATE(state, path, pass_glossy_weight);
-              }
-              else {
-                spoly_shadow_flag |= PATH_RAY_SURFACE_PASS;
-                pass_diffuse_weight = PackedSpectrum(
-                    bsdf_eval_pass_diffuse_weight(&spoly_eval));
-                pass_glossy_weight = PackedSpectrum(
-                    bsdf_eval_pass_glossy_weight(&spoly_eval));
-              }
-              INTEGRATOR_STATE_WRITE(
-                  spoly_shadow, shadow_path, pass_diffuse_weight) = pass_diffuse_weight;
-              INTEGRATOR_STATE_WRITE(
-                  spoly_shadow, shadow_path, pass_glossy_weight) = pass_glossy_weight;
-            }
-            INTEGRATOR_STATE_WRITE(spoly_shadow, shadow_path, flag) = spoly_shadow_flag;
-
-            if (is_transmission) {
-#ifdef __VOLUME__
-              volume_stack_enter_exit<true>(kg, spoly_shadow, sd);
-#endif
-            }
+            has_spoly_contribution = true;
           }
           /* Fall through to regular direct lighting with the original ls. */
         }
@@ -462,7 +428,7 @@ ccl_device
   {
     const Spectrum light_eval = light_sample_shader_eval(
         kg, state, emission_sd, &ls, sd->time);
-    if (is_zero(light_eval)) {
+    if (is_zero(light_eval) && !has_spoly_contribution) {
       return;
     }
 
@@ -472,9 +438,16 @@ ccl_device
     const float mis_weight = light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
     bsdf_eval_mul(&bsdf_eval, light_eval / ls.pdf * mis_weight);
 
+    /* Add specular polynomial caustic contribution (no MIS — deterministic path). */
+    if (has_spoly_contribution) {
+      bsdf_eval.diffuse += spoly_eval.diffuse;
+      bsdf_eval.glossy += spoly_eval.glossy;
+      bsdf_eval.sum += spoly_eval.sum;
+    }
+
     /* Path termination. */
     const float terminate = path_state_rng_light_termination(kg, rng_state);
-    if (light_sample_terminate(kg, &bsdf_eval, terminate)) {
+    if (light_sample_terminate(kg, &bsdf_eval, terminate) && !has_spoly_contribution) {
       return;
     }
 
