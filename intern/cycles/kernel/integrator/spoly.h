@@ -33,8 +33,8 @@ CCL_NAMESPACE_BEGIN
 #define SPOLY_MAX_BVCOEFFS 7 /* degree+1 for bivariate, max T=6 -> 7 */
 #define SPOLY_MAX_ROOTS 32
 #define SPOLY_BISECT_ITERATIONS 20
-#define SPOLY_ROOT_EPS 1e-6f
-#define SPOLY_NUM_DICHOTOMY_SAMPLES 65
+#define SPOLY_ROOT_EPS 1e-4f
+#define SPOLY_NUM_DICHOTOMY_SAMPLES 129
 
 /* ============================================================================
  * Univariate polynomial: P(t) = c[0] + c[1]*t + ... + c[n]*t^n
@@ -1788,9 +1788,10 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
            * Clamp to prevent fireflies from degenerate configurations. */
           const float G = fminf(dw0_dx1 * fmaxf(dx1_dxlight, 0.0f), 100.0f);
 
-          /* Evaluate specular BSDF at the specular point.
-           * Re-setup sd_mnee (light_sample_shader_eval may have overwritten it)
-           * and evaluate the shader to get closures. */
+          /* Evaluate Fresnel at the specular point.
+           * Setup sd_mnee to get closures and extract IOR, then use scalar
+           * dielectric Fresnel. This avoids per-channel color bias from
+           * sc->weight which includes shader tree weighting. */
           shader_setup_from_sample(kg,
                                    sd_mnee,
                                    spec_pos,
@@ -1809,30 +1810,20 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
               kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
 
-          /* Find the specular/glossy closure and evaluate its Fresnel. */
-          Spectrum spec_contribution = zero_spectrum();
+          /* Extract IOR from the first specular closure, use scalar Fresnel. */
+          float spec_ior = 1.5f;
           for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
             ccl_private ShaderClosure *sc = &sd_mnee->closure[ci];
             if (CLOSURE_IS_BSDF_GLOSSY(sc->type) || CLOSURE_IS_GLASS(sc->type)) {
               ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)sc;
-              const float cos_i = fabsf(dot(-dir_to_spec, spec_N));
-              Spectrum reflectance, transmittance;
-              microfacet_fresnel(kg, mbsdf, cos_i, nullptr, &reflectance, &transmittance);
-
-              if (!is_refraction) {
-                spec_contribution += sc->weight * reflectance;
-              }
-              else {
-                spec_contribution += sc->weight * transmittance;
-              }
+              spec_ior = mbsdf->ior;
+              break;
             }
           }
 
-          /* Fallback: if no specular closure found, use basic dielectric Fresnel. */
-          if (is_zero(spec_contribution)) {
-            const float cos_i = fabsf(dot(-dir_to_spec, spec_N));
-            spec_contribution = make_spectrum(fresnel_dielectric_cos(cos_i, 1.5f));
-          }
+          const float cos_i = fabsf(dot(-dir_to_spec, spec_N));
+          const Spectrum spec_contribution = make_spectrum(
+              fresnel_dielectric_cos(cos_i, spec_ior));
 
           bsdf_eval_mul(&solution_eval, spec_contribution * G);
 
