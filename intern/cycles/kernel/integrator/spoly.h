@@ -980,7 +980,7 @@ ccl_device_inline int spoly_solve(float3 xD,
  * Matches the reference implementation's Newton refinement step.
  * ============================================================================ */
 
-#define SPOLY_NEWTON_MAX_ITER 8
+#define SPOLY_NEWTON_MAX_ITER 20
 #define SPOLY_NEWTON_EPS 1e-5f
 #define SPOLY_NEWTON_CONVERGE_THRESH 1e-8f
 
@@ -1499,6 +1499,7 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
 
   /* Global solver call budget across all casters. */
   int total_solver_calls = 0;
+  int total_found = 0;
 
   /* Iterate over each caustic caster object's 4-ary tree. */
   for (int ci = 0; ci < num_caster_objects; ci++) {
@@ -1636,12 +1637,15 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
 
           float3 spec_N = normalize(w * normals[0] + u * normals[1] + v * normals[2]);
 
+          /* Geometric normal for transfer matrix. */
+          const float3 spec_ng = normalize(cross(verts[1] - verts[0], verts[2] - verts[0]));
+
           if (!is_refraction) {
             const float3 H = normalize(-dir_to_spec + dir_to_light);
             /* After Newton refinement, H should be close to N.
-             * Use a relaxed threshold to accept solutions from bisection
-             * fallback where Newton didn't converge fully. */
-            if (dot(H, spec_N) < 0.3f)
+             * Use a moderate threshold: tight enough to reject bad solutions
+             * but loose enough for bisection fallback. */
+            if (dot(H, spec_N) < 0.5f)
               continue;
             if (dot(-dir_to_spec, spec_N) < 0.0f || dot(dir_to_light, spec_N) < 0.0f)
               continue;
@@ -1711,11 +1715,7 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
 
           /* === Valid specular path found. Compute contribution. === */
 
-          /* Evaluate receiver BSDF toward the specular point. */
-          surface_shader_bsdf_eval(kg, state, sd, dir_to_spec, throughput, ls->shader);
-
-          /* Update light sample relative to specular point (must happen before
-           * light_sample_shader_eval so ls has correct data). */
+          /* Save/restore bounce state around light evaluation. */
           const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
           const int transmission_bounce = INTEGRATOR_STATE(state, path, transmission_bounce);
           const int diffuse_bounce = INTEGRATOR_STATE(state, path, diffuse_bounce);
@@ -1724,7 +1724,15 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce + 1;
           INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce + 1;
 
-          light_sample_update(kg, ls, spec_pos, spec_N, path_flag);
+          /* Use a separate BsdfEval for this solution so we can accumulate. */
+          BsdfEval solution_eval ccl_optional_struct_init;
+
+          /* Evaluate receiver BSDF toward the specular point. */
+          surface_shader_bsdf_eval(kg, state, sd, dir_to_spec, &solution_eval, ls->shader);
+
+          /* Update light sample relative to specular point. */
+          LightSample ls_solution = *ls;
+          light_sample_update(kg, &ls_solution, spec_pos, spec_N, path_flag);
 
           /* Setup sd_mnee at specular point for light evaluation. */
           const int tri_shader_val = kernel_data_fetch(tri_shader, prim);
@@ -1744,33 +1752,100 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
                                    false);
 
           const Spectrum light_eval = light_sample_shader_eval(
-              kg, state, sd_mnee, ls, sd->time);
-          bsdf_eval_mul(throughput, light_eval / ls->pdf);
+              kg, state, sd_mnee, &ls_solution, sd->time);
+          if (is_zero(light_eval)) {
+            INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
+            INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce;
+            INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce;
+            continue;
+          }
+          bsdf_eval_mul(&solution_eval, light_eval / ls_solution.pdf);
 
-          /* Generalized geometry term.
+          /* Generalized geometry term with transfer matrix.
            * dw0_dx1 converts specular point area to receiver solid angle.
-           * TODO: add transfer matrix (dx1_dxlight) once it handles point lights
-           * correctly. For now, just use the solid angle Jacobian with a moderate
-           * clamp to prevent fireflies while keeping the caustic visible. */
+           * dx1_dxlight (transfer matrix) maps light perturbations to specular
+           * vertex perturbations — this captures the caustic focusing effect. */
           const float cos_at_spec = fabsf(dot(dir_to_spec, spec_N));
           const float dw0_dx1 = cos_at_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
-          const float G = fminf(dw0_dx1, 8.0f);
 
-          /* Specular BSDF contribution at the specular point.
-           * Use dielectric Fresnel as a simple, reliable approximation.
-           * TODO: evaluate actual BSDF closures for metallic/complex materials. */
-          const float cos_i = fabsf(dot(-dir_to_spec, spec_N));
-          const Spectrum spec_contribution = make_spectrum(
-              fresnel_dielectric_cos(cos_i, 1.5f));
+          const float dx1_dxlight = spoly_compute_transfer_matrix(
+              recv_P,
+              light_P,
+              ls_solution.Ng,
+              spec_pos,
+              spec_N,
+              spec_ng,
+              verts[0],
+              verts[1],
+              verts[2],
+              normals[0],
+              normals[1],
+              normals[2],
+              u,
+              v);
 
-          bsdf_eval_mul(throughput, spec_contribution * G);
+          /* Full geometry term: solid angle Jacobian * transfer matrix.
+           * Clamp to prevent fireflies from degenerate configurations. */
+          const float G = fminf(dw0_dx1 * fmaxf(dx1_dxlight, 0.0f), 100.0f);
 
-          /* Restore bounce state. */
+          /* Evaluate specular BSDF at the specular point.
+           * Re-setup sd_mnee (light_sample_shader_eval may have overwritten it)
+           * and evaluate the shader to get closures. */
+          shader_setup_from_sample(kg,
+                                   sd_mnee,
+                                   spec_pos,
+                                   spec_N,
+                                   -dir_to_spec,
+                                   tri_shader_val,
+                                   caster_object,
+                                   prim,
+                                   u,
+                                   v,
+                                   dist_to_spec,
+                                   sd->time,
+                                   false,
+                                   false);
+
+          surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
+              kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
+
+          /* Find the specular/glossy closure and evaluate its Fresnel. */
+          Spectrum spec_contribution = zero_spectrum();
+          for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
+            ccl_private ShaderClosure *sc = &sd_mnee->closure[ci];
+            if (CLOSURE_IS_BSDF_GLOSSY(sc->type) || CLOSURE_IS_GLASS(sc->type)) {
+              ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)sc;
+              const float cos_i = fabsf(dot(-dir_to_spec, spec_N));
+              Spectrum reflectance, transmittance;
+              microfacet_fresnel(kg, mbsdf, cos_i, nullptr, &reflectance, &transmittance);
+
+              if (!is_refraction) {
+                spec_contribution += sc->weight * reflectance;
+              }
+              else {
+                spec_contribution += sc->weight * transmittance;
+              }
+            }
+          }
+
+          /* Fallback: if no specular closure found, use basic dielectric Fresnel. */
+          if (is_zero(spec_contribution)) {
+            const float cos_i = fabsf(dot(-dir_to_spec, spec_N));
+            spec_contribution = make_spectrum(fresnel_dielectric_cos(cos_i, 1.5f));
+          }
+
+          bsdf_eval_mul(&solution_eval, spec_contribution * G);
+
+          /* Accumulate this solution into the total throughput. */
+          throughput->diffuse += solution_eval.diffuse;
+          throughput->glossy += solution_eval.glossy;
+          throughput->sum += solution_eval.sum;
+          total_found++;
+
+          /* Restore bounce state for next solution. */
           INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
           INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce;
           INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce;
-
-          return 1;
         }
       }
       else {
@@ -1839,7 +1914,7 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
     }
   }
 
-  return 0;
+  return total_found;
 }
 
 CCL_NAMESPACE_END
