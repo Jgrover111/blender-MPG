@@ -619,7 +619,13 @@ ccl_device_inline int spoly_find_roots_dichotomy(
   int num_roots = 0;
   const int num_samples = SPOLY_NUM_DICHOTOMY_SAMPLES;
 
+  /* Streaming approach: track previous two values for sign-change detection
+   * and tangential root detection (local minima near zero). */
+  float prev_prev_val = 0.0f;
   float prev_val = spoly_eval_bezout_det_at_v(bezout, n, 0.0f);
+
+  /* Track running max for relative near-zero threshold. */
+  float max_abs = fabsf(prev_val);
 
   if (fabsf(prev_val) < 1e-30f) {
     if (num_roots < SPOLY_MAX_ROOTS) {
@@ -630,6 +636,7 @@ ccl_device_inline int spoly_find_roots_dichotomy(
   for (int s = 1; s < num_samples; s++) {
     float v = (float)s / (float)(num_samples - 1);
     float val = spoly_eval_bezout_det_at_v(bezout, n, v);
+    max_abs = fmaxf(max_abs, fabsf(val));
 
     if (fabsf(val) < 1e-30f) {
       if (num_roots < SPOLY_MAX_ROOTS) {
@@ -637,7 +644,7 @@ ccl_device_inline int spoly_find_roots_dichotomy(
       }
     }
     else if (prev_val * val < 0.0f && fabsf(prev_val) > 1e-30f) {
-      /* Sign change detected - bisect to find root. */
+      /* Sign change detected — bisect to find root. */
       float lo = (float)(s - 1) / (float)(num_samples - 1);
       float hi = v;
       float lo_val = prev_val;
@@ -662,7 +669,22 @@ ccl_device_inline int spoly_find_roots_dichotomy(
         }
       }
     }
+    else if (s >= 2) {
+      /* Check if the PREVIOUS sample was a tangential root (local minimum
+       * near zero). We check one step late so both neighbors are available. */
+      const float near_zero_thresh = fmaxf(max_abs * 1e-4f, 1e-20f);
+      if (fabsf(prev_val) < near_zero_thresh &&
+          fabsf(prev_val) <= fabsf(prev_prev_val) &&
+          fabsf(prev_val) <= fabsf(val))
+      {
+        float prev_v = (float)(s - 1) / (float)(num_samples - 1);
+        if (num_roots < SPOLY_MAX_ROOTS) {
+          roots[num_roots++] = clamp(prev_v, 0.0f, 1.0f);
+        }
+      }
+    }
 
+    prev_prev_val = prev_val;
     prev_val = val;
   }
 
@@ -934,20 +956,25 @@ ccl_device_inline int spoly_solve(float3 xD,
     int num_u_roots = spoly_find_roots_in_01(&cxz_u, u_roots);
 
     for (int ui = 0; ui < num_u_roots; ui++) {
-      float u = u_roots[ui];
+      float u_sol = u_roots[ui];
 
-      /* Check barycentric constraint: u + v <= 1. */
-      if (u < -SPOLY_ROOT_EPS || v < -SPOLY_ROOT_EPS || (u + v) > 1.0f + SPOLY_ROOT_EPS)
+      /* Check barycentric constraint: u + v <= 1.
+       * Use local copies to avoid mutating v across sibling u-roots. */
+      float v_sol = v;
+      if (u_sol < -SPOLY_ROOT_EPS || v_sol < -SPOLY_ROOT_EPS ||
+          (u_sol + v_sol) > 1.0f + SPOLY_ROOT_EPS)
+      {
         continue;
+      }
 
-      u = clamp(u, 0.0f, 1.0f);
-      v = clamp(v, 0.0f, 1.0f - u);
+      u_sol = clamp(u_sol, 0.0f, 1.0f);
+      v_sol = clamp(v_sol, 0.0f, 1.0f - u_sol);
 
       /* Verify the other constraint is also satisfied. */
       SPolyUni czy_u;
-      spoly_biv_eval_at_v(&Czy, v, &czy_u);
-      float czy_val = spoly_uni_eval(&czy_u, u);
-      float cxz_val = spoly_uni_eval(&cxz_u, u);
+      spoly_biv_eval_at_v(&Czy, v_sol, &czy_u);
+      float czy_val = spoly_uni_eval(&czy_u, u_sol);
+      float cxz_val = spoly_uni_eval(&cxz_u, u_sol);
 
       /* Tolerance: BOTH constraints must be near zero for a valid solution.
        * Use relative tolerance since divideByMax upscales coefficients. */
@@ -956,10 +983,10 @@ ccl_device_inline int spoly_solve(float3 xD,
         continue;
 
       if (num_solutions < SPOLY_MAX_ROOTS) {
-        float w = 1.0f - u - v;
-        solutions[num_solutions].u = u;
-        solutions[num_solutions].v = v;
-        solutions[num_solutions].position = w * P0 + u * P1 + v * P2;
+        float w = 1.0f - u_sol - v_sol;
+        solutions[num_solutions].u = u_sol;
+        solutions[num_solutions].v = v_sol;
+        solutions[num_solutions].position = w * P0 + u_sol * P1 + v_sol * P2;
         num_solutions++;
       }
     }
@@ -1683,7 +1710,9 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
             }
           }
 
-          /* Visibility check: specular point to light. */
+          /* Visibility check: specular point to light.
+           * Accept near-start hits on the caster itself (adjacent triangle
+           * at shared edge) but reject other obstructions. */
           {
             Ray vis_ray;
             vis_ray.P = spec_pos;
@@ -1700,7 +1729,12 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
 
             Intersection vis_isect;
             if (scene_intersect(kg, &vis_ray, PATH_RAY_TRANSMIT, &vis_isect)) {
-              if (fabsf(dist_to_light - vis_isect.t) > 0.01f) {
+              const int hit_object = (vis_isect.object == OBJECT_NONE) ?
+                                         kernel_data_fetch(prim_object, vis_isect.prim) :
+                                         vis_isect.object;
+              /* Allow near-start hits on the caster (adjacent triangle at
+               * shared edge), reject everything else. */
+              if (hit_object != caster_object || vis_isect.t > 0.01f) {
                 continue;
               }
             }
