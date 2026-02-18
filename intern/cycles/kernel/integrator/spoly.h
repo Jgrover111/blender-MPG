@@ -1668,12 +1668,9 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           const float3 spec_ng = normalize(cross(verts[1] - verts[0], verts[2] - verts[0]));
 
           if (!is_refraction) {
-            const float3 H = normalize(-dir_to_spec + dir_to_light);
-            /* After Newton refinement, H should be close to N.
-             * Use a moderate threshold: tight enough to reject bad solutions
-             * but loose enough for bisection fallback. */
-            if (dot(H, spec_N) < 0.5f)
-              continue;
+            /* Hemisphere check: both directions must be on the correct side
+             * of the surface. No H·N threshold — the reference validates
+             * solutions purely via Newton convergence residual. */
             if (dot(-dir_to_spec, spec_N) < 0.0f || dot(dir_to_light, spec_N) < 0.0f)
               continue;
           }
@@ -1861,10 +1858,20 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
 
           bsdf_eval_mul(&solution_eval, spec_contribution * G);
 
-          /* Accumulate this solution into the total throughput. */
-          throughput->diffuse += solution_eval.diffuse;
-          throughput->glossy += solution_eval.glossy;
-          throughput->sum += solution_eval.sum;
+          /* Accumulate this solution into the total throughput.
+           * Use assignment for the first solution to avoid reading
+           * uninitialized memory (ccl_optional_struct_init is empty
+           * on CUDA, so throughput starts as garbage). */
+          if (total_found == 0) {
+            throughput->diffuse = solution_eval.diffuse;
+            throughput->glossy = solution_eval.glossy;
+            throughput->sum = solution_eval.sum;
+          }
+          else {
+            throughput->diffuse += solution_eval.diffuse;
+            throughput->glossy += solution_eval.glossy;
+            throughput->sum += solution_eval.sum;
+          }
           total_found++;
 
           /* Restore bounce state for next solution. */
