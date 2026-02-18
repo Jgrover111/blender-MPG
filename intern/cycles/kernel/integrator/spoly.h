@@ -1858,20 +1858,10 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
 
           bsdf_eval_mul(&solution_eval, spec_contribution * G);
 
-          /* Accumulate this solution into the total throughput.
-           * Use assignment for the first solution to avoid reading
-           * uninitialized memory (ccl_optional_struct_init is empty
-           * on CUDA, so throughput starts as garbage). */
-          if (total_found == 0) {
-            throughput->diffuse = solution_eval.diffuse;
-            throughput->glossy = solution_eval.glossy;
-            throughput->sum = solution_eval.sum;
-          }
-          else {
-            throughput->diffuse += solution_eval.diffuse;
-            throughput->glossy += solution_eval.glossy;
-            throughput->sum += solution_eval.sum;
-          }
+          /* Accumulate this solution into the total throughput. */
+          throughput->diffuse += solution_eval.diffuse;
+          throughput->glossy += solution_eval.glossy;
+          throughput->sum += solution_eval.sum;
           total_found++;
 
           /* Restore bounce state for next solution. */
