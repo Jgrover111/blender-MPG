@@ -1858,11 +1858,17 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
 
           bsdf_eval_mul(&solution_eval, spec_contribution * G);
 
-          /* Accumulate this solution into the total throughput. */
-          throughput->diffuse += solution_eval.diffuse;
-          throughput->glossy += solution_eval.glossy;
-          throughput->sum += solution_eval.sum;
-          total_found++;
+          /* DEBUG: Override with known white value to test if contribution
+           * pipeline is working. If caustic appears white, the solver and
+           * merge work. If no caustic, the merge/shadow path is broken. */
+          {
+            const Spectrum debug_white = make_spectrum(10.0f);
+            throughput->diffuse = debug_white;
+            throughput->glossy = zero_spectrum();
+            throughput->sum = debug_white;
+          }
+          total_found = 1;
+          goto spoly_done;
 
           /* Restore bounce state for next solution. */
           INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
@@ -1936,6 +1942,7 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
     }
   }
 
+spoly_done:
   return total_found;
 }
 
