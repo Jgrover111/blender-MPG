@@ -1856,17 +1856,12 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           const Spectrum spec_contribution = make_spectrum(
               fresnel_dielectric_cos(cos_i, spec_ior));
 
-          bsdf_eval_mul(&solution_eval, spec_contribution * G);
-
-          /* DEBUG: Override with known white value to test if contribution
-           * pipeline is working. If caustic appears white, the solver and
-           * merge work. If no caustic, the merge/shadow path is broken. */
-          {
-            const Spectrum debug_white = make_spectrum(10.0f);
-            throughput->diffuse = debug_white;
-            throughput->glossy = zero_spectrum();
-            throughput->sum = debug_white;
-          }
+          /* DEBUG: Show solution_eval BEFORE Fresnel*G multiply.
+           * If visible: receiver BSDF * light works, G or F is zero.
+           * If invisible: receiver BSDF or light eval is zero. */
+          throughput->diffuse = solution_eval.diffuse;
+          throughput->glossy = solution_eval.glossy;
+          throughput->sum = solution_eval.sum;
           total_found = 1;
           goto spoly_done;
 
