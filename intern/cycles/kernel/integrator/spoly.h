@@ -1251,11 +1251,16 @@ ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
                                                        float u,
                                                        float v)
 {
+  /* Return negative error codes for diagnostic:
+   * -1: ili fail, -2: ilo fail, -3: len_H fail, -4: n_len fail,
+   * -5: dp_du fail, -6: dp_dv fail, -7: b_det fail.
+   * Positive: actual |det(Tp)| value. */
+
   /* Direction from receiver to specular point. */
   float3 wi = recv_P - spec_P;
   float ili = len(wi);
   if (ili < 1e-6f)
-    return 0.0f;
+    return -1.0f;
   ili = 1.0f / ili;
   wi *= ili;
 
@@ -1263,7 +1268,7 @@ ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
   float3 wo = light_P - spec_P;
   float ilo = len(wo);
   if (ilo < 1e-6f)
-    return 0.0f;
+    return -2.0f;
   ilo = 1.0f / ilo;
   wo *= ilo;
 
@@ -1271,7 +1276,7 @@ ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
   float3 H = -(wi + wo);
   const float len_H = len(H);
   if (len_H < 1e-8f)
-    return 0.0f;
+    return -3.0f;
   const float ilh = 1.0f / len_H;
   H *= ilh;
 
@@ -1294,7 +1299,7 @@ ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
   const float3 n_raw = w * N0 + u * N1 + v * N2;
   const float n_len = len(n_raw);
   if (n_len < 1e-10f)
-    return 0.0f;
+    return -4.0f;
   const float inv_n_len = 1.0f / n_len;
 
   float3 dn_du = inv_n_len * (N1 - N0);
@@ -1306,7 +1311,7 @@ ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
    * applying same transform to (dn_du, dn_dv). */
   float len_dp = len(dp_du);
   if (len_dp < 1e-10f)
-    return 0.0f;
+    return -5.0f;
   float inv_len = 1.0f / len_dp;
   dp_du *= inv_len;
   dn_du *= inv_len;
@@ -1317,7 +1322,7 @@ ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
 
   len_dp = len(dp_dv);
   if (len_dp < 1e-10f)
-    return 0.0f;
+    return -6.0f;
   inv_len = 1.0f / len_dp;
   dp_dv *= inv_len;
   dn_dv *= inv_len;
@@ -1372,7 +1377,7 @@ ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
   float4 b_inv;
   const float b_det = mat22_determinant(b);
   if (fabsf(b_det) < 1e-20f)
-    return 0.0f;
+    return -7.0f;
   b_inv = make_float4(b.w, -b.y, -b.z, b.x) / b_det;
 
   /* ---- Compute dc_dlight: constraint Jacobian w.r.t. light params ---- */
@@ -1394,9 +1399,6 @@ ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
 
   /* ---- Transfer matrix: Tp = -inv(b) * dc_dlight ---- */
   const float4 Tp = mat22_mult(b_inv, dc_dlight);
-  /* Note: MNEE uses -Li * dc_dlight. Since b_inv = -Li/det * adj(b), and we already
-   * have b_inv from mat22_inverse which includes the sign, we just multiply directly.
-   * The negation is absorbed into the sign of the determinant which we take fabsf of. */
 
   return fabsf(mat22_determinant(Tp));
 }
@@ -1868,19 +1870,15 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           }
           bsdf_eval_mul(&solution_eval, light_eval / ls_solution.pdf);
 
-          /* Generalized geometry term with transfer matrix.
-           * dw0_dx1 converts specular point area to receiver solid angle.
-           * dx1_dxlight (transfer matrix) maps light perturbations to specular
-           * vertex perturbations — this captures the caustic focusing effect.
-           *
-           * Use finite-difference transfer matrix for robustness. */
-          const float cos_at_spec = fabsf(dot(dir_to_spec, spec_N));
-          const float dw0_dx1 = cos_at_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
-
-          const float dx1_dxlight = spoly_compute_transfer_matrix_fd(
+          /* DIAGNOSTIC: Compute transfer matrix and return error codes.
+           * We only care about which stage fails, not the actual contribution. */
+          const float dx1_dxlight = spoly_compute_transfer_matrix(
               recv_P,
               light_P,
               ls_solution.Ng,
+              spec_pos,
+              spec_N,
+              spec_ng,
               verts[0],
               verts[1],
               verts[2],
@@ -1890,61 +1888,36 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
               u,
               v);
 
-          /* Full geometry term: solid angle Jacobian * transfer matrix.
-           * Clamp to prevent fireflies from degenerate configurations. */
-          const float G = fminf(dw0_dx1 * fmaxf(dx1_dxlight, 0.0f), 100.0f);
-
-          /* Evaluate Fresnel at the specular point.
-           * Setup sd_mnee to get closures and extract IOR, then use scalar
-           * dielectric Fresnel. This avoids per-channel color bias from
-           * sc->weight which includes shader tree weighting. */
-          shader_setup_from_sample(kg,
-                                   sd_mnee,
-                                   spec_pos,
-                                   spec_N,
-                                   -dir_to_spec,
-                                   tri_shader_val,
-                                   caster_object,
-                                   prim,
-                                   u,
-                                   v,
-                                   dist_to_spec,
-                                   sd->time,
-                                   false,
-                                   false);
-
-          surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
-              kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
-
-          /* Extract IOR from the first specular closure, use scalar Fresnel. */
-          float spec_ior = 1.5f;
-          for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
-            ccl_private ShaderClosure *sc = &sd_mnee->closure[ci];
-            if (CLOSURE_IS_BSDF_GLOSSY(sc->type) || CLOSURE_IS_GLASS(sc->type)) {
-              ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)sc;
-              spec_ior = mbsdf->ior;
-              break;
-            }
+          /* DIAGNOSTIC: Always output a visible value encoding which stage
+           * the transfer matrix reached. Check pixel values in Blender's
+           * image editor (N-panel > Image > color values) to identify the stage.
+           *
+           * Transfer matrix return codes:
+           *   -1: ili fail (recv-spec too close)
+           *   -2: ilo fail (spec-light too close)
+           *   -3: len_H fail (half vector degenerate)
+           *   -4: n_len fail (normal degenerate)
+           *   -5: dp_du fail (edge degenerate)
+           *   -6: dp_dv fail (edge degenerate after orthonormalization)
+           *   -7: b_det fail (b matrix singular)
+           *    0: det(Tp) is exactly zero
+           *   >0: SUCCESS — real |det(Tp)| value
+           *
+           * Diagnostic output (monochrome value):
+           *   Stage 1-6: 0.1 * stage (0.1 to 0.6 — dim)
+           *   Stage 7 (b_det): 0.7
+           *   det(Tp)==0: 0.8
+           *   SUCCESS: 0.9 */
+          solution_eval.diffuse = zero_spectrum();
+          solution_eval.glossy = zero_spectrum();
+          if (dx1_dxlight > 0.0f) {
+            solution_eval.sum = make_spectrum(0.9f);
           }
-
-          const float cos_i = fabsf(dot(-dir_to_spec, spec_N));
-          const Spectrum spec_contribution = make_spectrum(
-              fresnel_dielectric_cos(cos_i, spec_ior));
-
-          /* DIAGNOSTIC: Use real G from transfer matrix.
-           * If G is zero, output bright red so we can see which pixels fail.
-           * R=10 means b_det was near-zero (transfer matrix singular).
-           * G=10 means det(Tp) was zero but b was fine.
-           * Normal contribution means everything works. */
-          if (G > 0.0f) {
-            bsdf_eval_mul(&solution_eval, spec_contribution * G);
+          else if (dx1_dxlight == 0.0f) {
+            solution_eval.sum = make_spectrum(0.8f);
           }
           else {
-            /* Transfer matrix returned zero — show diagnostic.
-             * dx1_dxlight==0 could mean b_det was singular or det(Tp)==0. */
-            solution_eval.diffuse = zero_spectrum();
-            solution_eval.glossy = zero_spectrum();
-            solution_eval.sum = make_spectrum(dx1_dxlight == 0.0f ? 10.0f : 5.0f);
+            solution_eval.sum = make_spectrum(0.1f * (-dx1_dxlight));
           }
 
           /* Use = for first solution to avoid uninitialized memory. */
