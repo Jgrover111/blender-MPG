@@ -1163,6 +1163,79 @@ ccl_device_inline bool spoly_newton_refine(float3 recv_P,
  * dx1_dxlight = |det(transfer_matrix)|
  * ============================================================================ */
 
+/* Finite-difference transfer matrix: numerically robust alternative to the
+ * analytical constraint Jacobian approach. Uses the same half-vector constraint
+ * function as the solver, avoiding potential sign/frame mismatches. */
+ccl_device_inline float spoly_compute_transfer_matrix_fd(float3 recv_P,
+                                                          float3 light_P,
+                                                          float3 light_Ng,
+                                                          float3 P0,
+                                                          float3 P1,
+                                                          float3 P2,
+                                                          float3 N0,
+                                                          float3 N1,
+                                                          float3 N2,
+                                                          float u,
+                                                          float v)
+{
+  const float3 dp_du = P1 - P0;
+  const float3 dp_dv = P2 - P0;
+  const float eps = 1e-4f;
+
+  /* Constraint at current solution. */
+  const float2 c0 = spoly_halfvector_constraint(
+      recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v, dp_du, dp_dv);
+  if (c0.x == FLT_MAX)
+    return 0.0f;
+
+  /* Jacobian dc/d(u,v) via finite differences. */
+  const float2 c_du = spoly_halfvector_constraint(
+      recv_P, light_P, P0, P1, P2, N0, N1, N2, u + eps, v, dp_du, dp_dv);
+  const float2 c_dv = spoly_halfvector_constraint(
+      recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v + eps, dp_du, dp_dv);
+  if (c_du.x == FLT_MAX || c_dv.x == FLT_MAX)
+    return 0.0f;
+
+  const float inv_eps = 1.0f / eps;
+  const float4 J_uv = make_float4((c_du.x - c0.x) * inv_eps,
+                                   (c_dv.x - c0.x) * inv_eps,
+                                   (c_du.y - c0.y) * inv_eps,
+                                   (c_dv.y - c0.y) * inv_eps);
+
+  /* Invert J_uv. */
+  const float J_uv_det = mat22_determinant(J_uv);
+  if (fabsf(J_uv_det) < 1e-20f)
+    return 0.0f;
+  const float4 J_uv_inv = make_float4(J_uv.w, -J_uv.y, -J_uv.z, J_uv.x) / J_uv_det;
+
+  /* Jacobian dc/d(light) via finite differences.
+   * Perturb light position in its tangent plane. */
+  float3 light_s, light_t;
+  make_orthonormals(light_Ng, &light_s, &light_t);
+
+  const float2 c_ls = spoly_halfvector_constraint(
+      recv_P, light_P + eps * light_s, P0, P1, P2, N0, N1, N2, u, v, dp_du, dp_dv);
+  const float2 c_lt = spoly_halfvector_constraint(
+      recv_P, light_P + eps * light_t, P0, P1, P2, N0, N1, N2, u, v, dp_du, dp_dv);
+  if (c_ls.x == FLT_MAX || c_lt.x == FLT_MAX)
+    return 0.0f;
+
+  const float4 J_light = make_float4((c_ls.x - c0.x) * inv_eps,
+                                      (c_lt.x - c0.x) * inv_eps,
+                                      (c_ls.y - c0.y) * inv_eps,
+                                      (c_lt.y - c0.y) * inv_eps);
+
+  /* Transfer matrix in barycentric coords: d(u,v)/d(light_s,light_t). */
+  const float4 Tp_bary = mat22_mult(J_uv_inv, J_light);
+
+  /* Convert from barycentric Jacobian to surface area ratio:
+   * |det(dx_spec/dx_light)| = |det(Tp_bary)| * |cross(dp_du, dp_dv)|
+   * because the light tangent frame is orthonormal. */
+  const float area_factor = len(cross(dp_du, dp_dv));
+
+  return fabsf(mat22_determinant(Tp_bary)) * area_factor;
+}
+
 ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
                                                        float3 light_P,
                                                        float3 light_Ng,
@@ -1798,17 +1871,16 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           /* Generalized geometry term with transfer matrix.
            * dw0_dx1 converts specular point area to receiver solid angle.
            * dx1_dxlight (transfer matrix) maps light perturbations to specular
-           * vertex perturbations — this captures the caustic focusing effect. */
+           * vertex perturbations — this captures the caustic focusing effect.
+           *
+           * Use finite-difference transfer matrix for robustness. */
           const float cos_at_spec = fabsf(dot(dir_to_spec, spec_N));
           const float dw0_dx1 = cos_at_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
 
-          const float dx1_dxlight = spoly_compute_transfer_matrix(
+          const float dx1_dxlight = spoly_compute_transfer_matrix_fd(
               recv_P,
               light_P,
               ls_solution.Ng,
-              spec_pos,
-              spec_N,
-              spec_ng,
               verts[0],
               verts[1],
               verts[2],
