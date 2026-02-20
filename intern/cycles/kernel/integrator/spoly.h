@@ -1293,11 +1293,14 @@ ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
                                 dot(dH_du, t) + dot(H, dt_du),
                                 dot(dH_dv, t) + dot(H, dt_dv));
 
-  /* Invert b. */
+  /* Invert b with a smaller threshold than MNEE_MIN_DETERMINANT (0.0001).
+   * Spoly solutions may have slightly different numerical properties than
+   * MNEE's converged manifold walk vertices. */
   float4 b_inv;
-  const float b_det = mat22_inverse(b, b_inv);
-  if (b_det == 0.0f)
+  const float b_det = mat22_determinant(b);
+  if (fabsf(b_det) < 1e-20f)
     return 0.0f;
+  b_inv = make_float4(b.w, -b.y, -b.z, b.x) / b_det;
 
   /* ---- Compute dc_dlight: constraint Jacobian w.r.t. light params ---- */
 
@@ -1856,14 +1859,34 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           const Spectrum spec_contribution = make_spectrum(
               fresnel_dielectric_cos(cos_i, spec_ior));
 
-          /* DEBUG: Show solution_eval BEFORE Fresnel*G multiply.
-           * If visible: receiver BSDF * light works, G or F is zero.
-           * If invisible: receiver BSDF or light eval is zero. */
-          throughput->diffuse = solution_eval.diffuse;
-          throughput->glossy = solution_eval.glossy;
-          throughput->sum = solution_eval.sum;
-          total_found = 1;
-          goto spoly_done;
+          /* DIAGNOSTIC: Use real G from transfer matrix.
+           * If G is zero, output bright red so we can see which pixels fail.
+           * R=10 means b_det was near-zero (transfer matrix singular).
+           * G=10 means det(Tp) was zero but b was fine.
+           * Normal contribution means everything works. */
+          if (G > 0.0f) {
+            bsdf_eval_mul(&solution_eval, spec_contribution * G);
+          }
+          else {
+            /* Transfer matrix returned zero — show diagnostic.
+             * dx1_dxlight==0 could mean b_det was singular or det(Tp)==0. */
+            solution_eval.diffuse = zero_spectrum();
+            solution_eval.glossy = zero_spectrum();
+            solution_eval.sum = make_spectrum(dx1_dxlight == 0.0f ? 10.0f : 5.0f);
+          }
+
+          /* Use = for first solution to avoid uninitialized memory. */
+          if (total_found == 0) {
+            throughput->diffuse = solution_eval.diffuse;
+            throughput->glossy = solution_eval.glossy;
+            throughput->sum = solution_eval.sum;
+          }
+          else {
+            throughput->diffuse += solution_eval.diffuse;
+            throughput->glossy += solution_eval.glossy;
+            throughput->sum += solution_eval.sum;
+          }
+          total_found++;
 
           /* Restore bounce state for next solution. */
           INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
