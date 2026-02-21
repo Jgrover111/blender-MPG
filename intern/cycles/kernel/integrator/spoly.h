@@ -1163,79 +1163,6 @@ ccl_device_inline bool spoly_newton_refine(float3 recv_P,
  * dx1_dxlight = |det(transfer_matrix)|
  * ============================================================================ */
 
-/* Finite-difference transfer matrix: numerically robust alternative to the
- * analytical constraint Jacobian approach. Uses the same half-vector constraint
- * function as the solver, avoiding potential sign/frame mismatches. */
-ccl_device_inline float spoly_compute_transfer_matrix_fd(float3 recv_P,
-                                                          float3 light_P,
-                                                          float3 light_Ng,
-                                                          float3 P0,
-                                                          float3 P1,
-                                                          float3 P2,
-                                                          float3 N0,
-                                                          float3 N1,
-                                                          float3 N2,
-                                                          float u,
-                                                          float v)
-{
-  const float3 dp_du = P1 - P0;
-  const float3 dp_dv = P2 - P0;
-  const float eps = 1e-4f;
-
-  /* Constraint at current solution. */
-  const float2 c0 = spoly_halfvector_constraint(
-      recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v, dp_du, dp_dv);
-  if (c0.x == FLT_MAX)
-    return 0.0f;
-
-  /* Jacobian dc/d(u,v) via finite differences. */
-  const float2 c_du = spoly_halfvector_constraint(
-      recv_P, light_P, P0, P1, P2, N0, N1, N2, u + eps, v, dp_du, dp_dv);
-  const float2 c_dv = spoly_halfvector_constraint(
-      recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v + eps, dp_du, dp_dv);
-  if (c_du.x == FLT_MAX || c_dv.x == FLT_MAX)
-    return 0.0f;
-
-  const float inv_eps = 1.0f / eps;
-  const float4 J_uv = make_float4((c_du.x - c0.x) * inv_eps,
-                                   (c_dv.x - c0.x) * inv_eps,
-                                   (c_du.y - c0.y) * inv_eps,
-                                   (c_dv.y - c0.y) * inv_eps);
-
-  /* Invert J_uv. */
-  const float J_uv_det = mat22_determinant(J_uv);
-  if (fabsf(J_uv_det) < 1e-20f)
-    return 0.0f;
-  const float4 J_uv_inv = make_float4(J_uv.w, -J_uv.y, -J_uv.z, J_uv.x) / J_uv_det;
-
-  /* Jacobian dc/d(light) via finite differences.
-   * Perturb light position in its tangent plane. */
-  float3 light_s, light_t;
-  make_orthonormals(light_Ng, &light_s, &light_t);
-
-  const float2 c_ls = spoly_halfvector_constraint(
-      recv_P, light_P + eps * light_s, P0, P1, P2, N0, N1, N2, u, v, dp_du, dp_dv);
-  const float2 c_lt = spoly_halfvector_constraint(
-      recv_P, light_P + eps * light_t, P0, P1, P2, N0, N1, N2, u, v, dp_du, dp_dv);
-  if (c_ls.x == FLT_MAX || c_lt.x == FLT_MAX)
-    return 0.0f;
-
-  const float4 J_light = make_float4((c_ls.x - c0.x) * inv_eps,
-                                      (c_lt.x - c0.x) * inv_eps,
-                                      (c_ls.y - c0.y) * inv_eps,
-                                      (c_lt.y - c0.y) * inv_eps);
-
-  /* Transfer matrix in barycentric coords: d(u,v)/d(light_s,light_t). */
-  const float4 Tp_bary = mat22_mult(J_uv_inv, J_light);
-
-  /* Convert from barycentric Jacobian to surface area ratio:
-   * |det(dx_spec/dx_light)| = |det(Tp_bary)| * |cross(dp_du, dp_dv)|
-   * because the light tangent frame is orthonormal. */
-  const float area_factor = len(cross(dp_du, dp_dv));
-
-  return fabsf(mat22_determinant(Tp_bary)) * area_factor;
-}
-
 ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
                                                        float3 light_P,
                                                        float3 light_Ng,
@@ -1888,17 +1815,56 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
               u,
               v);
 
-          /* Geometry term: solid angle Jacobian * transfer matrix. */
+          /* Generalized geometry term: solid angle Jacobian * transfer matrix.
+           * Clamp to prevent fireflies (matching MNEE's clamp of 2.0). */
           const float cos_at_spec = fabsf(dot(dir_to_spec, spec_N));
           const float dw0_dx1 = cos_at_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
-          const float G = dw0_dx1 * fmaxf(dx1_dxlight, 0.0f);
+          const float G = fminf(dw0_dx1 * fmaxf(dx1_dxlight, 0.0f), 2.0f);
 
-          /* DIAGNOSTIC: Output G directly as pixel value.
-           * G_debug=1.0 gave visible caustic. If G ~ 0.01-0.1, caustic is
-           * just dim (correct physics). Check pixel values to read G. */
-          solution_eval.diffuse = zero_spectrum();
-          solution_eval.glossy = zero_spectrum();
-          solution_eval.sum = make_spectrum(G);
+          if (G <= 0.0f) {
+            INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
+            INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce;
+            INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce;
+            continue;
+          }
+
+          /* Evaluate Fresnel at the specular point.
+           * Setup sd_mnee to get closures and extract IOR for accurate Fresnel. */
+          shader_setup_from_sample(kg,
+                                   sd_mnee,
+                                   spec_pos,
+                                   spec_N,
+                                   -dir_to_spec,
+                                   tri_shader_val,
+                                   caster_object,
+                                   prim,
+                                   u,
+                                   v,
+                                   dist_to_spec,
+                                   sd->time,
+                                   false,
+                                   false);
+
+          surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
+              kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
+
+          /* Extract IOR from the first specular closure, use scalar Fresnel. */
+          float spec_ior = 1.5f;
+          for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
+            ccl_private ShaderClosure *sc = &sd_mnee->closure[ci];
+            if (CLOSURE_IS_BSDF_GLOSSY(sc->type) || CLOSURE_IS_GLASS(sc->type)) {
+              ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)sc;
+              spec_ior = mbsdf->ior;
+              break;
+            }
+          }
+
+          const float cos_i = fabsf(dot(-dir_to_spec, spec_N));
+          const Spectrum spec_contribution = make_spectrum(
+              fresnel_dielectric_cos(cos_i, spec_ior));
+
+          /* Apply contribution: BSDF * light/pdf * Fresnel * G. */
+          bsdf_eval_mul(&solution_eval, spec_contribution * G);
 
           /* Use = for first solution to avoid uninitialized memory. */
           if (total_found == 0) {
