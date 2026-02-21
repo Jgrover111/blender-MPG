@@ -1888,25 +1888,17 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
               u,
               v);
 
-          /* DIAGNOSTIC: Output each component directly to identify scale issue.
-           * The final contribution = solution_eval * Fresnel * G
-           * where G = dw0_dx1 * dx1_dxlight.
-           *
-           * We know solution_eval (BSDF * light/pdf) works (white caustic with G=1).
-           * We know Fresnel ~ 0.04 for IOR=1.5.
-           * The question is the scale of dx1_dxlight and G.
-           *
-           * Output: raw dx1_dxlight as pixel value.
-           * Check pixel value in Blender's image editor to read the number. */
+          /* Geometry term: solid angle Jacobian * transfer matrix. */
           const float cos_at_spec = fabsf(dot(dir_to_spec, spec_N));
           const float dw0_dx1 = cos_at_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
           const float G = dw0_dx1 * fmaxf(dx1_dxlight, 0.0f);
 
-          /* Output dx1_dxlight directly — check pixel values to read the actual number.
-           * Also log: dw0_dx1, dx1_dxlight, G values for debugging. */
+          /* DIAGNOSTIC: Output G directly as pixel value.
+           * G_debug=1.0 gave visible caustic. If G ~ 0.01-0.1, caustic is
+           * just dim (correct physics). Check pixel values to read G. */
           solution_eval.diffuse = zero_spectrum();
           solution_eval.glossy = zero_spectrum();
-          solution_eval.sum = make_spectrum(fmaxf(dx1_dxlight, 0.0f));
+          solution_eval.sum = make_spectrum(G);
 
           /* Use = for first solution to avoid uninitialized memory. */
           if (total_found == 0) {
