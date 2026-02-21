@@ -1870,8 +1870,8 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           }
           bsdf_eval_mul(&solution_eval, light_eval / ls_solution.pdf);
 
-          /* DIAGNOSTIC: Compute transfer matrix and return error codes.
-           * We only care about which stage fails, not the actual contribution. */
+          /* Transfer matrix: maps light perturbations → specular vertex perturbations.
+           * Returns |det(Tp)| (positive) or negative error codes (clamped by fmaxf). */
           const float dx1_dxlight = spoly_compute_transfer_matrix(
               recv_P,
               light_P,
@@ -1888,37 +1888,26 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
               u,
               v);
 
-          /* DIAGNOSTIC: Always output a visible value encoding which stage
-           * the transfer matrix reached. Check pixel values in Blender's
-           * image editor (N-panel > Image > color values) to identify the stage.
+          /* DIAGNOSTIC: Transfer matrix works (returns positive for all pixels).
+           * Now output the actual G value to see its magnitude.
            *
-           * Transfer matrix return codes:
-           *   -1: ili fail (recv-spec too close)
-           *   -2: ilo fail (spec-light too close)
-           *   -3: len_H fail (half vector degenerate)
-           *   -4: n_len fail (normal degenerate)
-           *   -5: dp_du fail (edge degenerate)
-           *   -6: dp_dv fail (edge degenerate after orthonormalization)
-           *   -7: b_det fail (b matrix singular)
-           *    0: det(Tp) is exactly zero
-           *   >0: SUCCESS — real |det(Tp)| value
+           * G = dw0_dx1 * dx1_dxlight
+           * where dw0_dx1 = cos_at_spec / dist_to_spec^2
+           * and dx1_dxlight = |det(transfer_matrix)|
            *
-           * Diagnostic output (monochrome value):
-           *   Stage 1-6: 0.1 * stage (0.1 to 0.6 — dim)
-           *   Stage 7 (b_det): 0.7
-           *   det(Tp)==0: 0.8
-           *   SUCCESS: 0.9 */
-          solution_eval.diffuse = zero_spectrum();
-          solution_eval.glossy = zero_spectrum();
-          if (dx1_dxlight > 0.0f) {
-            solution_eval.sum = make_spectrum(0.9f);
-          }
-          else if (dx1_dxlight == 0.0f) {
-            solution_eval.sum = make_spectrum(0.8f);
-          }
-          else {
-            solution_eval.sum = make_spectrum(0.1f * (-dx1_dxlight));
-          }
+           * Output the real contribution so we can see the caustic.
+           * If G is too small, the caustic will be invisible. */
+          const float cos_at_spec = fabsf(dot(dir_to_spec, spec_N));
+          const float dw0_dx1 = cos_at_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
+
+          const float G = fminf(dw0_dx1 * fmaxf(dx1_dxlight, 0.0f), 100.0f);
+
+          /* Fresnel at specular point (hardcoded IOR=1.5 for diagnostic). */
+          const float cos_i = fabsf(dot(-dir_to_spec, spec_N));
+          const float spec_fresnel = fresnel_dielectric_cos(cos_i, 1.5f);
+
+          /* Apply real contribution: BSDF * light/pdf * Fresnel * G. */
+          bsdf_eval_mul(&solution_eval, make_spectrum(spec_fresnel * G));
 
           /* Use = for first solution to avoid uninitialized memory. */
           if (total_found == 0) {
