@@ -1888,26 +1888,25 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
               u,
               v);
 
-          /* DIAGNOSTIC: Transfer matrix works (returns positive for all pixels).
-           * Now output the actual G value to see its magnitude.
+          /* DIAGNOSTIC: Output each component directly to identify scale issue.
+           * The final contribution = solution_eval * Fresnel * G
+           * where G = dw0_dx1 * dx1_dxlight.
            *
-           * G = dw0_dx1 * dx1_dxlight
-           * where dw0_dx1 = cos_at_spec / dist_to_spec^2
-           * and dx1_dxlight = |det(transfer_matrix)|
+           * We know solution_eval (BSDF * light/pdf) works (white caustic with G=1).
+           * We know Fresnel ~ 0.04 for IOR=1.5.
+           * The question is the scale of dx1_dxlight and G.
            *
-           * Output the real contribution so we can see the caustic.
-           * If G is too small, the caustic will be invisible. */
+           * Output: raw dx1_dxlight as pixel value.
+           * Check pixel value in Blender's image editor to read the number. */
           const float cos_at_spec = fabsf(dot(dir_to_spec, spec_N));
           const float dw0_dx1 = cos_at_spec / fmaxf(sqr(dist_to_spec), 1e-8f);
+          const float G = dw0_dx1 * fmaxf(dx1_dxlight, 0.0f);
 
-          const float G = fminf(dw0_dx1 * fmaxf(dx1_dxlight, 0.0f), 100.0f);
-
-          /* Fresnel at specular point (hardcoded IOR=1.5 for diagnostic). */
-          const float cos_i = fabsf(dot(-dir_to_spec, spec_N));
-          const float spec_fresnel = fresnel_dielectric_cos(cos_i, 1.5f);
-
-          /* Apply real contribution: BSDF * light/pdf * Fresnel * G. */
-          bsdf_eval_mul(&solution_eval, make_spectrum(spec_fresnel * G));
+          /* Output dx1_dxlight directly — check pixel values to read the actual number.
+           * Also log: dw0_dx1, dx1_dxlight, G values for debugging. */
+          solution_eval.diffuse = zero_spectrum();
+          solution_eval.glossy = zero_spectrum();
+          solution_eval.sum = make_spectrum(fmaxf(dx1_dxlight, 0.0f));
 
           /* Use = for first solution to avoid uninitialized memory. */
           if (total_found == 0) {
