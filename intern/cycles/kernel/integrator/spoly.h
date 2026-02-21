@@ -33,7 +33,7 @@ CCL_NAMESPACE_BEGIN
 #define SPOLY_MAX_BVCOEFFS 7 /* degree+1 for bivariate, max T=6 -> 7 */
 #define SPOLY_MAX_ROOTS 32
 #define SPOLY_BISECT_ITERATIONS 20
-#define SPOLY_ROOT_EPS 1e-4f
+#define SPOLY_ROOT_EPS 0.02f
 #define SPOLY_NUM_DICHOTOMY_SAMPLES 129
 
 /* ============================================================================
@@ -1568,6 +1568,12 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
       }
     }
 
+    /* Cross-triangle deduplication: track accepted solution positions in
+     * world space so that the same specular point found by adjacent triangles
+     * (sharing an edge) is not double-counted. */
+    float3 global_accepted_pos[SPOLY_MAX_ROOTS];
+    int num_global_accepted = 0;
+
     /* Stack-based tree traversal with interval-arithmetic pruning.
      * Stack entries: (node_index, triangle_prim). When prim >= 0, the entry
      * is a leaf and we skip the tree node re-fetch, solving directly.
@@ -1656,6 +1662,20 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           /* Recompute position and normal at (possibly refined) (u,v). */
           const float w = 1.0f - u - v;
           const float3 spec_pos = w * verts[0] + u * verts[1] + v * verts[2];
+
+          /* Cross-triangle deduplication: skip if an adjacent triangle already
+           * found this same specular point (shared-edge solutions). */
+          {
+            bool is_global_dup = false;
+            for (int gi = 0; gi < num_global_accepted; gi++) {
+              if (len(spec_pos - global_accepted_pos[gi]) < 1e-3f) {
+                is_global_dup = true;
+                break;
+              }
+            }
+            if (is_global_dup)
+              continue;
+          }
 
           float dist_to_spec;
           const float3 dir_to_spec = normalize_len(spec_pos - recv_P, &dist_to_spec);
@@ -1878,6 +1898,11 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
             throughput->sum += solution_eval.sum;
           }
           total_found++;
+
+          /* Record for cross-triangle deduplication. */
+          if (num_global_accepted < SPOLY_MAX_ROOTS) {
+            global_accepted_pos[num_global_accepted++] = spec_pos;
+          }
 
           /* Restore bounce state for next solution. */
           INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
