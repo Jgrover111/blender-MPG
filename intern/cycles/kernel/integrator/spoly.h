@@ -1693,11 +1693,14 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           const float3 spec_pos = w * verts[0] + u * verts[1] + v * verts[2];
 
           /* Cross-triangle deduplication: skip if an adjacent triangle already
-           * found this same specular point (shared-edge solutions). */
+           * found this same specular point (shared-edge solutions). Use a
+           * generous threshold because adjacent triangles interpolate from
+           * different vertex sets, so Newton-refined edge solutions can
+           * differ by up to ~1% of the triangle edge length. */
           {
             bool is_global_dup = false;
             for (int gi = 0; gi < num_global_accepted; gi++) {
-              if (len(spec_pos - global_accepted_pos[gi]) < 1e-3f) {
+              if (len(spec_pos - global_accepted_pos[gi]) < 0.01f) {
                 is_global_dup = true;
                 break;
               }
