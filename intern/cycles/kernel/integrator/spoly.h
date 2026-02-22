@@ -1705,6 +1705,9 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
             }
           }
 
+          /* DIAGNOSTIC: Skip all visibility checks. Output constant for each
+           * solution to isolate solver vs visibility as cause of edge darkening. */
+#if 0
           /* Visibility check: receiver to specular point. */
           {
             Ray vis_ray;
@@ -1761,6 +1764,7 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
               }
             }
           }
+#endif
 
           /* Record this solution for duplicate detection. */
           if (num_accepted < SPOLY_MAX_ROOTS) {
@@ -1768,6 +1772,29 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
             accepted_v[num_accepted] = v;
             num_accepted++;
           }
+
+          /* DIAGNOSTIC: Output flat white (0.5) for each valid solution,
+           * skipping all contribution/visibility logic. */
+          {
+            const Spectrum flat_val = make_spectrum(0.5f);
+            if (total_found == 0) {
+              throughput->diffuse = flat_val;
+              throughput->glossy = flat_val;
+              throughput->sum = flat_val;
+            }
+            else {
+              throughput->diffuse += flat_val;
+              throughput->glossy += flat_val;
+              throughput->sum += flat_val;
+            }
+            total_found++;
+
+            /* Record for cross-triangle deduplication. */
+            if (num_global_accepted < SPOLY_MAX_ROOTS) {
+              global_accepted_pos[num_global_accepted++] = spec_pos;
+            }
+          }
+          continue; /* Skip to next solution — bypass contribution code below. */
 
           /* === Valid specular path found. Compute contribution. === */
 
