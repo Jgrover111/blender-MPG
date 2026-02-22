@@ -691,20 +691,39 @@ ccl_device_inline int spoly_find_roots_dichotomy(
   return num_roots;
 }
 
-/* Root finding in [0,1] for a univariate polynomial (for back-substitution). */
+/* Root finding in [0,1] for a univariate polynomial (for back-substitution).
+ * Uses sign-change detection + bisection AND tangential root detection
+ * (matching the v-root finder spoly_find_roots_dichotomy). */
 ccl_device_inline int spoly_find_roots_in_01(ccl_private const SPolyUni *poly,
                                              ccl_private float roots[SPOLY_MAX_ROOTS])
 {
   int num_roots = 0;
   const int num_samples = SPOLY_NUM_DICHOTOMY_SAMPLES;
 
+  float prev_prev_val = 0.0f;
   float prev_val = spoly_uni_eval(poly, 0.0f);
+
+  /* Track running max for relative near-zero threshold. */
+  float max_abs = fabsf(prev_val);
+
+  if (fabsf(prev_val) < 1e-30f) {
+    if (num_roots < SPOLY_MAX_ROOTS) {
+      roots[num_roots++] = 0.0f;
+    }
+  }
 
   for (int s = 1; s < num_samples; s++) {
     float v = (float)s / (float)(num_samples - 1);
     float val = spoly_uni_eval(poly, v);
+    max_abs = fmaxf(max_abs, fabsf(val));
 
-    if (prev_val * val <= 0.0f && (fabsf(prev_val) > 1e-30f || fabsf(val) > 1e-30f)) {
+    if (fabsf(val) < 1e-30f) {
+      if (num_roots < SPOLY_MAX_ROOTS) {
+        roots[num_roots++] = v;
+      }
+    }
+    else if (prev_val * val < 0.0f && fabsf(prev_val) > 1e-30f) {
+      /* Sign change detected — bisect to find root. */
       float lo = (float)(s - 1) / (float)(num_samples - 1);
       float hi = v;
       float lo_val = prev_val;
@@ -728,7 +747,23 @@ ccl_device_inline int spoly_find_roots_in_01(ccl_private const SPolyUni *poly,
         }
       }
     }
+    else if (s >= 2) {
+      /* Tangential root detection: check if the PREVIOUS sample was a local
+       * minimum near zero. This catches roots where the polynomial barely
+       * touches zero without a clear sign change. */
+      const float near_zero_thresh = fmaxf(max_abs * 1e-4f, 1e-20f);
+      if (fabsf(prev_val) < near_zero_thresh &&
+          fabsf(prev_val) <= fabsf(prev_prev_val) &&
+          fabsf(prev_val) <= fabsf(val))
+      {
+        float prev_v = (float)(s - 1) / (float)(num_samples - 1);
+        if (num_roots < SPOLY_MAX_ROOTS) {
+          roots[num_roots++] = clamp(prev_v, 0.0f, 1.0f);
+        }
+      }
+    }
 
+    prev_prev_val = prev_val;
     prev_val = val;
   }
 
@@ -970,17 +1005,11 @@ ccl_device_inline int spoly_solve(float3 xD,
       u_sol = clamp(u_sol, 0.0f, 1.0f);
       v_sol = clamp(v_sol, 0.0f, 1.0f - u_sol);
 
-      /* Verify the other constraint is also satisfied. */
-      SPolyUni czy_u;
-      spoly_biv_eval_at_v(&Czy, v_sol, &czy_u);
-      float czy_val = spoly_uni_eval(&czy_u, u_sol);
-      float cxz_val = spoly_uni_eval(&cxz_u, u_sol);
-
-      /* Tolerance: BOTH constraints must be near zero for a valid solution.
-       * Use relative tolerance since divideByMax upscales coefficients. */
-      float max_residual = fmaxf(fabsf(czy_val), fabsf(cxz_val));
-      if (max_residual > 1.0f)
-        continue;
+      /* No constraint residual check here — the reference implementation
+       * validates solutions purely via Newton convergence (called after
+       * spoly_solve returns). The v-root from bisection has limited float
+       * precision, so the Czy residual at (u_root, v_root) can be large
+       * even for valid solutions. Newton refinement corrects both u and v. */
 
       if (num_solutions < SPOLY_MAX_ROOTS) {
         float w = 1.0f - u_sol - v_sol;
@@ -1705,9 +1734,6 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
             }
           }
 
-          /* DIAGNOSTIC: Skip all visibility checks. Output constant for each
-           * solution to isolate solver vs visibility as cause of edge darkening. */
-#if 0
           /* Visibility check: receiver to specular point. */
           {
             Ray vis_ray;
@@ -1764,7 +1790,6 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
               }
             }
           }
-#endif
 
           /* Record this solution for duplicate detection. */
           if (num_accepted < SPOLY_MAX_ROOTS) {
@@ -1772,29 +1797,6 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
             accepted_v[num_accepted] = v;
             num_accepted++;
           }
-
-          /* DIAGNOSTIC: Output flat white (0.5) for each valid solution,
-           * skipping all contribution/visibility logic. */
-          {
-            const Spectrum flat_val = make_spectrum(0.5f);
-            if (total_found == 0) {
-              throughput->diffuse = flat_val;
-              throughput->glossy = flat_val;
-              throughput->sum = flat_val;
-            }
-            else {
-              throughput->diffuse += flat_val;
-              throughput->glossy += flat_val;
-              throughput->sum += flat_val;
-            }
-            total_found++;
-
-            /* Record for cross-triangle deduplication. */
-            if (num_global_accepted < SPOLY_MAX_ROOTS) {
-              global_accepted_pos[num_global_accepted++] = spec_pos;
-            }
-          }
-          continue; /* Skip to next solution — bypass contribution code below. */
 
           /* === Valid specular path found. Compute contribution. === */
 
