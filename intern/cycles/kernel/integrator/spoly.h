@@ -1662,18 +1662,23 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           float v = solutions[si].v;
 
           /* Newton-refine the specular point for sub-pixel accuracy.
-           * If Newton fails to converge, fall back to the bisection result
-           * rather than discarding the solution entirely. */
-          spoly_newton_refine(recv_P,
-                              light_P,
-                              verts[0],
-                              verts[1],
-                              verts[2],
-                              normals[0],
-                              normals[1],
-                              normals[2],
-                              &u,
-                              &v);
+           * Reject solutions where Newton fails to converge — matching
+           * the reference implementation which discards non-converged results.
+           * This is the primary validation: without the polynomial residual
+           * check, Newton convergence is what confirms a candidate is real. */
+          if (!spoly_newton_refine(recv_P,
+                                   light_P,
+                                   verts[0],
+                                   verts[1],
+                                   verts[2],
+                                   normals[0],
+                                   normals[1],
+                                   normals[2],
+                                   &u,
+                                   &v))
+          {
+            continue;
+          }
 
           /* Skip duplicate solutions (multiple roots converging to same point). */
           {
