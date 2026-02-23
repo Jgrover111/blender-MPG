@@ -33,7 +33,7 @@ CCL_NAMESPACE_BEGIN
 #define SPOLY_MAX_BVCOEFFS 7 /* degree+1 for bivariate, max T=6 -> 7 */
 #define SPOLY_MAX_ROOTS 32
 #define SPOLY_BISECT_ITERATIONS 20
-#define SPOLY_ROOT_EPS 0.02f
+#define SPOLY_ROOT_EPS 0.0f
 #define SPOLY_NUM_DICHOTOMY_SAMPLES 129
 
 /* ============================================================================
@@ -1169,9 +1169,11 @@ ccl_device_inline bool spoly_newton_refine(float3 recv_P,
       return false;
   }
 
-  /* Clamp to valid barycentric range. */
-  u = clamp(u, 0.0f, 1.0f);
-  v = clamp(v, 0.0f, 1.0f - u);
+  /* Strict barycentric check (matching reference): reject if Newton
+   * converged to a point outside this triangle's domain. This prevents
+   * both adjacent triangles from claiming the same edge solution. */
+  if (u < 0.0f || v < 0.0f || u + v > 1.0f)
+    return false;
 
   *u_out = u;
   *v_out = v;
