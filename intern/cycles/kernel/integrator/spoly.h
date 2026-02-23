@@ -1207,7 +1207,8 @@ ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
                                                        float3 N1,
                                                        float3 N2,
                                                        float u,
-                                                       float v)
+                                                       float v,
+                                                       float eta)
 {
   /* Return negative error codes for diagnostic:
    * -1: ili fail, -2: ilo fail, -3: len_H fail, -4: n_len fail,
@@ -1230,8 +1231,8 @@ ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
   ilo = 1.0f / ilo;
   wo *= ilo;
 
-  /* Half vector (reflection: eta = 1). */
-  float3 H = -(wi + wo);
+  /* Half vector: H = -(wi + eta*wo) for reflection (eta=1) or refraction. */
+  float3 H = -(wi + eta * wo);
   const float len_H = len(H);
   if (len_H < 1e-8f)
     return -3.0f;
@@ -1239,7 +1240,6 @@ ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
   H *= ilh;
 
   /* Combine scale factors. */
-  const float eta = 1.0f; /* Reflection */
   ilo *= eta * ilh;
   ili *= ilh;
 
@@ -1586,15 +1586,76 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
       continue;
     }
 
-    /* Reflection-only for now. */
-    const bool is_refraction = false;
-    const float eta = 1.0f;
+    /* Detect material type by evaluating the shader at the first triangle's
+     * centroid. This determines whether to run reflection, refraction, or both
+     * solvers, and extracts the IOR for refraction constraints. */
+    bool caster_has_reflection = false;
+    bool caster_has_refraction = false;
+    float caster_eta = 1.5f;
+    {
+      float3 det_verts[3], det_normals[3];
+      triangle_vertices_and_normals(kg, prim_offset, det_verts, det_normals);
+      if (need_transform) {
+        for (int vi = 0; vi < 3; vi++) {
+          det_verts[vi] = transform_point(&tfm, det_verts[vi]);
+          det_normals[vi] = normalize(transform_direction_transposed(&itfm, det_normals[vi]));
+        }
+      }
+      else {
+        for (int vi = 0; vi < 3; vi++) {
+          det_normals[vi] = normalize(det_normals[vi]);
+        }
+      }
+
+      const float3 centroid_P = (det_verts[0] + det_verts[1] + det_verts[2]) / 3.0f;
+      const float3 centroid_N = normalize(det_normals[0] + det_normals[1] + det_normals[2]);
+      const float3 fake_wi = normalize(recv_P - centroid_P);
+
+      shader_setup_from_sample(kg,
+                               sd_mnee,
+                               centroid_P,
+                               centroid_N,
+                               fake_wi,
+                               first_shader,
+                               caster_object,
+                               prim_offset,
+                               0.333f,
+                               0.333f,
+                               len(recv_P - centroid_P),
+                               sd->time,
+                               false,
+                               false);
+      surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
+          kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
+
+      for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
+        ccl_private ShaderClosure *sc = &sd_mnee->closure[ci];
+        if (CLOSURE_IS_BSDF_GLOSSY(sc->type)) {
+          caster_has_reflection = true;
+        }
+        if (CLOSURE_IS_REFRACTION(sc->type)) {
+          caster_has_refraction = true;
+          ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)sc;
+          caster_eta = mbsdf->ior;
+        }
+        if (CLOSURE_IS_GLASS(sc->type)) {
+          caster_has_reflection = true;
+          caster_has_refraction = true;
+          ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)sc;
+          caster_eta = mbsdf->ior;
+        }
+      }
+
+      if (!caster_has_reflection && !caster_has_refraction) {
+        continue;
+      }
+    }
 
     /* Object-level culling: check root node's AABB before entering traversal.
      * This avoids tree traversal overhead for geometrically irrelevant casters. */
     {
       const SPolyTreeNode root = spoly_tree_node_fetch(kg, tree_offset);
-      if (!is_refraction && !spoly_tree_node_valid_reflection(root, recv_P, light_P)) {
+      if (!caster_has_refraction && !spoly_tree_node_valid_reflection(root, recv_P, light_P)) {
         continue;
       }
     }
@@ -1644,19 +1705,36 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           }
         }
 
-        /* Run the polynomial solver. */
-        SPolySolution solutions[SPOLY_MAX_ROOTS];
-        int num_solutions = spoly_solve(
-            recv_P, light_P, verts[0], verts[1], verts[2],
-            normals[0], normals[1], normals[2], is_refraction, eta, solutions);
+        /* Run solver for each applicable mode (reflection and/or refraction).
+         * Glass objects get both passes; glossy-only or refraction-only get one. */
+        for (int solver_mode = 0; solver_mode < 2; solver_mode++) {
+          bool is_refraction;
+          float eta;
+          if (solver_mode == 0) {
+            if (!caster_has_reflection)
+              continue;
+            is_refraction = false;
+            eta = 1.0f;
+          }
+          else {
+            if (!caster_has_refraction)
+              continue;
+            is_refraction = true;
+            eta = caster_eta;
+          }
 
-        if (num_solutions == 0)
-          continue;
+          SPolySolution solutions[SPOLY_MAX_ROOTS];
+          int num_solutions = spoly_solve(
+              recv_P, light_P, verts[0], verts[1], verts[2],
+              normals[0], normals[1], normals[2], is_refraction, eta, solutions);
 
-        /* Track accepted (u,v) for duplicate detection (reference uses L1 < 1e-3). */
-        float accepted_u[SPOLY_MAX_ROOTS];
-        float accepted_v[SPOLY_MAX_ROOTS];
-        int num_accepted = 0;
+          if (num_solutions == 0)
+            continue;
+
+          /* Track accepted (u,v) for duplicate detection (reference uses L1 < 1e-3). */
+          float accepted_u[SPOLY_MAX_ROOTS];
+          float accepted_v[SPOLY_MAX_ROOTS];
+          int num_accepted = 0;
 
         /* Validate each solution with Newton refinement. */
         for (int si = 0; si < num_solutions; si++) {
@@ -1872,7 +1950,8 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
               normals[1],
               normals[2],
               u,
-              v);
+              v,
+              eta);
 
           /* Generalized geometry term: solid angle Jacobian * transfer matrix.
            * Clamp to prevent fireflies (matching MNEE's clamp of 2.0). */
@@ -1907,20 +1986,31 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
               kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
 
-          /* Extract IOR from the first specular closure, use scalar Fresnel. */
-          float spec_ior = 1.5f;
+          /* Evaluate Fresnel using Cycles' full microfacet Fresnel system.
+           * This correctly handles all closure/Fresnel types:
+           *  - MicrofacetFresnel::NONE       (Glossy BSDF)      → reflectance = 1.0
+           *  - MicrofacetFresnel::DIELECTRIC  (Glass BSDF)       → F_dielectric(cos, ior)
+           *  - MicrofacetFresnel::CONDUCTOR   (metals)            → F_conductor(cos, n, k)
+           *  - MicrofacetFresnel::F82_TINT    (artistic metals)   → F82 model
+           *  - MicrofacetFresnel::GENERALIZED_SCHLICK (Principled) → artistic Fresnel
+           *  - MicrofacetFresnel::DIELECTRIC_TINT                 → tinted dielectric */
+          Spectrum spec_contribution = zero_spectrum();
+          const float cos_theta = fabsf(dot(-dir_to_spec, spec_N));
           for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
             ccl_private ShaderClosure *sc = &sd_mnee->closure[ci];
-            if (CLOSURE_IS_BSDF_GLOSSY(sc->type) || CLOSURE_IS_GLASS(sc->type)) {
-              ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)sc;
-              spec_ior = mbsdf->ior;
+            if (CLOSURE_IS_BSDF_MICROFACET(sc->type)) {
+              ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)sc;
+              Spectrum reflectance, transmittance;
+              microfacet_fresnel(kg, bsdf, cos_theta, nullptr, &reflectance, &transmittance);
+              if (!is_refraction) {
+                spec_contribution = sc->weight * reflectance;
+              }
+              else {
+                spec_contribution = sc->weight * transmittance;
+              }
               break;
             }
           }
-
-          const float cos_i = fabsf(dot(-dir_to_spec, spec_N));
-          const Spectrum spec_contribution = make_spectrum(
-              fresnel_dielectric_cos(cos_i, spec_ior));
 
           /* Apply contribution: BSDF * light/pdf * Fresnel * G. */
           bsdf_eval_mul(&solution_eval, spec_contribution * G);
@@ -1948,6 +2038,7 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce;
           INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce;
         }
+        } /* solver_mode loop */
       }
       else {
         /* Internal node: fetch and expand children with interval pruning. */
@@ -1965,8 +2056,10 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           const int child_idx = node.child_offset + c;
           const SPolyTreeNode child = spoly_tree_node_fetch(kg, child_idx);
 
-          /* Apply interval-arithmetic pruning. */
-          if (!is_refraction) {
+          /* Apply interval-arithmetic pruning (reflection only for now).
+           * When the caster has refraction, we can't prune based on reflection
+           * intervals since different constraint formulations have different roots. */
+          if (!caster_has_refraction) {
             if (!spoly_tree_node_valid_reflection(child, recv_P, light_P)) {
               continue;
             }
