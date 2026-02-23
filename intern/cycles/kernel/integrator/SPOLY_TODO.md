@@ -2,17 +2,17 @@
 
 ## P1: Material Support
 
-- [ ] **Glossy BSDF support** — Currently broken. The solver runs reflection constraints correctly but contribution evaluation fails for Glossy BSDF closures. Investigate IOR extraction path (`CLOSURE_IS_BSDF_GLOSSY` check) and fix the evaluation/Fresnel pipeline.
+- [x] **Glossy BSDF support** — Fixed. Root cause was using `fresnel_dielectric_cos()` instead of Cycles' `microfacet_fresnel()` system. Glossy BSDF uses `MicrofacetFresnel::NONE` (reflectance=1.0) but we were computing F_dielectric(cos, 1.5)=4%.
 
-- [ ] **Principled BSDF reflection** — Most common material in Blender. Recognize Principled BSDF's specular/glossy component (`CLOSURE_BSDF_MICROFACET_GGX_ID` and similar) as a valid caustic caster. Ensure closure iteration finds the right component.
+- [x] **Principled BSDF reflection** — Fixed. Principled BSDF decomposes into `MICROFACET_GGX` closures with `GENERALIZED_SCHLICK` Fresnel during shader evaluation. Our `CLOSURE_IS_BSDF_MICROFACET` check and `microfacet_fresnel()` call handles this automatically.
 
-- [ ] **Conductor Fresnel for metals** — Currently uses scalar `fresnel_dielectric_cos()` for everything. Metals need conductor Fresnel (complex IOR). The reference supports named metals.
+- [x] **Conductor Fresnel for metals** — Fixed. `microfacet_fresnel()` handles `MicrofacetFresnel::CONDUCTOR` and `F82_TINT` types, returning correct spectral conductor Fresnel. No manual Fresnel computation needed.
 
 ## P2: Refraction Caustics
 
-- [ ] **Enable single-bounce refraction (T)** — `spoly_build_refraction_constraints()` is fully implemented but never called (`is_refraction = false` hardcoded). Wire up material detection to set `is_refraction = true`, extract correct IOR/eta from closure. Bezout matrix size constants already accommodate degree-6 refraction polynomials.
+- [x] **Enable single-bounce refraction (T)** — Enabled. Per-caster material detection evaluates shader at first triangle centroid. `CLOSURE_IS_GLASS` triggers both reflection + refraction solvers. `CLOSURE_IS_REFRACTION` triggers refraction only. IOR/eta extracted from closure. Transfer matrix updated: `H = -(wi + eta*wo)`.
 
-- [ ] **Principled BSDF transmission** — Glass-like transmission through Principled BSDF's transmission component. Detect transmission closure and route through the refraction path.
+- [x] **Principled BSDF transmission** — Fixed. Principled BSDF's transmission component decomposes into `MICROFACET_GGX_GLASS_ID` or `MICROFACET_GGX_REFRACTION_ID` closures. Matched by `CLOSURE_IS_GLASS`/`CLOSURE_IS_REFRACTION` in material detection. Fresnel transmittance from `microfacet_fresnel()`.
 
 ## P3: Light Types
 
@@ -48,20 +48,20 @@ These are differences from the reference implementation that may affect correctn
 
 - [ ] **Newton max iterations (20 vs 32)** — Reference uses 32 iterations; we use 20. Combined with our tighter divergence bounds, this gives Newton less room to converge for difficult edge cases.
 
-- [ ] **Newton non-convergence fallback** — When Newton doesn't converge within the iteration limit, we accept solutions if the final residual < 1e-4 (line 1168). The reference strictly rejects non-converged solutions (`if (!is_find) continue`). Our fallback could accept spurious solutions. Consider removing the fallback to match the reference.
+- [ ] **Newton non-convergence fallback** — When Newton doesn't converge within the iteration limit, we accept solutions if the final residual < 1e-4. The reference strictly rejects non-converged solutions (`if (!is_find) continue`). Our fallback could accept spurious solutions. Consider removing the fallback to match the reference.
 
 - [ ] **Newton early dedup during iteration** — Reference checks L1 distance < 0.1 against already-accepted solutions during each Newton iteration, aborting early if converging toward a known solution. We have no such check. Minor optimization that avoids wasting Newton iterations.
 
 ## P6: Code Quality & Polish
 
-- [ ] **Double shader_setup_from_sample call** — `shader_setup_from_sample()` is called twice for the same specular point (lines 1834 and 1892): once for light evaluation, once for Fresnel/IOR extraction. These could be merged into a single call with the shader evaluation done once.
+- [ ] **Double shader_setup_from_sample call** — `shader_setup_from_sample()` is called twice for the same specular point: once for light evaluation, once for Fresnel/IOR extraction. These could be merged into a single call with the shader evaluation done once.
 
 - [ ] **Spotlight cone pruning** — Spotlight works (finite position) but solver doesn't account for cone geometry. Solutions outside the cone get zero contribution via `light_sample_update()`, wasting solver budget. Prune tree based on cone intersection.
 
-- [ ] **Flat-shaded triangle support** — Currently skips all objects without `SHADER_SMOOTH_NORMAL` (line 1585). Flat-shaded triangles can still have specular points (the normal is constant but the half-vector still varies with position). The polynomial constraint simplifies but is still solvable. Low priority since most caustic-producing objects use smooth normals.
+- [ ] **Flat-shaded triangle support** — Currently skips all objects without `SHADER_SMOOTH_NORMAL`. Flat-shaded triangles can still have specular points (the normal is constant but the half-vector still varies with position). The polynomial constraint simplifies but is still solvable. Low priority since most caustic-producing objects use smooth normals.
 
-- [ ] **Debug code cleanup** — Remove: unused `spoly_done:` label (line 2018), diagnostic negative return codes in transfer matrix (lines 1212-1215), hardcoded IOR fallback of 1.5 (line 1911), any remaining `#if 0` blocks.
+- [ ] **Debug code cleanup** — Remove: unused `spoly_done:` label, diagnostic negative return codes in transfer matrix, any remaining `#if 0` blocks.
+
+- [x] **Transfer matrix for refraction** — Done. `spoly_compute_transfer_matrix()` now accepts `eta` parameter. Uses `H = -(wi + eta*wo)` for both reflection (eta=1) and refraction.
 
 - [ ] **Performance tuning** — Global solver call cap of 256 may need adjustment. Cross-triangle dedup uses linear scan. Investigate early termination heuristics and adaptive sample counts.
-
-- [ ] **Transfer matrix for refraction** — Current `spoly_compute_transfer_matrix()` is hardcoded for reflection (`eta = 1.0f`, line 1242). Needs to accept and use the actual IOR/eta for refraction paths, matching MNEE's `mnee_compute_transfer_matrix()` which handles both cases.
