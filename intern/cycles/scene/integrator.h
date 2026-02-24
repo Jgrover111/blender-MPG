@@ -60,6 +60,7 @@ class Integrator : public Node {
   NODE_SOCKET_API(bool, caustics_refractive)
   NODE_SOCKET_API(float, filter_glossy)
   NODE_SOCKET_API(bool, use_specular_polynomials)
+  NODE_SOCKET_API(float, specular_polynomial_chance)
 
   NODE_SOCKET_API(bool, use_direct_light);
   NODE_SOCKET_API(bool, use_indirect_light);

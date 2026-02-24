@@ -383,27 +383,35 @@ ccl_device
 
         /* Are we on a caustic receiver? Run spoly. */
         if (!is_transmission && (sd->object_flag & SD_OBJECT_CAUSTICS_RECEIVER)) {
-          /* Use a copy of ls since spoly modifies it via light_sample_update.
-           * The original ls is preserved for regular direct lighting below. */
-          LightSample ls_spoly = ls;
+          const float spoly_sample_chance = saturatef(
+              kernel_data.integrator.specular_polynomial_chance);
+          const float spoly_sample = path_state_rng_1D(kg, rng_state, PRNG_SURFACE_SPOLY);
 
-          const int spoly_found = kernel_path_spoly_sample(
-              kg,
-              state,
-              sd,
-              emission_sd,
-              rng_state,
-              &ls_spoly,
-              &spoly_reflection_eval,
-              &spoly_refraction_eval,
-              &spoly_refr_spec_P,
-              &spoly_refr_spec_Ng,
-              &spoly_refr_object,
-              &spoly_refr_prim);
+          if (spoly_sample_chance > 0.0f && spoly_sample < spoly_sample_chance) {
+            /* Use a copy of ls since spoly modifies it via light_sample_update.
+             * The original ls is preserved for regular direct lighting below. */
+            LightSample ls_spoly = ls;
 
-          if (spoly_found > 0) {
-            has_spoly_reflection = !is_zero(bsdf_eval_sum(&spoly_reflection_eval));
-            has_spoly_refraction = (spoly_refr_object != OBJECT_NONE);
+            const int spoly_found = kernel_path_spoly_sample(
+                kg,
+                state,
+                sd,
+                emission_sd,
+                rng_state,
+                &ls_spoly,
+                &spoly_reflection_eval,
+                &spoly_refraction_eval,
+                &spoly_refr_spec_P,
+                &spoly_refr_spec_Ng,
+                &spoly_refr_object,
+                &spoly_refr_prim);
+
+            if (spoly_found > 0) {
+              bsdf_eval_mul(&spoly_reflection_eval, 1.0 / spoly_sample_chance);
+              bsdf_eval_mul(&spoly_reflection_eval, 1.0 / spoly_sample_chance);
+              has_spoly_reflection = !is_zero(bsdf_eval_sum(&spoly_reflection_eval));
+              has_spoly_refraction = (spoly_refr_object != OBJECT_NONE);
+            }
           }
           /* Fall through to regular direct lighting with the original ls. */
         }

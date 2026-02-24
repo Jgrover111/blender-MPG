@@ -671,6 +671,14 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=False,
     )
 
+    specular_polynomial_chance: FloatProperty(
+        name="Specular Polynomial Chance",
+        description="Probability of evaluating the specular polynomial solver per sample. Lower values "
+                    "improve render performance at the cost of more noise",
+        min=0.0, max=1.0,
+        default=0.1,
+    )
+
     blur_glossy: FloatProperty(
         name="Filter Glossy",
         description="Adaptively blur glossy shaders after blurry bounces, "

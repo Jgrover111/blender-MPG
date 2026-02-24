@@ -288,6 +288,7 @@ enum PathTraceDimension {
   /* Guiding RIS */
   PRNG_SURFACE_RIS_GUIDING_0 = 10,
   PRNG_SURFACE_RIS_GUIDING_1 = 11,
+  PRNG_SURFACE_SPOLY = 12,
 
   /* Volume */
   PRNG_VOLUME_PHASE = 3,
