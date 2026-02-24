@@ -94,6 +94,7 @@ NODE_DEFINE(Integrator)
   SOCKET_BOOLEAN(caustics_refractive, "Refractive Caustics", true);
   SOCKET_FLOAT(filter_glossy, "Filter Glossy", 0.0f);
   SOCKET_BOOLEAN(use_specular_polynomials, "Specular Polynomials", false);
+  SOCKET_FLOAT(specular_polynomial_chance, "Specular Polynomial Chance", 0.1f);
 
   SOCKET_BOOLEAN(use_direct_light, "Use Direct Light", true);
   SOCKET_BOOLEAN(use_indirect_light, "Use Indirect Light", true);
@@ -233,6 +234,7 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   kintegrator->caustics_refractive = caustics_refractive;
   kintegrator->filter_glossy = (filter_glossy == 0.0f) ? FLT_MAX : 1.0f / filter_glossy;
   kintegrator->use_specular_polynomials = use_specular_polynomials;
+  kintegrator->specular_polynomial_chance = specular_polynomial_chance;
 
   kintegrator->filter_closures = 0;
   if (!use_direct_light) {

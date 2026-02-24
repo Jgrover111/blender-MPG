@@ -664,6 +664,10 @@ class CYCLES_RENDER_PT_light_paths_caustics(CyclesButtonsPanel, Panel):
         col.prop(cscene, "caustics_refractive", text="Refractive")
         col.prop(cscene, "use_specular_polynomials", text="Specular Polynomials")
 
+        sub = col.column()
+        sub.active = cscene.use_specular_polynomials
+        sub.prop(cscene, "specular_polynomial_chance", text="Polynomial Chance")
+
 
 class CYCLES_RENDER_PT_light_paths_fast_gi(CyclesButtonsPanel, Panel):
     bl_label = "Fast GI Approximation"
