@@ -1054,7 +1054,8 @@ ccl_device_inline float2 spoly_halfvector_constraint(float3 recv_P,
                                                       float u,
                                                       float v,
                                                       float3 dp_du,
-                                                      float3 dp_dv)
+                                                      float3 dp_dv,
+                                                      float eta)
 {
   const float w = 1.0f - u - v;
   const float3 x = w * P0 + u * P1 + v * P2;
@@ -1076,8 +1077,9 @@ ccl_device_inline float2 spoly_halfvector_constraint(float3 recv_P,
   const float3 wi = d_recv / len_recv;
   const float3 wo = d_light / len_light;
 
-  /* Guard against near-opposite directions (grazing angle). */
-  const float3 H_raw = wi + wo;
+  /* Half-vector: reflection (eta=1) or refraction (eta=IOR).
+   * For refraction, H = wi + eta*wo (Snell's law half-vector). */
+  const float3 H_raw = wi + eta * wo;
   const float len_H = len(H_raw);
   if (len_H < 1e-8f)
     return make_float2(FLT_MAX, FLT_MAX);
@@ -1103,7 +1105,8 @@ ccl_device_inline bool spoly_newton_refine(float3 recv_P,
                                            float3 N1,
                                            float3 N2,
                                            ccl_private float *u_out,
-                                           ccl_private float *v_out)
+                                           ccl_private float *v_out,
+                                           float eta)
 {
   float u = *u_out;
   float v = *v_out;
@@ -1115,7 +1118,7 @@ ccl_device_inline bool spoly_newton_refine(float3 recv_P,
 
   for (int iter = 0; iter < SPOLY_NEWTON_MAX_ITER; iter++) {
     const float2 c = spoly_halfvector_constraint(
-        recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v, dp_du, dp_dv);
+        recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v, dp_du, dp_dv, eta);
 
     /* Degenerate constraint evaluation (NaN guard). */
     if (c.x == FLT_MAX)
@@ -1131,9 +1134,9 @@ ccl_device_inline bool spoly_newton_refine(float3 recv_P,
     /* Finite-difference Jacobian. */
     const float eps = SPOLY_NEWTON_EPS;
     const float2 c_du = spoly_halfvector_constraint(
-        recv_P, light_P, P0, P1, P2, N0, N1, N2, u + eps, v, dp_du, dp_dv);
+        recv_P, light_P, P0, P1, P2, N0, N1, N2, u + eps, v, dp_du, dp_dv, eta);
     const float2 c_dv = spoly_halfvector_constraint(
-        recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v + eps, dp_du, dp_dv);
+        recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v + eps, dp_du, dp_dv, eta);
 
     /* Degenerate Jacobian evaluations. */
     if (c_du.x == FLT_MAX || c_dv.x == FLT_MAX)
@@ -1164,7 +1167,7 @@ ccl_device_inline bool spoly_newton_refine(float3 recv_P,
     /* Did not converge within iteration limit.
      * Check if final residual is at least reasonably small. */
     const float2 c_final = spoly_halfvector_constraint(
-        recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v, dp_du, dp_dv);
+        recv_P, light_P, P0, P1, P2, N0, N1, N2, u, v, dp_du, dp_dv, eta);
     if (c_final.x == FLT_MAX || fabsf(c_final.x) > 1e-4f || fabsf(c_final.y) > 1e-4f)
       return false;
   }
@@ -1755,7 +1758,8 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
                                    normals[1],
                                    normals[2],
                                    &u,
-                                   &v))
+                                   &v,
+                                   eta))
           {
             continue;
           }
