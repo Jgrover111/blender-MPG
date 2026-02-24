@@ -1554,7 +1554,12 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
                                                     ccl_private ShaderData *sd_mnee,
                                                     const ccl_private RNGState *rng_state,
                                                     ccl_private LightSample *ls,
-                                                    ccl_private BsdfEval *throughput)
+                                                    ccl_private BsdfEval *throughput,
+                                                    ccl_private BsdfEval *refraction_throughput,
+                                                    ccl_private float3 *refraction_spec_P,
+                                                    ccl_private float3 *refraction_spec_Ng,
+                                                    ccl_private int *refraction_object,
+                                                    ccl_private int *refraction_prim_out)
 {
   /* Need a finite light position. */
   if (ls->t == FLT_MAX)
@@ -1570,6 +1575,13 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
   /* Global solver call budget across all casters. */
   int total_solver_calls = 0;
   int total_found = 0;
+  int reflection_found = 0;
+  int refraction_found = 0;
+
+  /* Initialize outputs. */
+  bsdf_eval_init(throughput, zero_spectrum());
+  bsdf_eval_init(refraction_throughput, zero_spectrum());
+  *refraction_object = OBJECT_NONE;
 
   /* Iterate over each caustic caster object's 4-ary tree. */
   for (int ci = 0; ci < num_caster_objects; ci++) {
@@ -1825,7 +1837,16 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
               continue;
           }
           else {
-            if (dot(-dir_to_spec, spec_N) < 0.0f) {
+            /* Refraction hemisphere check: receiver and light must be on
+             * OPPOSITE sides of the surface. The polynomial uses squared
+             * cross-products and can't distinguish refraction directions,
+             * so both "entering" and "exiting" roots are found. Filter
+             * to keep only the physically valid one. */
+            const float recv_side = dot(-dir_to_spec, spec_N);
+            const float light_side = dot(dir_to_light, spec_N);
+            if (recv_side * light_side > 0.0f)
+              continue; /* Both on same side — not valid refraction. */
+            if (recv_side < 0.0f) {
               spec_N = -spec_N;
             }
           }
@@ -2023,16 +2044,42 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
           /* Apply contribution: BSDF * light/pdf * Fresnel * G. */
           bsdf_eval_mul(&solution_eval, spec_contribution * G);
 
-          /* Use = for first solution to avoid uninitialized memory. */
-          if (total_found == 0) {
-            throughput->diffuse = solution_eval.diffuse;
-            throughput->glossy = solution_eval.glossy;
-            throughput->sum = solution_eval.sum;
+          /* Split contributions: reflective goes with the regular shadow ray
+           * (the reflector doesn't block the direct recv→light path).
+           * Refractive needs its own shadow ray from the specular point
+           * because the regular shadow ray hits the glass and double-attenuates. */
+          if (!is_refraction) {
+            if (reflection_found == 0) {
+              throughput->diffuse = solution_eval.diffuse;
+              throughput->glossy = solution_eval.glossy;
+              throughput->sum = solution_eval.sum;
+            }
+            else {
+              throughput->diffuse += solution_eval.diffuse;
+              throughput->glossy += solution_eval.glossy;
+              throughput->sum += solution_eval.sum;
+            }
+            reflection_found++;
           }
           else {
-            throughput->diffuse += solution_eval.diffuse;
-            throughput->glossy += solution_eval.glossy;
-            throughput->sum += solution_eval.sum;
+            if (refraction_found == 0) {
+              refraction_throughput->diffuse = solution_eval.diffuse;
+              refraction_throughput->glossy = solution_eval.glossy;
+              refraction_throughput->sum = solution_eval.sum;
+            }
+            else {
+              refraction_throughput->diffuse += solution_eval.diffuse;
+              refraction_throughput->glossy += solution_eval.glossy;
+              refraction_throughput->sum += solution_eval.sum;
+            }
+            /* Record the specular point for the shadow ray.
+             * Use the last refractive solution's position (they should
+             * all be close on the same caster surface). */
+            *refraction_spec_P = spec_pos;
+            *refraction_spec_Ng = spec_ng;
+            *refraction_object = caster_object;
+            *refraction_prim_out = prim;
+            refraction_found++;
           }
           total_found++;
 

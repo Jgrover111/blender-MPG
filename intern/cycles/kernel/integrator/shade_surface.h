@@ -356,19 +356,23 @@ ccl_device
 
   int mnee_vertex_count = 0;  // NOLINT
 
-  /* Spoly caustic contribution to be added to regular direct lighting.
-   * Computed before MNEE/regular path so we can merge both into one shadow ray. */
-  BsdfEval spoly_eval ccl_optional_struct_init;
-  bool has_spoly_contribution = false;
+  /* Spoly caustic contributions, split by type:
+   * - Reflective: merged into the regular shadow ray (reflector doesn't block direct path)
+   * - Refractive: needs its own shadow ray from the specular point to the light,
+   *   because the regular recv→light shadow ray hits the glass and double-attenuates. */
+  BsdfEval spoly_reflection_eval ccl_optional_struct_init;
+  BsdfEval spoly_refraction_eval ccl_optional_struct_init;
+  bool has_spoly_reflection = false;
+  bool has_spoly_refraction = false;
+  float3 spoly_refr_spec_P = zero_float3();
+  float3 spoly_refr_spec_Ng = zero_float3();
+  int spoly_refr_object = OBJECT_NONE;
+  int spoly_refr_prim = PRIM_NONE;
 
   const bool use_spoly = kernel_data.integrator.use_specular_polynomials;
 
   if (use_spoly) {
-    /* When Specular Polynomials is enabled, it REPLACES MNEE entirely.
-     * The spoly caustic contribution is ADDITIVE: it gets merged into
-     * the regular direct lighting bsdf_eval so both share one shadow ray.
-     * For reflection caustics the direct recv->light path is unblocked
-     * (the mirror reflects but doesn't occlude), so this is correct. */
+    /* When Specular Polynomials is enabled, it REPLACES MNEE entirely. */
     if (ls.type != LIGHT_TRIANGLE) {
       const bool use_caustics = kernel_data_fetch(lights, ls.prim).use_caustics;
       if (use_caustics) {
@@ -384,10 +388,22 @@ ccl_device
           LightSample ls_spoly = ls;
 
           const int spoly_found = kernel_path_spoly_sample(
-              kg, state, sd, emission_sd, rng_state, &ls_spoly, &spoly_eval);
+              kg,
+              state,
+              sd,
+              emission_sd,
+              rng_state,
+              &ls_spoly,
+              &spoly_reflection_eval,
+              &spoly_refraction_eval,
+              &spoly_refr_spec_P,
+              &spoly_refr_spec_Ng,
+              &spoly_refr_object,
+              &spoly_refr_prim);
 
           if (spoly_found > 0) {
-            has_spoly_contribution = true;
+            has_spoly_reflection = !is_zero(bsdf_eval_sum(&spoly_reflection_eval));
+            has_spoly_refraction = (spoly_refr_object != OBJECT_NONE);
           }
           /* Fall through to regular direct lighting with the original ls. */
         }
@@ -426,9 +442,10 @@ ccl_device
   }
   else
   {
+    const bool has_spoly = has_spoly_reflection || has_spoly_refraction;
     const Spectrum light_eval = light_sample_shader_eval(
         kg, state, emission_sd, &ls, sd->time);
-    if (is_zero(light_eval) && !has_spoly_contribution) {
+    if (is_zero(light_eval) && !has_spoly) {
       return;
     }
 
@@ -438,16 +455,17 @@ ccl_device
     const float mis_weight = light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
     bsdf_eval_mul(&bsdf_eval, light_eval / ls.pdf * mis_weight);
 
-    /* Add specular polynomial caustic contribution (no MIS — deterministic path). */
-    if (has_spoly_contribution) {
-      bsdf_eval.diffuse += spoly_eval.diffuse;
-      bsdf_eval.glossy += spoly_eval.glossy;
-      bsdf_eval.sum += spoly_eval.sum;
+    /* Add reflective spoly contribution to the regular shadow ray
+     * (the reflector doesn't block the direct recv→light path). */
+    if (has_spoly_reflection) {
+      bsdf_eval.diffuse += spoly_reflection_eval.diffuse;
+      bsdf_eval.glossy += spoly_reflection_eval.glossy;
+      bsdf_eval.sum += spoly_reflection_eval.sum;
     }
 
     /* Path termination. */
     const float terminate = path_state_rng_light_termination(kg, rng_state);
-    if (light_sample_terminate(kg, &bsdf_eval, terminate) && !has_spoly_contribution) {
+    if (light_sample_terminate(kg, &bsdf_eval, terminate) && !has_spoly) {
       return;
     }
 
@@ -492,6 +510,56 @@ ccl_device
   }
 
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, flag) = shadow_flag;
+
+  /* Refractive spoly contribution: send via separate shadow ray from the
+   * specular point to the light (like MNEE). The regular recv→light shadow
+   * ray would hit the glass surface and double-attenuate the contribution.
+   * By starting from the specular point (on the glass surface), the shadow
+   * ray bypasses the caster entirely. */
+  if (has_spoly_refraction) {
+    Ray refr_ray;
+    refr_ray.P = spoly_refr_spec_P;
+    refr_ray.D = normalize(ls.P - spoly_refr_spec_P);
+    refr_ray.tmin = 0.0f;
+    refr_ray.tmax = len(ls.P - spoly_refr_spec_P);
+    refr_ray.self.object = spoly_refr_object;
+    refr_ray.self.prim = spoly_refr_prim;
+    refr_ray.self.light_object = ls.object;
+    refr_ray.self.light_prim = ls.prim;
+    refr_ray.dP = differential_zero_compact();
+    refr_ray.dD = differential_zero_compact();
+    refr_ray.time = sd->time;
+
+    IntegratorShadowState refr_shadow_state = integrate_direct_light_shadow_init_common(
+        kg,
+        state,
+        &refr_ray,
+        bsdf_eval_sum(&spoly_refraction_eval),
+        ls.group,
+        0);
+
+    uint32_t refr_shadow_flag = INTEGRATOR_STATE(state, path, flag);
+    if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) {
+      PackedSpectrum pass_diffuse_weight;
+      PackedSpectrum pass_glossy_weight;
+      if (refr_shadow_flag & PATH_RAY_ANY_PASS) {
+        pass_diffuse_weight = INTEGRATOR_STATE(state, path, pass_diffuse_weight);
+        pass_glossy_weight = INTEGRATOR_STATE(state, path, pass_glossy_weight);
+      }
+      else {
+        refr_shadow_flag |= PATH_RAY_SURFACE_PASS;
+        pass_diffuse_weight = PackedSpectrum(
+            bsdf_eval_pass_diffuse_weight(&spoly_refraction_eval));
+        pass_glossy_weight = PackedSpectrum(
+            bsdf_eval_pass_glossy_weight(&spoly_refraction_eval));
+      }
+      INTEGRATOR_STATE_WRITE(
+          refr_shadow_state, shadow_path, pass_diffuse_weight) = pass_diffuse_weight;
+      INTEGRATOR_STATE_WRITE(
+          refr_shadow_state, shadow_path, pass_glossy_weight) = pass_glossy_weight;
+    }
+    INTEGRATOR_STATE_WRITE(refr_shadow_state, shadow_path, flag) = refr_shadow_flag;
+  }
 }
 
 /* Path tracing: bounce off or through surface with new direction. */
