@@ -1655,13 +1655,13 @@ ccl_device_forceinline int kernel_path_spoly_sample(KernelGlobals kg,
         if (CLOSURE_IS_REFRACTION(sc->type)) {
           caster_has_refraction = true;
           ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)sc;
-          caster_eta = mbsdf->ior;
+          caster_eta = (sd_mnee->flag * SD_BACKFACING) ? 1.0f / mbsdf->ior : mbsdf->ior;
         }
         if (CLOSURE_IS_GLASS(sc->type)) {
           caster_has_reflection = true;
           caster_has_refraction = true;
           ccl_private MicrofacetBsdf *mbsdf = (ccl_private MicrofacetBsdf *)sc;
-          caster_eta = mbsdf->ior;
+          caster_eta = (sd_mnee->flag * SD_BACKFACING) ? 1.0f / mbsdf->ior : mbsdf->ior;
         }
       }
 
