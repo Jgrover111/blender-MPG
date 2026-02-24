@@ -1078,8 +1078,10 @@ ccl_device_inline float2 spoly_halfvector_constraint(float3 recv_P,
   const float3 wo = d_light / len_light;
 
   /* Half-vector: reflection (eta=1) or refraction (eta=IOR).
-   * For refraction, H = wi + eta*wo (Snell's law half-vector). */
-  const float3 H_raw = wi + eta * wo;
+   * For refraction, H = eta*wi + wo to match the polynomial constraint
+   * which encodes eta*sin(theta_recv) = sin(theta_light).
+   * For reflection (eta=1), this reduces to wi + wo. */
+  const float3 H_raw = eta * wi + wo;
   const float len_H = len(H_raw);
   if (len_H < 1e-8f)
     return make_float2(FLT_MAX, FLT_MAX);
@@ -1234,17 +1236,19 @@ ccl_device_inline float spoly_compute_transfer_matrix(float3 recv_P,
   ilo = 1.0f / ilo;
   wo *= ilo;
 
-  /* Half vector: H = -(wi + eta*wo) for reflection (eta=1) or refraction. */
-  float3 H = -(wi + eta * wo);
+  /* Half vector: H = -(eta*wi + wo) for reflection (eta=1) or refraction.
+   * eta is applied to the receiver side to match the polynomial constraint. */
+  float3 H = -(eta * wi + wo);
   const float len_H = len(H);
   if (len_H < 1e-8f)
     return -3.0f;
   const float ilh = 1.0f / len_H;
   H *= ilh;
 
-  /* Combine scale factors. */
-  ilo *= eta * ilh;
-  ili *= ilh;
+  /* Combine scale factors. eta scales the receiver side (ili),
+   * matching the half-vector formula H = -(eta*wi + wo). */
+  ili *= eta * ilh;
+  ilo *= ilh;
 
   /* Triangle edge vectors (position derivatives w.r.t. barycentric). */
   float3 dp_du = P1 - P0;
