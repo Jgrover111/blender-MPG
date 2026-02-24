@@ -10,9 +10,15 @@
 
 ## P2: Refraction Caustics
 
-- [x] **Enable single-bounce refraction (T)** — Enabled. Per-caster material detection evaluates shader at first triangle centroid. `CLOSURE_IS_GLASS` triggers both reflection + refraction solvers. `CLOSURE_IS_REFRACTION` triggers refraction only. IOR/eta extracted from closure. Transfer matrix updated: `H = -(wi + eta*wo)`.
+- [x] **Enable single-bounce refraction (T)** — Enabled. Per-caster material detection evaluates shader at first triangle centroid. `CLOSURE_IS_GLASS` triggers both reflection + refraction solvers. `CLOSURE_IS_REFRACTION` triggers refraction only. IOR/eta extracted from closure. Transfer matrix updated: `H = -(eta*wi + wo)`.
 
 - [x] **Principled BSDF transmission** — Fixed. Principled BSDF's transmission component decomposes into `MICROFACET_GGX_GLASS_ID` or `MICROFACET_GGX_REFRACTION_ID` closures. Matched by `CLOSURE_IS_GLASS`/`CLOSURE_IS_REFRACTION` in material detection. Fresnel transmittance from `microfacet_fresnel()`.
+
+- [x] **Refraction half-vector direction** — Fixed. Newton constraint must use `H = eta*wi + wo` (eta on receiver direction) to match the polynomial which encodes `eta*sin(theta_recv) = sin(theta_light)`. The original `H = wi + eta*wo` encoded the inverse Snell's law, producing caustics on the wrong side. Transfer matrix correspondingly uses `H = -(eta*wi + wo)` with eta scaling on the receiver side (`ili *= eta * ilh`).
+
+- [x] **Wrong-side refraction filtering** — Fixed. The polynomial uses squared cross-products and can't distinguish refraction directions, so both "entering" and "exiting" roots are found. Added post-Newton hemisphere check: receiver and light must be on opposite sides of the surface (`recv_side * light_side > 0 → reject`). The reference handles this implicitly via its 3D constraint (`d = n + getSign() * h`) where getSign()=+1 for refraction.
+
+- [x] **Refractive shadow ray routing** — Fixed. Refractive spoly contributions must NOT go through the regular recv→light shadow ray (which hits the glass surface and double-attenuates). Split into separate shadow ray from the specular point to the light (glass self-excluded), similar to MNEE's approach. Reflective contributions continue to merge with the regular shadow ray.
 
 ## P3: Light Types
 
@@ -62,6 +68,6 @@ These are differences from the reference implementation that may affect correctn
 
 - [ ] **Debug code cleanup** — Remove: unused `spoly_done:` label, diagnostic negative return codes in transfer matrix, any remaining `#if 0` blocks.
 
-- [x] **Transfer matrix for refraction** — Done. `spoly_compute_transfer_matrix()` now accepts `eta` parameter. Uses `H = -(wi + eta*wo)` for both reflection (eta=1) and refraction.
+- [x] **Transfer matrix for refraction** — Done. `spoly_compute_transfer_matrix()` now accepts `eta` parameter. Uses `H = -(eta*wi + wo)` for both reflection (eta=1) and refraction. Eta scaling applied to receiver side (`ili *= eta * ilh`).
 
 - [ ] **Performance tuning** — Global solver call cap of 256 may need adjustment. Cross-triangle dedup uses linear scan. Investigate early termination heuristics and adaptive sample counts.
