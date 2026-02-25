@@ -5,26 +5,26 @@
 #pragma once
 
 #include "kernel/integrator/mnee.h"
-#include "kernel/sample/mapping.h"
 
 /*
  * Specular Manifold Sampling (SMS)
  *
- * This code implements Specular Manifold Sampling for rendering high-frequency caustics.
- * SMS extends Manifold Next Event Estimation (MNEE) by using stochastic initialization
- * instead of deterministic seed paths, enabling unbiased rendering of caustics.
+ * This code implements Specular Manifold Sampling for rendering high-frequency caustics,
+ * following the architecture of the Mitsuba reference implementation.
  *
- * Key difference from MNEE:
- * - MNEE uses deterministic seeding: traces directly toward light, finds caustic casters
- *   only along the receiver→light axis, then applies Newton iteration.
- * - SMS uses stochastic seeding: randomizes the initial probe direction (angular jittering)
- *   and samples random positions on found surfaces (random barycentrics), enabling
- *   discovery of off-axis specular paths that MNEE would miss.
+ * Key design: Global seeding (matching Mitsuba reference)
+ * - Iterates over ALL caustic caster shapes in the scene.
+ * - For each shape, samples a uniformly random point on its surface.
+ * - Traces from receiver toward that sampled point to initialize the manifold vertex.
+ * - Runs Newton iteration to find a valid specular path.
+ * - Accumulates contributions from all shapes.
  *
- * The Mitsuba reference implementation uses full "global seeding" where it iterates over
- * all caustic caster shapes and samples uniformly on each. Our implementation approximates
- * this by using angular jittering within a cone around the light direction, combined with
- * random surface point sampling, which is more practical within Cycles' architecture.
+ * This differs from MNEE's topology-local approach which traces a single deterministic
+ * ray from receiver toward light and only finds caustic casters along that fixed axis.
+ *
+ * Two modes are supported:
+ * - Biased: Fixed trial budget per shape, tracks unique solutions via direction comparison.
+ * - Unbiased: Geometric series probability estimator with Bernoulli trials per shape.
  *
  * Reference:
  * "Specular Manifold Sampling for Rendering High-Frequency Caustics and Glints"
@@ -37,138 +37,117 @@ CCL_NAMESPACE_BEGIN
 
 /* SMS algorithm constants. */
 #define SMS_MAX_TRIALS 64
-#define SMS_BIASED_BUDGET 2
-#define SMS_PROBE_CONE_ANGLE 0.5f  /* Half-angle in radians (~28 degrees) for probe ray jittering */
+#define SMS_BIASED_BUDGET 4
+#define SMS_UNIQUENESS_THRESHOLD 1e-4f
 
-/* Structure for tracking unique solutions in biased SMS. */
-struct SMSUniqueSolution {
-  float3 pos;  /* Position on first caustic caster vertex. */
-  float3 dir;  /* Direction from first caster towards receiver. */
-  uint hash;   /* Hash for quick comparison. */
-  bool valid;  /* Slot validity flag. */
-};
-
-/* Hash function for solution uniqueness check. */
-ccl_device_inline uint sms_hash_solution(const float3 pos, const float3 dir)
+/* Sample a uniformly random point on a caustic caster shape.
+ * Selects a random triangle from the shape's mesh, then samples
+ * uniform barycentrics on that triangle.
+ *
+ * This is the kernel-side equivalent of Mitsuba's shape->sample_position(). */
+ccl_device_forceinline void sms_sample_surface_point(KernelGlobals kg,
+                                                      const int caster_idx,
+                                                      const float rand_tri,
+                                                      const float2 rand_bary,
+                                                      ccl_private float3 &P,
+                                                      ccl_private float3 &Ng,
+                                                      ccl_private int &out_object,
+                                                      ccl_private int &out_prim)
 {
-  /* Simple spatial hashing. */
-  const int3 ipos = make_int3((int)(pos.x * 1000.0f), (int)(pos.y * 1000.0f), (int)(pos.z * 1000.0f));
-  const int3 idir = make_int3((int)(dir.x * 100.0f), (int)(dir.y * 100.0f), (int)(dir.z * 100.0f));
-  return hash_uint3(ipos.x ^ idir.x, ipos.y ^ idir.y, ipos.z ^ idir.z);
-}
+  const int object = kernel_data_fetch(caustic_caster_object_index, caster_idx);
+  const int prim_offset = kernel_data_fetch(caustic_caster_prim_offset, caster_idx);
+  const int num_prims = kernel_data_fetch(caustic_caster_num_prims, caster_idx);
 
-/* Check if a solution is unique compared to previously found solutions. */
-ccl_device_inline bool sms_is_unique_solution(const float3 pos,
-                                               const float3 dir,
-                                               ccl_private SMSUniqueSolution *solutions,
-                                               const int num_solutions)
-{
-  const uint hash = sms_hash_solution(pos, dir);
-  const float pos_threshold = 1e-4f;
-  const float dir_threshold = 1e-3f;
+  /* Select a random triangle (uniform by index, not area-weighted). */
+  const int tri_idx = min((int)(rand_tri * (float)num_prims), num_prims - 1);
+  const int prim = prim_offset + tri_idx;
 
-  for (int i = 0; i < num_solutions; i++) {
-    if (!solutions[i].valid) {
-      continue;
-    }
-    if (solutions[i].hash == hash) {
-      if (len_squared(solutions[i].pos - pos) < pos_threshold &&
-          len_squared(solutions[i].dir - dir) < dir_threshold)
-      {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-/* Sample a random point on a triangle mesh (caustic caster). */
-ccl_device_inline void sms_sample_triangle_point(KernelGlobals kg,
-                                                  const int object,
-                                                  const int prim,
-                                                  const float u,
-                                                  const float v,
-                                                  ccl_private float3 &P,
-                                                  ccl_private float3 &Ng)
-{
-  /* Sample point on triangle using barycentric coordinates. */
-  const float sqrt_u = sqrtf(u);
-  const float u1 = 1.0f - sqrt_u;
-  const float u2 = v * sqrt_u;
+  /* Sample uniform barycentrics on the selected triangle. */
+  const float sqrt_u = sqrtf(rand_bary.x);
+  const float u = 1.0f - sqrt_u;
+  const float v = rand_bary.y * sqrt_u;
+  const float w = 1.0f - u - v;
 
   /* Get triangle vertices. */
-  float3 tri_a, tri_b, tri_c;
-  triangle_vertices(kg, prim, &tri_a, &tri_b, &tri_c);
+  const packed_uint3 vindex = kernel_data_fetch(tri_vindex, prim);
+  const float3 tri_a = kernel_data_fetch(tri_verts, vindex.x);
+  const float3 tri_b = kernel_data_fetch(tri_verts, vindex.y);
+  const float3 tri_c = kernel_data_fetch(tri_verts, vindex.z);
+
+  /* Compute position and geometric normal in object space. */
+  float3 pos = u * tri_a + v * tri_b + w * tri_c;
+  float3 ng = normalize(cross(tri_b - tri_a, tri_c - tri_a));
 
   /* Apply object transform if needed. */
-  if (object != OBJECT_NONE) {
-    const Transform tfm = object_get_transform(kg, object);
-    tri_a = transform_point(&tfm, tri_a);
-    tri_b = transform_point(&tfm, tri_b);
-    tri_c = transform_point(&tfm, tri_c);
+  const int ob_flag = kernel_data_fetch(object_flag, object);
+  if (!(ob_flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+    Transform tfm = object_fetch_transform(kg, object, OBJECT_TRANSFORM);
+    pos = transform_point(&tfm, pos);
+    ng = normalize(transform_direction(&tfm, ng));
   }
 
-  /* Compute position and geometric normal. */
-  P = u1 * tri_a + u2 * tri_b + (1.0f - u1 - u2) * tri_c;
-  Ng = normalize(cross(tri_b - tri_a, tri_c - tri_a));
+  if (ob_flag & SD_OBJECT_NEGATIVE_SCALE) {
+    ng = -ng;
+  }
+
+  P = pos;
+  Ng = ng;
+  out_object = object;
+  out_prim = prim;
 }
 
-/* Find caustic casters using stochastic probe ray direction.
- * Unlike deterministic MNEE which traces directly toward the light,
- * SMS uses angular jittering to discover off-axis specular paths.
- * This implements a practical approximation of global seeding where
- * the probe direction is sampled within a cone around the light direction. */
-ccl_device_forceinline int sms_find_caster_chain(KernelGlobals kg,
-                                                  IntegratorState state,
-                                                  ccl_private ShaderData *sd,
-                                                  ccl_private ShaderData *sd_mnee,
-                                                  const ccl_private LightSample *ls,
-                                                  ccl_private ManifoldVertex *vertices,
-                                                  const ccl_private RNGState *rng_state,
-                                                  bool *has_reflection)
+/* Try to initialize a manifold vertex on a specific caustic caster shape
+ * by sampling a random surface point, tracing toward it from the receiver,
+ * and setting up the vertex if we hit the target shape.
+ *
+ * This matches Mitsuba's sample_path() function. */
+ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
+                                             IntegratorState state,
+                                             ccl_private ShaderData *sd,
+                                             ccl_private ShaderData *sd_mnee,
+                                             const ccl_private LightSample *ls,
+                                             const int caster_idx,
+                                             const ccl_private RNGState *rng_state,
+                                             ccl_private ManifoldVertex *vertices,
+                                             ccl_private int *out_vertex_count,
+                                             ccl_private bool *out_has_reflection)
 {
-  /* Base direction toward light. */
-  float3 base_D;
-  float base_tmax;
-  if (ls->t == FLT_MAX) {
-    base_D = ls->D;
-    base_tmax = ls->t;
-  }
-  else {
-    base_D = ls->P - sd->P;
-    base_D = normalize_len(base_D, &base_tmax);
-  }
+  *out_vertex_count = 0;
+  *out_has_reflection = false;
 
-  /* Apply angular jittering: sample direction within a cone around the light direction.
-   * This allows discovery of caustic casters that don't lie on the direct receiver-light axis,
-   * which is essential for rendering off-axis caustics from complex geometry.
-   *
-   * The cone angle determines how far off-axis we can search. Larger angles allow finding
-   * more diverse caustic paths but may reduce efficiency for simple geometries. */
-  const float2 jitter_rand = path_state_rng_2D(kg, rng_state, PRNG_LIGHT_U);
-  float cos_theta_unused;
-  float pdf_unused;
-  const float one_minus_cos_angle = 1.0f - cosf(SMS_PROBE_CONE_ANGLE);
-  float3 jittered_D = sample_uniform_cone(
-      base_D, one_minus_cos_angle, jitter_rand, &cos_theta_unused, &pdf_unused);
+  /* Sample a random point on the target caustic caster surface. */
+  float3 sampled_P, sampled_Ng;
+  int target_object, target_prim;
 
-  /* Setup probe ray with jittered direction. */
+  const float rand_tri = path_state_rng_1D(kg, rng_state, PRNG_SURFACE_BSDF);
+  const float2 rand_bary = path_state_rng_2D(kg, rng_state, PRNG_LIGHT_U);
+
+  sms_sample_surface_point(
+      kg, caster_idx, rand_tri, rand_bary, sampled_P, sampled_Ng, target_object, target_prim);
+
+  /* Trace from receiver toward the sampled point on the caster surface. */
+  float3 direction = sampled_P - sd->P;
+  float direction_len;
+  direction = normalize_len(direction, &direction_len);
+
   Ray probe_ray;
   probe_ray.self.object = sd->object;
   probe_ray.self.prim = sd->prim;
   probe_ray.self.light_object = ls->object;
   probe_ray.self.light_prim = ls->prim;
   probe_ray.P = sd->P;
+  probe_ray.D = direction;
   probe_ray.tmin = 0.0f;
-  probe_ray.D = jittered_D;
-  /* Extend tmax to account for jittered direction potentially being longer path. */
-  probe_ray.tmax = base_tmax * 2.0f;
+  probe_ray.tmax = direction_len * 2.0f;
   probe_ray.dP = differential_make_compact(sd->dP);
   probe_ray.dD = differential_zero_compact();
   probe_ray.time = sd->time;
   Intersection probe_isect;
 
-  *has_reflection = false;
+  /* Trace and find caustic casters along this direction.
+   * We specifically look for the target object but also collect
+   * any other caustic casters we encounter along the way. */
+  bool found_target = false;
   int vertex_count = 0;
 
   for (int isect_count = 0; isect_count < MNEE_MAX_INTERSECTION_COUNT; isect_count++) {
@@ -177,16 +156,25 @@ ccl_device_forceinline int sms_find_caster_chain(KernelGlobals kg,
       break;
     }
 
+    const int hit_object = (probe_isect.object == OBJECT_NONE) ?
+                               kernel_data_fetch(prim_object, probe_isect.prim) :
+                               probe_isect.object;
+
     const int object_flags = intersection_get_object_flags(kg, &probe_isect);
     if (object_flags & SD_OBJECT_CAUSTICS_CASTER) {
       /* Check if we have enough slots. */
       if (vertex_count >= MNEE_MAX_CAUSTIC_CASTERS) {
-        return 0;
+        return false;
       }
 
       /* Reject if not a triangle mesh. */
       if (!(probe_isect.type & PRIMITIVE_TRIANGLE)) {
-        return 0;
+        return false;
+      }
+
+      /* Check if we hit our target object. */
+      if (hit_object == target_object) {
+        found_target = true;
       }
 
       ccl_private ManifoldVertex &mv = vertices[vertex_count++];
@@ -196,7 +184,7 @@ ccl_device_forceinline int sms_find_caster_chain(KernelGlobals kg,
 
       /* Reject if smooth normals not available. */
       if (!(sd_mnee->shader & SHADER_SMOOTH_NORMAL)) {
-        return 0;
+        return false;
       }
 
       surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
@@ -212,7 +200,7 @@ ccl_device_forceinline int sms_find_caster_chain(KernelGlobals kg,
 
           /* Determine if this is a reflection closure. */
           if (CLOSURE_IS_REFLECTION(bsdf->type)) {
-            *has_reflection = true;
+            *out_has_reflection = true;
           }
 
           /* Figure out appropriate index of refraction ratio. */
@@ -222,10 +210,10 @@ ccl_device_forceinline int sms_find_caster_chain(KernelGlobals kg,
           }
           else {
             eta = (sd_mnee->flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior :
-                                                    microfacet_bsdf->ior;
+                                                     microfacet_bsdf->ior;
           }
 
-          /* Sample microfacet normal offset. */
+          /* Sample microfacet normal offset based on roughness. */
           float2 h = zero_float2();
           if (microfacet_bsdf->alpha_x > 0.f && microfacet_bsdf->alpha_y > 0.f) {
             const float2 bsdf_uv = path_state_rng_2D(kg, rng_state, PRNG_SURFACE_BSDF);
@@ -236,18 +224,13 @@ ccl_device_forceinline int sms_find_caster_chain(KernelGlobals kg,
                                     bsdf_uv.y);
           }
 
-          /* Setup differential geometry on vertex with random barycentric sampling.
-           * By passing rng_state, the vertex position is sampled uniformly on the
-           * triangle instead of using the intersection point. This, combined with
-           * angular jittering, provides more comprehensive exploration of the
-           * specular manifold than deterministic MNEE initialization. */
-          mnee_setup_manifold_vertex(
-              kg, &mv, bsdf, eta, h, &probe_ray, &probe_isect, sd_mnee, rng_state);
+          /* Setup differential geometry on vertex. */
+          mnee_setup_manifold_vertex(kg, &mv, bsdf, eta, h, &probe_ray, &probe_isect, sd_mnee);
           break;
         }
       }
       if (!found_compatible_bsdf) {
-        return 0;
+        return false;
       }
     }
 
@@ -256,7 +239,12 @@ ccl_device_forceinline int sms_find_caster_chain(KernelGlobals kg,
     probe_ray.tmin = intersection_t_offset(probe_isect.t);
   }
 
-  return vertex_count;
+  if (!found_target || vertex_count == 0) {
+    return false;
+  }
+
+  *out_vertex_count = vertex_count;
+  return true;
 }
 
 /* Evaluate SMS path contribution using MNEE infrastructure. */
@@ -276,7 +264,35 @@ ccl_device_forceinline bool sms_path_contribution(KernelGlobals kg,
       kg, state, sd, sd_mnee, ls, light_fixed_direction, vertex_count, vertices, throughput);
 }
 
-/* Biased SMS: Find multiple unique solutions with fixed budget. */
+/* Check depth limits for a given vertex count. */
+ccl_device_forceinline bool sms_check_depth_limits(KernelGlobals kg,
+                                                    IntegratorState state,
+                                                    const int vertex_count)
+{
+  if ((INTEGRATOR_STATE(state, path, transmission_bounce) + vertex_count - 1) >=
+      kernel_data.integrator.max_transmission_bounce)
+  {
+    return false;
+  }
+  if ((INTEGRATOR_STATE(state, path, diffuse_bounce) + 1) >=
+      kernel_data.integrator.max_diffuse_bounce)
+  {
+    return false;
+  }
+  if ((INTEGRATOR_STATE(state, path, bounce) + vertex_count) >= kernel_data.integrator.max_bounce)
+  {
+    return false;
+  }
+  return true;
+}
+
+/* Biased SMS: For each caustic caster shape, run a fixed trial budget,
+ * collect unique solutions, and accumulate contributions.
+ *
+ * Matches Mitsuba's biased mode:
+ *   for each shape:
+ *     for each trial in budget:
+ *       sample_path -> newton_solver -> check uniqueness -> evaluate */
 ccl_device_forceinline Spectrum integrate_sms_biased(KernelGlobals kg,
                                                       IntegratorState state,
                                                       ccl_private ShaderData *sd,
@@ -285,95 +301,106 @@ ccl_device_forceinline Spectrum integrate_sms_biased(KernelGlobals kg,
                                                       ccl_private LightSample *ls,
                                                       const bool light_fixed_direction)
 {
-  SMSUniqueSolution solutions[SMS_BIASED_BUDGET];
-  for (int i = 0; i < SMS_BIASED_BUDGET; i++) {
-    solutions[i].valid = false;
+  const int num_casters = kernel_data.integrator.caustics_num_casters;
+  if (num_casters == 0) {
+    return zero_spectrum();
   }
 
   Spectrum result = zero_spectrum();
-  int num_unique_solutions = 0;
 
-  for (int trial = 0; trial < SMS_BIASED_BUDGET; trial++) {
-    ManifoldVertex vertices[MNEE_MAX_CAUSTIC_CASTERS];
-    bool has_reflection = false;
+  /* Iterate over all caustic caster shapes in the scene. */
+  for (int caster_idx = 0; caster_idx < num_casters; caster_idx++) {
+    /* Track unique solution directions for this shape. */
+    float3 solution_dirs[SMS_BIASED_BUDGET];
+    int num_unique = 0;
 
-    /* Find caster chain with stochastic sampling. */
-    int vertex_count = sms_find_caster_chain(
-        kg, state, sd, sd_mnee, ls, vertices, rng_state, &has_reflection);
+    for (int trial = 0; trial < SMS_BIASED_BUDGET; trial++) {
+      ManifoldVertex vertices[MNEE_MAX_CAUSTIC_CASTERS];
+      bool has_reflection = false;
+      int vertex_count = 0;
 
-    if (vertex_count == 0) {
-      continue;
-    }
+      /* Sample a path via the target caster shape. */
+      if (!sms_sample_path(kg,
+                           state,
+                           sd,
+                           sd_mnee,
+                           ls,
+                           caster_idx,
+                           rng_state,
+                           vertices,
+                           &vertex_count,
+                           &has_reflection))
+      {
+        continue;
+      }
 
-    /* Check depth limits. */
-    if ((INTEGRATOR_STATE(state, path, transmission_bounce) + vertex_count - 1) >=
-        kernel_data.integrator.max_transmission_bounce)
-    {
-      continue;
-    }
-    if ((INTEGRATOR_STATE(state, path, diffuse_bounce) + 1) >=
-        kernel_data.integrator.max_diffuse_bounce)
-    {
-      continue;
-    }
-    if ((INTEGRATOR_STATE(state, path, bounce) + vertex_count) >=
-        kernel_data.integrator.max_bounce)
-    {
-      continue;
-    }
+      /* Check depth limits. */
+      if (!sms_check_depth_limits(kg, state, vertex_count)) {
+        continue;
+      }
 
-    /* Walk on specular manifold. */
-    if (!mnee_newton_solver_sms(kg,
+      /* Newton solver: walk on specular manifold. */
+      if (!mnee_newton_solver_sms(kg,
+                                   sd,
+                                   sd_mnee,
+                                   ls,
+                                   light_fixed_direction,
+                                   vertex_count,
+                                   vertices,
+                                   has_reflection,
+                                   kernel_data.integrator.caustics_constraint_derivatives))
+      {
+        continue;
+      }
+
+      /* Check uniqueness: compare direction from receiver to first vertex
+       * against previously found solutions for this shape. */
+      const float3 direction = normalize(vertices[0].p - sd->P);
+      bool duplicate = false;
+      for (int k = 0; k < num_unique; k++) {
+        if (fabsf(dot(direction, solution_dirs[k]) - 1.0f) < SMS_UNIQUENESS_THRESHOLD) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (duplicate) {
+        continue;
+      }
+
+      /* Record unique solution direction. */
+      if (num_unique < SMS_BIASED_BUDGET) {
+        solution_dirs[num_unique] = direction;
+        num_unique++;
+      }
+
+      /* Evaluate path contribution. */
+      BsdfEval throughput;
+      if (sms_path_contribution(kg,
+                                state,
                                 sd,
                                 sd_mnee,
                                 ls,
                                 light_fixed_direction,
                                 vertex_count,
                                 vertices,
-                                has_reflection,
-                                kernel_data.integrator.caustics_constraint_derivatives))
-    {
-      continue;
-    }
-
-    /* Check if this is a unique solution. */
-    const float3 first_pos = vertices[0].p;
-    const float3 first_dir = normalize(sd->P - first_pos);
-
-    if (!sms_is_unique_solution(first_pos, first_dir, solutions, num_unique_solutions)) {
-      continue;
-    }
-
-    /* Record solution. */
-    if (num_unique_solutions < SMS_BIASED_BUDGET) {
-      solutions[num_unique_solutions].pos = first_pos;
-      solutions[num_unique_solutions].dir = first_dir;
-      solutions[num_unique_solutions].hash = sms_hash_solution(first_pos, first_dir);
-      solutions[num_unique_solutions].valid = true;
-      num_unique_solutions++;
-    }
-
-    /* Evaluate path contribution. */
-    BsdfEval throughput;
-    if (sms_path_contribution(kg,
-                              state,
-                              sd,
-                              sd_mnee,
-                              ls,
-                              light_fixed_direction,
-                              vertex_count,
-                              vertices,
-                              &throughput,
-                              has_reflection))
-    {
-      result += bsdf_eval_sum(&throughput);
+                                &throughput,
+                                has_reflection))
+      {
+        result += bsdf_eval_sum(&throughput);
+      }
     }
   }
 
   return result;
 }
 
-/* Unbiased SMS: Use geometric series estimator for unbiased rendering. */
+/* Unbiased SMS: For each caustic caster shape, find one solution then use
+ * Bernoulli trials to estimate the inverse probability of finding that solution.
+ *
+ * Matches Mitsuba's unbiased mode:
+ *   for each shape:
+ *     sample_path -> newton_solver -> evaluate_contribution
+ *     estimate inverse probability via repeated sample_path trials */
 ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
                                                         IntegratorState state,
                                                         ccl_private ShaderData *sd,
@@ -382,134 +409,136 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
                                                         ccl_private LightSample *ls,
                                                         const bool light_fixed_direction)
 {
+  const int num_casters = kernel_data.integrator.caustics_num_casters;
+  if (num_casters == 0) {
+    return zero_spectrum();
+  }
+
   Spectrum result = zero_spectrum();
 
-  /* First, find a reference solution. */
-  ManifoldVertex ref_vertices[MNEE_MAX_CAUSTIC_CASTERS];
-  bool ref_has_reflection = false;
+  /* Iterate over all caustic caster shapes in the scene. */
+  for (int caster_idx = 0; caster_idx < num_casters; caster_idx++) {
+    /* Sample initial path via this caster shape. */
+    ManifoldVertex ref_vertices[MNEE_MAX_CAUSTIC_CASTERS];
+    bool ref_has_reflection = false;
+    int ref_vertex_count = 0;
 
-  int ref_vertex_count = sms_find_caster_chain(
-      kg, state, sd, sd_mnee, ls, ref_vertices, rng_state, &ref_has_reflection);
-
-  if (ref_vertex_count == 0) {
-    return result;
-  }
-
-  /* Check depth limits for reference path. */
-  if ((INTEGRATOR_STATE(state, path, transmission_bounce) + ref_vertex_count - 1) >=
-      kernel_data.integrator.max_transmission_bounce)
-  {
-    return result;
-  }
-  if ((INTEGRATOR_STATE(state, path, diffuse_bounce) + 1) >=
-      kernel_data.integrator.max_diffuse_bounce)
-  {
-    return result;
-  }
-  if ((INTEGRATOR_STATE(state, path, bounce) + ref_vertex_count) >=
-      kernel_data.integrator.max_bounce)
-  {
-    return result;
-  }
-
-  /* Walk on specular manifold to find reference solution. */
-  if (!mnee_newton_solver_sms(kg,
-                              sd,
-                              sd_mnee,
-                              ls,
-                              light_fixed_direction,
-                              ref_vertex_count,
-                              ref_vertices,
-                              ref_has_reflection,
-                              kernel_data.integrator.caustics_constraint_derivatives))
-  {
-    return result;
-  }
-
-  /* Reference solution found, record it. */
-  const float3 ref_pos = ref_vertices[0].p;
-  const float3 ref_dir = normalize(sd->P - ref_pos);
-  const uint ref_hash = sms_hash_solution(ref_pos, ref_dir);
-
-  /* Evaluate reference path contribution. */
-  BsdfEval ref_throughput;
-  if (!sms_path_contribution(kg,
-                             state,
-                             sd,
-                             sd_mnee,
-                             ls,
-                             light_fixed_direction,
-                             ref_vertex_count,
-                             ref_vertices,
-                             &ref_throughput,
-                             ref_has_reflection))
-  {
-    return result;
-  }
-
-  Spectrum ref_contrib = bsdf_eval_sum(&ref_throughput);
-
-  /* Geometric series probability estimator.
-   * Perform Bernoulli trials to find the same solution again. */
-  int n_trials = 0;
-  const float success_prob = 0.5f;
-
-  for (int trial = 1; trial < SMS_MAX_TRIALS; trial++) {
-    /* Bernoulli trial: continue with probability success_prob. */
-    const float rnd = path_state_rng_1D(kg, rng_state, PRNG_PHASE_CHANNEL);
-    if (rnd > success_prob) {
-      n_trials = trial;
-      break;
-    }
-
-    /* Try to find the same solution again. */
-    ManifoldVertex vertices[MNEE_MAX_CAUSTIC_CASTERS];
-    bool has_reflection = false;
-
-    int vertex_count = sms_find_caster_chain(
-        kg, state, sd, sd_mnee, ls, vertices, rng_state, &has_reflection);
-
-    if (vertex_count == 0) {
+    if (!sms_sample_path(kg,
+                         state,
+                         sd,
+                         sd_mnee,
+                         ls,
+                         caster_idx,
+                         rng_state,
+                         ref_vertices,
+                         &ref_vertex_count,
+                         &ref_has_reflection))
+    {
       continue;
     }
 
+    /* Check depth limits. */
+    if (!sms_check_depth_limits(kg, state, ref_vertex_count)) {
+      continue;
+    }
+
+    /* Newton solver to find reference solution. */
     if (!mnee_newton_solver_sms(kg,
-                                sd,
-                                sd_mnee,
-                                ls,
-                                light_fixed_direction,
-                                vertex_count,
-                                vertices,
-                                has_reflection,
-                                kernel_data.integrator.caustics_constraint_derivatives))
+                                 sd,
+                                 sd_mnee,
+                                 ls,
+                                 light_fixed_direction,
+                                 ref_vertex_count,
+                                 ref_vertices,
+                                 ref_has_reflection,
+                                 kernel_data.integrator.caustics_constraint_derivatives))
     {
       continue;
     }
 
-    /* Check if we found the same solution. */
-    const float3 pos = vertices[0].p;
-    const float3 dir = normalize(sd->P - pos);
-    const uint hash = sms_hash_solution(pos, dir);
-
-    const float pos_threshold = 1e-4f;
-    const float dir_threshold = 1e-3f;
-
-    if (hash == ref_hash && len_squared(pos - ref_pos) < pos_threshold &&
-        len_squared(dir - ref_dir) < dir_threshold)
+    /* Evaluate reference path contribution. */
+    BsdfEval ref_throughput;
+    if (!sms_path_contribution(kg,
+                               state,
+                               sd,
+                               sd_mnee,
+                               ls,
+                               light_fixed_direction,
+                               ref_vertex_count,
+                               ref_vertices,
+                               &ref_throughput,
+                               ref_has_reflection))
     {
-      /* Found the same solution, count success. */
-      n_trials = trial;
-      break;
+      continue;
     }
-  }
 
-  if (n_trials == 0) {
-    n_trials = SMS_MAX_TRIALS;
-  }
+    Spectrum ref_contrib = bsdf_eval_sum(&ref_throughput);
 
-  /* Compute unbiased estimate using inverse of success probability. */
-  const float weight = powf(1.0f / success_prob, (float)n_trials);
-  result = ref_contrib * weight;
+    /* Reference direction for uniqueness comparison. */
+    const float3 ref_direction = normalize(ref_vertices[0].p - sd->P);
+
+    /* Estimate inverse probability via Bernoulli trials.
+     * Keep sampling paths until we find the same solution again.
+     * The number of trials estimates 1/p where p is the probability
+     * of finding this particular solution. */
+    float inv_prob_estimate = 1.0f;
+    int iterations = 1;
+
+    for (int trial = 1; trial < SMS_MAX_TRIALS; trial++) {
+      ManifoldVertex trial_vertices[MNEE_MAX_CAUSTIC_CASTERS];
+      bool trial_has_reflection = false;
+      int trial_vertex_count = 0;
+
+      if (!sms_sample_path(kg,
+                           state,
+                           sd,
+                           sd_mnee,
+                           ls,
+                           caster_idx,
+                           rng_state,
+                           trial_vertices,
+                           &trial_vertex_count,
+                           &trial_has_reflection))
+      {
+        inv_prob_estimate += 1.0f;
+        iterations++;
+        continue;
+      }
+
+      if (!mnee_newton_solver_sms(kg,
+                                   sd,
+                                   sd_mnee,
+                                   ls,
+                                   light_fixed_direction,
+                                   trial_vertex_count,
+                                   trial_vertices,
+                                   trial_has_reflection,
+                                   kernel_data.integrator.caustics_constraint_derivatives))
+      {
+        inv_prob_estimate += 1.0f;
+        iterations++;
+        continue;
+      }
+
+      /* Check if we found the same solution by comparing directions. */
+      const float3 trial_direction = normalize(trial_vertices[0].p - sd->P);
+      if (fabsf(dot(ref_direction, trial_direction) - 1.0f) < SMS_UNIQUENESS_THRESHOLD) {
+        /* Found the same solution - stop. */
+        break;
+      }
+
+      inv_prob_estimate += 1.0f;
+      iterations++;
+    }
+
+    /* If we hit max trials without finding the same solution,
+     * set contribution to zero to avoid bias. */
+    if (iterations >= SMS_MAX_TRIALS) {
+      inv_prob_estimate = 0.0f;
+    }
+
+    result += ref_contrib * inv_prob_estimate;
+  }
 
   return result;
 }

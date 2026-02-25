@@ -25,6 +25,11 @@ KERNEL_DATA_ARRAY(DecomposedTransform, object_motion)
 KERNEL_DATA_ARRAY(uint, object_flag)
 KERNEL_DATA_ARRAY(uint, object_prim_offset)
 
+/* caustic casters (for Specular Manifold Sampling) */
+KERNEL_DATA_ARRAY(int, caustic_caster_object_index)
+KERNEL_DATA_ARRAY(int, caustic_caster_prim_offset)
+KERNEL_DATA_ARRAY(int, caustic_caster_num_prims)
+
 /* cameras */
 KERNEL_DATA_ARRAY(DecomposedTransform, camera_motion)
 

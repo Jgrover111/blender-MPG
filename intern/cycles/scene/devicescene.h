@@ -44,6 +44,11 @@ class DeviceScene {
   device_vector<uint> object_flag;
   device_vector<uint> object_prim_offset;
 
+  /* caustic casters (for Specular Manifold Sampling) */
+  device_vector<int> caustic_caster_object_index;
+  device_vector<int> caustic_caster_prim_offset;
+  device_vector<int> caustic_caster_num_prims;
+
   /* cameras */
   device_vector<DecomposedTransform> camera_motion;
 

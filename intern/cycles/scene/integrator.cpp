@@ -10,6 +10,7 @@
 #include "scene/film.h"
 #include "scene/integrator.h"
 #include "scene/light.h"
+#include "scene/mesh.h"
 #include "scene/object.h"
 #include "scene/scene.h"
 #include "scene/shader.h"
@@ -363,6 +364,51 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
 
   kintegrator->has_shadow_catcher = scene->has_shadow_catcher();
 
+  /* Build caustic caster list for Specular Manifold Sampling.
+   * This creates kernel-accessible arrays of all objects marked as caustic casters,
+   * enabling SMS to iterate over all casters like the Mitsuba reference implementation. */
+  {
+    /* First pass: count caustic casters. */
+    int num_casters = 0;
+    for (Object *ob : scene->objects) {
+      if (ob->get_is_caustics_caster() && ob->get_geometry() &&
+          ob->get_geometry()->is_mesh())
+      {
+        num_casters++;
+      }
+    }
+
+    kintegrator->caustics_num_casters = num_casters;
+
+    if (num_casters > 0) {
+      int *caster_object_index = dscene->caustic_caster_object_index.alloc(num_casters);
+      int *caster_prim_offset = dscene->caustic_caster_prim_offset.alloc(num_casters);
+      int *caster_num_prims = dscene->caustic_caster_num_prims.alloc(num_casters);
+
+      /* Second pass: populate arrays. */
+      int caster_idx = 0;
+      for (Object *ob : scene->objects) {
+        if (ob->get_is_caustics_caster() && ob->get_geometry() &&
+            ob->get_geometry()->is_mesh())
+        {
+          Mesh *mesh = static_cast<Mesh *>(ob->get_geometry());
+          caster_object_index[caster_idx] = (int)ob->get_device_index();
+          caster_prim_offset[caster_idx] = (int)mesh->prim_offset;
+          caster_num_prims[caster_idx] = (int)mesh->num_triangles();
+          caster_idx++;
+        }
+      }
+
+      dscene->caustic_caster_object_index.copy_to_device();
+      dscene->caustic_caster_prim_offset.copy_to_device();
+      dscene->caustic_caster_num_prims.copy_to_device();
+    }
+
+    dscene->caustic_caster_object_index.clear_modified();
+    dscene->caustic_caster_prim_offset.clear_modified();
+    dscene->caustic_caster_num_prims.clear_modified();
+  }
+
   dscene->sample_pattern_lut.clear_modified();
   clear_modified();
 }
@@ -370,6 +416,9 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
 void Integrator::device_free(Device * /*unused*/, DeviceScene *dscene, bool force_free)
 {
   dscene->sample_pattern_lut.free_if_need_realloc(force_free);
+  dscene->caustic_caster_object_index.free_if_need_realloc(force_free);
+  dscene->caustic_caster_prim_offset.free_if_need_realloc(force_free);
+  dscene->caustic_caster_num_prims.free_if_need_realloc(force_free);
 }
 
 void Integrator::tag_update(Scene *scene, const uint32_t flag)
