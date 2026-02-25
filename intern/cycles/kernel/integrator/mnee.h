@@ -1288,16 +1288,14 @@ ccl_device_forceinline float2 mnee_sample_bsdf_dh(ClosureType type,
  * We assume here that the pdf (in half-vector measure) is the same as
  * the one calculation when sampling the microfacet normals from the
  * specular chain above: this allows us to simplify the bsdf weight */
-ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
-                                                            ccl_private ShaderClosure *closure,
-                                                            const float3 wi,
-                                                            const float3 wo)
+ccl_device_forceinline Spectrum mnee_eval_refraction_bsdf_contribution(
+    KernelGlobals kg,
+    ccl_private MicrofacetBsdf *bsdf,
+    const float3 wi,
+    const float3 wo,
+    const float cosNI,
+    const float cosNO)
 {
-  ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)closure;
-
-  const float cosNI = dot(bsdf->N, wi);
-  const float cosNO = dot(bsdf->N, wo);
-
   const float3 Ht = normalize(-(bsdf->ior * wo + wi));
   const float cosHI = dot(Ht, wi);
 
@@ -1327,6 +1325,68 @@ ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
    */
   /* TODO: energy compensation for multi-GGX. */
   return bsdf->weight * transmittance * G * fabsf(cosHI / (cosNI * sqr(cosThetaM)));
+}
+
+ccl_device_forceinline Spectrum mnee_eval_reflection_bsdf_contribution(
+    KernelGlobals kg,
+    ccl_private MicrofacetBsdf *bsdf,
+    const float3 wi,
+    const float3 wo,
+    const float cosNI,
+    const float cosNO)
+{
+  const float3 Hr = normalize(wi + wo);
+  const float cosHI = dot(Hr, wi);
+
+  const float alpha2 = bsdf->alpha_x * bsdf->alpha_y;
+  const float cosThetaM = dot(bsdf->N, Hr);
+
+  float G;
+  if (bsdf->type == CLOSURE_BSDF_MICROFACET_BECKMANN_GLASS_ID) {
+    G = bsdf_G<MicrofacetType::BECKMANN>(alpha2, cosNI, cosNO);
+  }
+  else {
+    /* GGX and Multi-GGX reflection / glass closures use GGX masking-shadowing. */
+    G = bsdf_G<MicrofacetType::GGX>(alpha2, cosNI, cosNO);
+  }
+
+  Spectrum reflectance;
+  Spectrum transmittance;
+  microfacet_fresnel(kg, bsdf, cosHI, nullptr, &reflectance, &transmittance);
+
+  /*
+   * Reflection event uses a different Jacobian chain than refraction:
+   * bsdf_do = F * D_do * G / (4 * n.wi)
+   *  pdf_dh = D_dh * cosThetaM
+   *    D_do = D_dh * |dh/do|
+   *
+   * contribution = bsdf_do * |do/dh| * |n.wo / n.h| / pdf_dh
+   *              = F * G * |n.wo| / (4 * |n.wi| * n.h^2)
+   */
+  return bsdf->weight * reflectance * G * fabsf(cosNO / (4.0f * cosNI * sqr(cosThetaM)));
+}
+
+ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
+                                                            ccl_private ShaderClosure *closure,
+                                                            const float3 wi,
+                                                            const float3 wo)
+{
+  ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)closure;
+
+  const float cosNI = dot(bsdf->N, wi);
+  const float cosNO = dot(bsdf->N, wo);
+
+  /* Important: refraction and reflection events have different Jacobians and normal terms.
+   * Keep the formulas separate so mixed chains (e.g. SMS with reflection events) do not
+   * accidentally reuse the refraction-only contribution expression. */
+  const bool is_refraction_event = CLOSURE_IS_REFRACTION(bsdf->type) ||
+                                   (CLOSURE_IS_GLASS(bsdf->type) && (cosNO < 0.0f));
+
+  if (is_refraction_event) {
+    return mnee_eval_refraction_bsdf_contribution(kg, bsdf, wi, wo, cosNI, cosNO);
+  }
+
+  return mnee_eval_reflection_bsdf_contribution(kg, bsdf, wi, wo, cosNI, cosNO);
 }
 
 /* Compute transfer matrix determinant |T1| = |dx1/dxn| (and |dh/dx| in the process) */

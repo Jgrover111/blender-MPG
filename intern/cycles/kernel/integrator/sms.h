@@ -141,7 +141,9 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
                                              ccl_private ShaderData *sd_mnee,
                                              const ccl_private LightSample *ls,
                                              const int caster_idx,
-                                             const int rng_seed,
+                                             const float2 roughness_offset,
+                                             const int branch,
+                                             const int num_branches,
                                              const ccl_private RNGState *rng_state,
                                              ccl_private ManifoldVertex *vertices,
                                              ccl_private int *out_vertex_count,
@@ -154,11 +156,15 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
   float3 sampled_P, sampled_Ng;
   int target_object, target_prim;
 
-  RNGState local_rng_state = *rng_state;
-  path_state_rng_scramble(&local_rng_state, rng_seed);
-
-  const float rand_tri = path_state_rng_1D(kg, &local_rng_state, PRNG_SURFACE_BSDF);
-  const float3 rand_light = path_state_rng_3D(kg, &local_rng_state, PRNG_LIGHT);
+  /* SMS consumes RNG dimensions as follows:
+   * - PRNG_SURFACE_BSDF: 1D for caster triangle selection, and 2D per rough vertex for dh.
+   * - PRNG_LIGHT: 2D (x/y) for caster triangle barycentrics.
+   *
+   * Trials branch through sample index (sample * num_branches + branch), keeping dimensions stable
+   * with the rest of the integrator while still producing per-trial decorrelated draws. */
+  const float rand_tri = path_branched_rng_1D(
+      kg, rng_state, branch, num_branches, PRNG_SURFACE_BSDF);
+  const float3 rand_light = path_branched_rng_3D(kg, rng_state, branch, num_branches, PRNG_LIGHT);
   const float2 rand_bary = make_float2(rand_light.x, rand_light.y);
 
   sms_sample_surface_point(
@@ -252,15 +258,14 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
                                                      microfacet_bsdf->ior;
           }
 
-          /* Sample microfacet normal offset based on roughness. */
+          /* Use the pre-sampled microfacet normal offset. */
           float2 h = zero_float2();
           if (microfacet_bsdf->alpha_x > 0.f && microfacet_bsdf->alpha_y > 0.f) {
-            const float2 bsdf_uv = path_state_rng_2D(kg, &local_rng_state, PRNG_SURFACE_BSDF);
             h = mnee_sample_bsdf_dh(bsdf->type,
                                     microfacet_bsdf->alpha_x,
                                     microfacet_bsdf->alpha_y,
-                                    bsdf_uv.x,
-                                    bsdf_uv.y);
+                                    roughness_offset.x,
+                                    roughness_offset.y);
           }
 
           /* Setup differential geometry on vertex. */
@@ -298,6 +303,47 @@ ccl_device_forceinline bool sms_path_contribution(KernelGlobals kg,
                                                    ccl_private BsdfEval *throughput,
                                                    bool reflection)
 {
+  /* Validate visibility from the solved manifold endpoint to the sampled light.
+   * This mirrors direct-light shadow-ray setup conventions while still allowing
+   * the intended light geometry hit at the endpoint for finite emitters. */
+  Ray probe_ray;
+  probe_ray.self.object = vertices[vertex_count - 1].object;
+  probe_ray.self.prim = vertices[vertex_count - 1].prim;
+  probe_ray.self.light_object = ls->object;
+  probe_ray.self.light_prim = ls->prim;
+  probe_ray.P = vertices[vertex_count - 1].p;
+  probe_ray.tmin = 0.0f;
+  if (light_fixed_direction) {
+    probe_ray.D = ls->D;
+    probe_ray.tmax = ls->t;
+  }
+  else {
+    probe_ray.D = ls->P - probe_ray.P;
+    probe_ray.D = safe_normalize_len(probe_ray.D, &probe_ray.tmax);
+  }
+  probe_ray.dP = differential_make_compact(sd->dP);
+  probe_ray.dD = differential_zero_compact();
+  probe_ray.time = sd->time;
+
+  Intersection probe_isect;
+  if (scene_intersect(kg, &probe_ray, PATH_RAY_TRANSMIT, &probe_isect)) {
+    if (light_fixed_direction) {
+      return false;
+    }
+
+    const int hit_object = (probe_isect.object == OBJECT_NONE) ?
+                               kernel_data_fetch(prim_object, probe_isect.prim) :
+                               probe_isect.object;
+    const bool hit_intended_light = (hit_object == ls->object) &&
+                                    (ls->prim == PRIM_NONE || probe_isect.prim == ls->prim) &&
+                                    (fabsf(probe_ray.tmax - probe_isect.t) <= MNEE_MIN_DISTANCE);
+    if (!hit_intended_light) {
+      return false;
+    }
+  }
+
+  (void)reflection;
+
   /* Use MNEE's path contribution evaluation. */
   return mnee_path_contribution(
       kg, state, sd, sd_mnee, ls, light_fixed_direction, vertex_count, vertices, throughput);
@@ -349,11 +395,15 @@ ccl_device_forceinline Spectrum integrate_sms_biased(KernelGlobals kg,
 
   /* Iterate over all caustic caster shapes in the scene. */
   for (int caster_idx = 0; caster_idx < num_casters; caster_idx++) {
+    const int sms_num_branches = num_casters * SMS_BIASED_BUDGET;
     /* Track unique solution directions for this shape. */
     float3 solution_dirs[SMS_BIASED_BUDGET];
     int num_unique = 0;
 
     for (int trial = 0; trial < SMS_BIASED_BUDGET; trial++) {
+      RNGState offset_rng_state = *rng_state;
+      path_state_rng_scramble(&offset_rng_state, (int)hash_uint2(caster_idx, 0x6e624eb7 ^ trial));
+      const float2 roughness_offset = path_state_rng_2D(kg, &offset_rng_state, PRNG_SURFACE_BSDF);
       ManifoldVertex vertices[MNEE_MAX_CAUSTIC_CASTERS];
       bool has_reflection = false;
       int vertex_count = 0;
@@ -365,7 +415,9 @@ ccl_device_forceinline Spectrum integrate_sms_biased(KernelGlobals kg,
                            sd_mnee,
                            ls,
                            caster_idx,
-                           (int)hash_uint2(caster_idx, trial),
+                           roughness_offset,
+                           trial + caster_idx * SMS_BIASED_BUDGET,
+                           sms_num_branches,
                            rng_state,
                            vertices,
                            &vertex_count,
@@ -458,6 +510,13 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
 
   /* Iterate over all caustic caster shapes in the scene. */
   for (int caster_idx = 0; caster_idx < num_casters; caster_idx++) {
+    const int sms_num_branches = num_casters * SMS_MAX_TRIALS;
+    /* Sample one roughness offset for this shape attempt and reuse it for all Bernoulli retries.
+     */
+    RNGState offset_rng_state = *rng_state;
+    path_state_rng_scramble(&offset_rng_state, (int)hash_uint2(caster_idx, 0x6e624eb7));
+    const float2 roughness_offset = path_state_rng_2D(kg, &offset_rng_state, PRNG_SURFACE_BSDF);
+    const float p_offset = 1.0f;
     /* Sample initial path via this caster shape. */
     ManifoldVertex ref_vertices[MNEE_MAX_CAUSTIC_CASTERS];
     bool ref_has_reflection = false;
@@ -469,7 +528,9 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
                          sd_mnee,
                          ls,
                          caster_idx,
-                         (int)hash_uint2(caster_idx, 0),
+                         roughness_offset,
+                         caster_idx * SMS_MAX_TRIALS,
+                         sms_num_branches,
                          rng_state,
                          ref_vertices,
                          &ref_vertex_count,
@@ -536,7 +597,9 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
                            sd_mnee,
                            ls,
                            caster_idx,
-                           (int)hash_uint2(caster_idx, trial),
+                           roughness_offset,
+                           trial + caster_idx * SMS_MAX_TRIALS,
+                           sms_num_branches,
                            rng_state,
                            trial_vertices,
                            &trial_vertex_count,
@@ -579,7 +642,7 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
       inv_prob_estimate = 0.0f;
     }
 
-    result += ref_contrib * inv_prob_estimate;
+    result += ref_contrib * inv_prob_estimate / p_offset;
   }
 
   return result;
