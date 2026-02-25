@@ -46,13 +46,13 @@ CCL_NAMESPACE_BEGIN
  *
  * This is the kernel-side equivalent of Mitsuba's shape->sample_position(). */
 ccl_device_forceinline void sms_sample_surface_point(KernelGlobals kg,
-                                                      const int caster_idx,
-                                                      const float rand_tri,
-                                                      const float2 rand_bary,
-                                                      ccl_private float3 &P,
-                                                      ccl_private float3 &Ng,
-                                                      ccl_private int &out_object,
-                                                      ccl_private int &out_prim)
+                                                     const int caster_idx,
+                                                     const float rand_tri,
+                                                     const float2 rand_bary,
+                                                     ccl_private float3 &P,
+                                                     ccl_private float3 &Ng,
+                                                     ccl_private int &out_object,
+                                                     ccl_private int &out_prim)
 {
   const int object = kernel_data_fetch(caustic_caster_object_index, caster_idx);
   const int prim_offset = kernel_data_fetch(caustic_caster_prim_offset, caster_idx);
@@ -136,18 +136,18 @@ ccl_device_forceinline void sms_sample_surface_point(KernelGlobals kg,
  *
  * This matches Mitsuba's sample_path() function. */
 ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
-                                             IntegratorState state,
-                                             ccl_private ShaderData *sd,
-                                             ccl_private ShaderData *sd_mnee,
-                                             const ccl_private LightSample *ls,
-                                             const int caster_idx,
-                                             const float2 roughness_offset,
-                                             const int branch,
-                                             const int num_branches,
-                                             const ccl_private RNGState *rng_state,
-                                             ccl_private ManifoldVertex *vertices,
-                                             ccl_private int *out_vertex_count,
-                                             ccl_private bool *out_has_reflection)
+                                            IntegratorState state,
+                                            ccl_private ShaderData *sd,
+                                            ccl_private ShaderData *sd_mnee,
+                                            const ccl_private LightSample *ls,
+                                            const int caster_idx,
+                                            const float2 roughness_offset,
+                                            const int branch,
+                                            const int num_branches,
+                                            const ccl_private RNGState *rng_state,
+                                            ccl_private ManifoldVertex *vertices,
+                                            ccl_private int *out_vertex_count,
+                                            ccl_private bool *out_has_reflection)
 {
   *out_vertex_count = 0;
   *out_has_reflection = false;
@@ -171,9 +171,9 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
       kg, caster_idx, rand_tri, rand_bary, sampled_P, sampled_Ng, target_object, target_prim);
 
   /* Trace from receiver toward the sampled point on the caster surface. */
-  float3 direction = sampled_P - sd->P;
-  float direction_len;
-  direction = normalize_len(direction, &direction_len);
+  float3 target_direction = sampled_P - sd->P;
+  float target_distance;
+  target_direction = normalize_len(target_direction, &target_distance);
 
   Ray probe_ray;
   probe_ray.self.object = sd->object;
@@ -181,109 +181,211 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
   probe_ray.self.light_object = ls->object;
   probe_ray.self.light_prim = ls->prim;
   probe_ray.P = sd->P;
-  probe_ray.D = direction;
+  probe_ray.D = target_direction;
   probe_ray.tmin = 0.0f;
-  probe_ray.tmax = direction_len * 2.0f;
+  probe_ray.tmax = target_distance * 2.0f;
   probe_ray.dP = differential_make_compact(sd->dP);
   probe_ray.dD = differential_zero_compact();
   probe_ray.time = sd->time;
-  Intersection probe_isect;
 
-  /* Trace and find caustic casters along this direction.
-   * We specifically look for the target object but also collect
-   * any other caustic casters we encounter along the way. */
-  bool found_target = false;
+  Intersection probe_isect;
   int vertex_count = 0;
 
-  for (int isect_count = 0; isect_count < MNEE_MAX_INTERSECTION_COUNT; isect_count++) {
-    const bool hit = scene_intersect(kg, &probe_ray, PATH_RAY_TRANSMIT, &probe_isect);
-    if (!hit) {
+  /* Single-bounce initialization path: if the first caster hit is the sampled target, we can
+   * initialize directly without constructing a longer topology chain. */
+  bool single_bounce = false;
+  Intersection single_isect;
+  if (scene_intersect(kg, &probe_ray, PATH_RAY_TRANSMIT, &single_isect)) {
+    const int single_hit_object = (single_isect.object == OBJECT_NONE) ?
+                                      kernel_data_fetch(prim_object, single_isect.prim) :
+                                      single_isect.object;
+    const int single_object_flags = intersection_get_object_flags(kg, &single_isect);
+    single_bounce = ((single_object_flags & SD_OBJECT_CAUSTICS_CASTER) &&
+                     single_hit_object == target_object);
+  }
+
+  if (single_bounce) {
+    probe_isect = single_isect;
+
+    const int hit_object = (probe_isect.object == OBJECT_NONE) ?
+                               kernel_data_fetch(prim_object, probe_isect.prim) :
+                               probe_isect.object;
+    const int object_flags = intersection_get_object_flags(kg, &probe_isect);
+    if (!(object_flags & SD_OBJECT_CAUSTICS_CASTER) || hit_object != target_object) {
+      return false;
+    }
+
+    if (!(probe_isect.type & PRIMITIVE_TRIANGLE)) {
+      return false;
+    }
+
+    shader_setup_from_ray(kg, sd_mnee, &probe_ray, &probe_isect);
+    if (!(sd_mnee->shader & SHADER_SMOOTH_NORMAL)) {
+      return false;
+    }
+
+    surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
+        kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
+
+    bool found_compatible_bsdf = false;
+    for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
+      ccl_private ShaderClosure *bsdf = &sd_mnee->closure[ci];
+      if (!CLOSURE_IS_SMS_COMPATIBLE(bsdf->type)) {
+        continue;
+      }
+
+      found_compatible_bsdf = true;
+      ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)bsdf;
+      ccl_private ManifoldVertex &mv = vertices[vertex_count++];
+
+      if (CLOSURE_IS_REFLECTION(bsdf->type)) {
+        *out_has_reflection = true;
+      }
+
+      float eta = 1.0f;
+      if (!CLOSURE_IS_REFLECTION(bsdf->type)) {
+        eta = (sd_mnee->flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior : microfacet_bsdf->ior;
+      }
+
+      float2 h = zero_float2();
+      if (microfacet_bsdf->alpha_x > 0.f && microfacet_bsdf->alpha_y > 0.f) {
+        h = mnee_sample_bsdf_dh(bsdf->type,
+                                microfacet_bsdf->alpha_x,
+                                microfacet_bsdf->alpha_y,
+                                roughness_offset.x,
+                                roughness_offset.y);
+      }
+
+      mnee_setup_manifold_vertex(kg, &mv, bsdf, eta, h, &probe_ray, &probe_isect, sd_mnee);
       break;
+    }
+
+    if (!found_compatible_bsdf) {
+      return false;
+    }
+
+    *out_vertex_count = vertex_count;
+    return true;
+  }
+
+  /* Multi-bounce initialization: build topology via per-bounce specular transport. */
+  bool reached_target = false;
+  for (int bounce = 0; bounce < MNEE_MAX_CAUSTIC_CASTERS; bounce++) {
+    if (!scene_intersect(kg, &probe_ray, PATH_RAY_TRANSMIT, &probe_isect)) {
+      break;
+    }
+
+    const int object_flags = intersection_get_object_flags(kg, &probe_isect);
+    if (!(object_flags & SD_OBJECT_CAUSTICS_CASTER)) {
+      break;
+    }
+
+    if (!(probe_isect.type & PRIMITIVE_TRIANGLE)) {
+      return false;
     }
 
     const int hit_object = (probe_isect.object == OBJECT_NONE) ?
                                kernel_data_fetch(prim_object, probe_isect.prim) :
                                probe_isect.object;
 
-    const int object_flags = intersection_get_object_flags(kg, &probe_isect);
-    if (object_flags & SD_OBJECT_CAUSTICS_CASTER) {
-      /* Check if we have enough slots. */
-      if (vertex_count >= MNEE_MAX_CAUSTIC_CASTERS) {
-        return false;
+    shader_setup_from_ray(kg, sd_mnee, &probe_ray, &probe_isect);
+    if (!(sd_mnee->shader & SHADER_SMOOTH_NORMAL)) {
+      return false;
+    }
+
+    surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
+        kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
+
+    float best_alignment = -FLT_MAX;
+    float3 best_direction = zero_float3();
+    ccl_private ShaderClosure *best_bsdf = nullptr;
+    float best_eta = 1.0f;
+
+    const float3 incoming = probe_ray.D;
+    const float3 normal = sd_mnee->N;
+
+    for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
+      ccl_private ShaderClosure *bsdf = &sd_mnee->closure[ci];
+      if (!CLOSURE_IS_SMS_COMPATIBLE(bsdf->type)) {
+        continue;
       }
 
-      /* Reject if not a triangle mesh. */
-      if (!(probe_isect.type & PRIMITIVE_TRIANGLE)) {
-        return false;
+      ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)bsdf;
+      float3 candidate_direction = zero_float3();
+      float eta = 1.0f;
+
+      if (CLOSURE_IS_REFLECTION(bsdf->type)) {
+        candidate_direction = reflect(incoming, normal);
       }
-
-      /* Check if we hit our target object. */
-      if (hit_object == target_object) {
-        found_target = true;
-      }
-
-      ccl_private ManifoldVertex &mv = vertices[vertex_count++];
-
-      /* Setup shader data on caustic caster. */
-      shader_setup_from_ray(kg, sd_mnee, &probe_ray, &probe_isect);
-
-      /* Reject if smooth normals not available. */
-      if (!(sd_mnee->shader & SHADER_SMOOTH_NORMAL)) {
-        return false;
-      }
-
-      surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
-          kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
-
-      /* Find SMS-compatible BSDF (refraction, glass, or reflection). */
-      bool found_compatible_bsdf = false;
-      for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
-        ccl_private ShaderClosure *bsdf = &sd_mnee->closure[ci];
-        if (CLOSURE_IS_SMS_COMPATIBLE(bsdf->type)) {
-          found_compatible_bsdf = true;
-          ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)bsdf;
-
-          /* Determine if this is a reflection closure. */
-          if (CLOSURE_IS_REFLECTION(bsdf->type)) {
-            *out_has_reflection = true;
-          }
-
-          /* Figure out appropriate index of refraction ratio. */
-          float eta;
-          if (CLOSURE_IS_REFLECTION(bsdf->type)) {
-            eta = 1.0f;
-          }
-          else {
-            eta = (sd_mnee->flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior :
-                                                     microfacet_bsdf->ior;
-          }
-
-          /* Use the pre-sampled microfacet normal offset. */
-          float2 h = zero_float2();
-          if (microfacet_bsdf->alpha_x > 0.f && microfacet_bsdf->alpha_y > 0.f) {
-            h = mnee_sample_bsdf_dh(bsdf->type,
-                                    microfacet_bsdf->alpha_x,
-                                    microfacet_bsdf->alpha_y,
-                                    roughness_offset.x,
-                                    roughness_offset.y);
-          }
-
-          /* Setup differential geometry on vertex. */
-          mnee_setup_manifold_vertex(kg, &mv, bsdf, eta, h, &probe_ray, &probe_isect, sd_mnee);
-          break;
+      else {
+        const float eta_ratio = (sd_mnee->flag & SD_BACKFACING) ? microfacet_bsdf->ior :
+                                                                  1.0f / microfacet_bsdf->ior;
+        candidate_direction = refract(incoming, normal, eta_ratio);
+        if (is_zero(candidate_direction)) {
+          continue;
         }
+
+        eta = (sd_mnee->flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior : microfacet_bsdf->ior;
       }
-      if (!found_compatible_bsdf) {
-        return false;
+
+      candidate_direction = safe_normalize(candidate_direction);
+      const float3 to_target = safe_normalize(sampled_P - sd_mnee->P);
+      const float alignment = dot(candidate_direction, to_target);
+
+      if (alignment > best_alignment) {
+        best_alignment = alignment;
+        best_direction = candidate_direction;
+        best_bsdf = bsdf;
+        best_eta = eta;
       }
+    }
+
+    if (best_bsdf == nullptr) {
+      return false;
+    }
+
+    if (vertex_count >= MNEE_MAX_CAUSTIC_CASTERS) {
+      return false;
+    }
+
+    ccl_private MicrofacetBsdf *best_microfacet_bsdf = (ccl_private MicrofacetBsdf *)best_bsdf;
+    ccl_private ManifoldVertex &mv = vertices[vertex_count++];
+
+    if (CLOSURE_IS_REFLECTION(best_bsdf->type)) {
+      *out_has_reflection = true;
+    }
+
+    /* Tie roughness offsets to the actual visited specular surface. */
+    const uint rough_seed = hash_uint2((uint)hit_object, (uint)probe_isect.prim);
+    const float2 per_vertex_offset = make_float2(
+        fractf(roughness_offset.x + hash_uint2_to_float(rough_seed, 0x12a35d91u)),
+        fractf(roughness_offset.y + hash_uint2_to_float(rough_seed, 0x7f4a7c15u)));
+
+    float2 h = zero_float2();
+    if (best_microfacet_bsdf->alpha_x > 0.f && best_microfacet_bsdf->alpha_y > 0.f) {
+      h = mnee_sample_bsdf_dh(best_bsdf->type,
+                              best_microfacet_bsdf->alpha_x,
+                              best_microfacet_bsdf->alpha_y,
+                              per_vertex_offset.x,
+                              per_vertex_offset.y);
+    }
+
+    mnee_setup_manifold_vertex(kg, &mv, best_bsdf, best_eta, h, &probe_ray, &probe_isect, sd_mnee);
+
+    if (hit_object == target_object) {
+      reached_target = true;
+      break;
     }
 
     probe_ray.self.object = probe_isect.object;
     probe_ray.self.prim = probe_isect.prim;
-    probe_ray.tmin = intersection_t_offset(probe_isect.t);
+    probe_ray.P = sd_mnee->P;
+    probe_ray.D = best_direction;
+    probe_ray.tmin = MNEE_MIN_DISTANCE;
+    probe_ray.tmax = FLT_MAX;
   }
 
-  if (!found_target || vertex_count == 0) {
+  if (!reached_target || vertex_count == 0) {
     return false;
   }
 
@@ -293,15 +395,15 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
 
 /* Evaluate SMS path contribution using MNEE infrastructure. */
 ccl_device_forceinline bool sms_path_contribution(KernelGlobals kg,
-                                                   IntegratorState state,
-                                                   ccl_private ShaderData *sd,
-                                                   ccl_private ShaderData *sd_mnee,
-                                                   ccl_private LightSample *ls,
-                                                   const bool light_fixed_direction,
-                                                   const int vertex_count,
-                                                   ccl_private ManifoldVertex *vertices,
-                                                   ccl_private BsdfEval *throughput,
-                                                   bool reflection)
+                                                  IntegratorState state,
+                                                  ccl_private ShaderData *sd,
+                                                  ccl_private ShaderData *sd_mnee,
+                                                  ccl_private LightSample *ls,
+                                                  const bool light_fixed_direction,
+                                                  const int vertex_count,
+                                                  ccl_private ManifoldVertex *vertices,
+                                                  ccl_private BsdfEval *throughput,
+                                                  bool reflection)
 {
   /* Validate visibility from the solved manifold endpoint to the sampled light.
    * This mirrors direct-light shadow-ray setup conventions while still allowing
@@ -351,8 +453,8 @@ ccl_device_forceinline bool sms_path_contribution(KernelGlobals kg,
 
 /* Check depth limits for a given vertex count. */
 ccl_device_forceinline bool sms_check_depth_limits(KernelGlobals kg,
-                                                    IntegratorState state,
-                                                    const int vertex_count)
+                                                   IntegratorState state,
+                                                   const int vertex_count)
 {
   if ((INTEGRATOR_STATE(state, path, transmission_bounce) + vertex_count - 1) >=
       kernel_data.integrator.max_transmission_bounce)
@@ -379,12 +481,12 @@ ccl_device_forceinline bool sms_check_depth_limits(KernelGlobals kg,
  *     for each trial in budget:
  *       sample_path -> newton_solver -> check uniqueness -> evaluate */
 ccl_device_forceinline Spectrum integrate_sms_biased(KernelGlobals kg,
-                                                      IntegratorState state,
-                                                      ccl_private ShaderData *sd,
-                                                      ccl_private ShaderData *sd_mnee,
-                                                      const ccl_private RNGState *rng_state,
-                                                      ccl_private LightSample *ls,
-                                                      const bool light_fixed_direction)
+                                                     IntegratorState state,
+                                                     ccl_private ShaderData *sd,
+                                                     ccl_private ShaderData *sd_mnee,
+                                                     const ccl_private RNGState *rng_state,
+                                                     ccl_private LightSample *ls,
+                                                     const bool light_fixed_direction)
 {
   const int num_casters = kernel_data.integrator.caustics_num_casters;
   if (num_casters == 0) {
@@ -433,14 +535,14 @@ ccl_device_forceinline Spectrum integrate_sms_biased(KernelGlobals kg,
 
       /* Newton solver: walk on specular manifold. */
       if (!mnee_newton_solver_sms(kg,
-                                   sd,
-                                   sd_mnee,
-                                   ls,
-                                   light_fixed_direction,
-                                   vertex_count,
-                                   vertices,
-                                   has_reflection,
-                                   kernel_data.integrator.caustics_constraint_derivatives))
+                                  sd,
+                                  sd_mnee,
+                                  ls,
+                                  light_fixed_direction,
+                                  vertex_count,
+                                  vertices,
+                                  has_reflection,
+                                  kernel_data.integrator.caustics_constraint_derivatives))
       {
         continue;
       }
@@ -494,12 +596,12 @@ ccl_device_forceinline Spectrum integrate_sms_biased(KernelGlobals kg,
  *     sample_path -> newton_solver -> evaluate_contribution
  *     estimate inverse probability via repeated sample_path trials */
 ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
-                                                        IntegratorState state,
-                                                        ccl_private ShaderData *sd,
-                                                        ccl_private ShaderData *sd_mnee,
-                                                        const ccl_private RNGState *rng_state,
-                                                        ccl_private LightSample *ls,
-                                                        const bool light_fixed_direction)
+                                                       IntegratorState state,
+                                                       ccl_private ShaderData *sd,
+                                                       ccl_private ShaderData *sd_mnee,
+                                                       const ccl_private RNGState *rng_state,
+                                                       ccl_private LightSample *ls,
+                                                       const bool light_fixed_direction)
 {
   const int num_casters = kernel_data.integrator.caustics_num_casters;
   if (num_casters == 0) {
@@ -546,14 +648,14 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
 
     /* Newton solver to find reference solution. */
     if (!mnee_newton_solver_sms(kg,
-                                 sd,
-                                 sd_mnee,
-                                 ls,
-                                 light_fixed_direction,
-                                 ref_vertex_count,
-                                 ref_vertices,
-                                 ref_has_reflection,
-                                 kernel_data.integrator.caustics_constraint_derivatives))
+                                sd,
+                                sd_mnee,
+                                ls,
+                                light_fixed_direction,
+                                ref_vertex_count,
+                                ref_vertices,
+                                ref_has_reflection,
+                                kernel_data.integrator.caustics_constraint_derivatives))
     {
       continue;
     }
@@ -578,6 +680,16 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
 
     /* Reference direction for uniqueness comparison. */
     const float3 ref_direction = normalize(ref_vertices[0].p - sd->P);
+
+    /* Keep the reference topology/shape sequence fixed across Bernoulli retries.
+     * This mirrors the reference implementation behavior where retries that produce
+     * a different shape chain are rejected to avoid mixing incompatible manifolds. */
+    int ref_object_chain[MNEE_MAX_CAUSTIC_CASTERS];
+    int ref_prim_chain[MNEE_MAX_CAUSTIC_CASTERS];
+    for (int i = 0; i < ref_vertex_count; i++) {
+      ref_object_chain[i] = ref_vertices[i].object;
+      ref_prim_chain[i] = ref_vertices[i].prim;
+    }
 
     /* Estimate inverse probability via Bernoulli trials.
      * Keep sampling paths until we find the same solution again.
@@ -610,15 +722,32 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
         continue;
       }
 
+      bool topology_matches = (trial_vertex_count == ref_vertex_count);
+      if (topology_matches) {
+        for (int i = 0; i < ref_vertex_count; i++) {
+          if (trial_vertices[i].object != ref_object_chain[i] ||
+              trial_vertices[i].prim != ref_prim_chain[i])
+          {
+            topology_matches = false;
+            break;
+          }
+        }
+      }
+      if (!topology_matches) {
+        inv_prob_estimate += 1.0f;
+        iterations++;
+        continue;
+      }
+
       if (!mnee_newton_solver_sms(kg,
-                                   sd,
-                                   sd_mnee,
-                                   ls,
-                                   light_fixed_direction,
-                                   trial_vertex_count,
-                                   trial_vertices,
-                                   trial_has_reflection,
-                                   kernel_data.integrator.caustics_constraint_derivatives))
+                                  sd,
+                                  sd_mnee,
+                                  ls,
+                                  light_fixed_direction,
+                                  trial_vertex_count,
+                                  trial_vertices,
+                                  trial_has_reflection,
+                                  kernel_data.integrator.caustics_constraint_derivatives))
       {
         inv_prob_estimate += 1.0f;
         iterations++;
