@@ -1086,8 +1086,8 @@ ccl_device_forceinline bool mnee_newton_solver_sms(
 
   const float3 light_sample = light_fixed_direction ? ls->D : ls->P;
 
-  /* We start gently, potentially ramping up to beta = 1. */
-  float beta = .1f;
+  /* Start with full Newton step, reduce on projection failure. */
+  float beta = 1.f;
   bool reduce_stepsize = false;
   bool resolve_constraint = true;
   for (int iteration = 0; iteration < MNEE_MAX_ITERATIONS; iteration++) {
@@ -1105,8 +1105,32 @@ ccl_device_forceinline bool mnee_newton_solver_sms(
         constraint_norm = fmaxf(constraint_norm, len(vertices[vi].constraint));
       }
 
-      /* Return if solve successful. */
+      /* Return if solve successful, after validating refraction/reflection consistency. */
       if (constraint_norm < MNEE_SOLVER_THRESHOLD) {
+        /* Validate that each vertex has correct refraction/reflection geometry.
+         * This is done only at the end, not per-iteration, matching Mitsuba. */
+        for (int vi = 0; vi < vertex_count; vi++) {
+          const ccl_private ManifoldVertex &v = vertices[vi];
+
+          const float3 wi = (vi == 0 ? sd->P : vertices[vi - 1].p) - v.p;
+          const float3 wo = (vi == vertex_count - 1) ?
+                                (light_fixed_direction ? ls->D : ls->P - v.p) :
+                                vertices[vi + 1].p - v.p;
+
+          const float cos_theta_i = dot(v.n, wi);
+          const float cos_theta_o = dot(v.n, wo);
+          const bool is_refraction = cos_theta_i * cos_theta_o < 0.0f;
+          const bool is_reflection = !is_refraction;
+
+          const bool vertex_is_reflective = (v.eta == 1.0f) ||
+                                            (reflection && CLOSURE_IS_REFLECTION(v.bsdf->type));
+
+          if ((vertex_is_reflective && !is_reflection) ||
+              (!vertex_is_reflective && !is_refraction))
+          {
+            return false;
+          }
+        }
         return true;
       }
 
@@ -1185,30 +1209,8 @@ ccl_device_forceinline bool mnee_newton_solver_sms(
       }
     }
 
-    /* Check that tentative path is still valid. */
-    if (!reduce_stepsize) {
-      for (int vi = 0; vi < vertex_count; vi++) {
-        const ccl_private ManifoldVertex &tv = tentative[vi];
-
-        const float3 wi = (vi == 0 ? sd->P : tentative[vi - 1].p) - tv.p;
-        const float3 wo = (vi == vertex_count - 1) ? light_fixed_direction ? ls->D : ls->P - tv.p :
-                                                     tentative[vi + 1].p - tv.p;
-
-        bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(vertices[vi].bsdf->type);
-        float dot_in = dot(tv.n, wi);
-        float dot_out = dot(tv.n, wo);
-
-        /* For refraction, wi and wo should be on opposite sides of normal.
-         * For reflection, wi and wo should be on the same side. */
-        if ((!reflection_vi && dot_in * dot_out >= 0.0f) ||
-            (reflection_vi && dot_in * dot_out < 0.0f))
-        {
-          reduce_stepsize = true;
-          break;
-        }
-      }
-    }
-
+    /* Handle projection failure by reducing step size.
+     * Note: Per-iteration refraction/reflection validation removed - only checked at convergence. */
     if (reduce_stepsize) {
       reduce_stepsize = false;
       resolve_constraint = false;

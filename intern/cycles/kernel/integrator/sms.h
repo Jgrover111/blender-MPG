@@ -482,7 +482,15 @@ ccl_device_forceinline bool sms_path_contribution(KernelGlobals kg,
     }
   }
 
-  (void)reflection;
+  /* Recompute HV constraint derivatives for the transfer matrix / Jacobian.
+   * The Newton solver used AD constraints, but mnee_compute_transfer_matrix()
+   * expects HV constraint derivatives in the vertices' .a, .b, .c fields. */
+  const float3 light_sample = light_fixed_direction ? ls->D : ls->P;
+  if (!mnee_compute_hv_constraint_derivatives(
+          vertex_count, vertices, sd->P, light_fixed_direction, light_sample, reflection))
+  {
+    return false;
+  }
 
   /* Use MNEE's path contribution evaluation. */
   return mnee_path_contribution(
@@ -601,18 +609,9 @@ ccl_device_forceinline Spectrum integrate_sms(KernelGlobals kg,
 
     Spectrum ref_contrib = bsdf_eval_sum(&ref_throughput);
 
-    /* Reference direction for uniqueness comparison. */
+    /* Reference direction for uniqueness comparison (matching Mitsuba).
+     * We only compare final direction, not intermediate topology. */
     const float3 ref_direction = normalize(ref_vertices[0].p - sd->P);
-
-    /* Keep the reference topology/shape sequence fixed across Bernoulli retries.
-     * This mirrors the reference implementation behavior where retries that produce
-     * a different shape chain are rejected to avoid mixing incompatible manifolds. */
-    int ref_object_chain[MNEE_MAX_CAUSTIC_CASTERS];
-    int ref_prim_chain[MNEE_MAX_CAUSTIC_CASTERS];
-    for (int i = 0; i < ref_vertex_count; i++) {
-      ref_object_chain[i] = ref_vertices[i].object;
-      ref_prim_chain[i] = ref_vertices[i].prim;
-    }
 
     /* Estimate inverse probability via Bernoulli trials.
      * Keep sampling paths until we find the same solution again.
@@ -648,23 +647,7 @@ ccl_device_forceinline Spectrum integrate_sms(KernelGlobals kg,
         continue;
       }
 
-      bool topology_matches = (trial_vertex_count == ref_vertex_count);
-      if (topology_matches) {
-        for (int i = 0; i < ref_vertex_count; i++) {
-          if (trial_vertices[i].object != ref_object_chain[i] ||
-              trial_vertices[i].prim != ref_prim_chain[i])
-          {
-            topology_matches = false;
-            break;
-          }
-        }
-      }
-      if (!topology_matches) {
-        inv_prob_estimate += 1.0f;
-        iterations++;
-        continue;
-      }
-
+      /* Run Newton solver on trial path. */
       if (!mnee_newton_solver_sms(kg,
                                   sd,
                                   sd_mnee,
