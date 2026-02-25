@@ -130,6 +130,44 @@ ccl_device_forceinline void sms_sample_surface_point(KernelGlobals kg,
   out_prim = prim;
 }
 
+ccl_device_forceinline float sms_bsdf_offset_normal_pdf(const ClosureType type,
+                                                        const float alpha_x,
+                                                        const float alpha_y,
+                                                        const float2 h)
+{
+  if (alpha_x <= 0.0f || alpha_y <= 0.0f) {
+    return 1.0f;
+  }
+
+  const float h2 = dot(h, h);
+  if (h2 >= 1.0f) {
+    return 0.0f;
+  }
+
+  const float hz = safe_sqrtf(1.0f - h2);
+  if (hz <= 0.0f) {
+    return 0.0f;
+  }
+
+  const float inv_alpha_x2 = 1.0f / (alpha_x * alpha_x);
+  const float inv_alpha_y2 = 1.0f / (alpha_y * alpha_y);
+  const float slope2 = (h.x * h.x * inv_alpha_x2 + h.y * h.y * inv_alpha_y2) / (hz * hz);
+
+  float d = 0.0f;
+  switch (type) {
+    case CLOSURE_BSDF_MICROFACET_BECKMANN_ID:
+    case CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID:
+    case CLOSURE_BSDF_MICROFACET_BECKMANN_GLASS_ID:
+      d = expf(-slope2) / (M_PI_F * alpha_x * alpha_y * sqr(hz * hz));
+      break;
+    default:
+      d = 1.0f / (M_PI_F * alpha_x * alpha_y * sqr(hz * hz) * sqr(1.0f + slope2));
+      break;
+  }
+
+  return d * hz;
+}
+
 /* Try to initialize a manifold vertex on a specific caustic caster shape
  * by sampling a random surface point, tracing toward it from the receiver,
  * and setting up the vertex if we hit the target shape.
@@ -147,10 +185,12 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
                                             const ccl_private RNGState *rng_state,
                                             ccl_private ManifoldVertex *vertices,
                                             ccl_private int *out_vertex_count,
-                                            ccl_private bool *out_has_reflection)
+                                            ccl_private bool *out_has_reflection,
+                                            ccl_private float *out_offset_pdf)
 {
   *out_vertex_count = 0;
   *out_has_reflection = false;
+  *out_offset_pdf = 1.0f;
 
   /* Sample a random point on the target caustic caster surface. */
   float3 sampled_P, sampled_Ng;
@@ -249,11 +289,17 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
 
       float2 h = zero_float2();
       if (microfacet_bsdf->alpha_x > 0.f && microfacet_bsdf->alpha_y > 0.f) {
+        const uint rough_seed = hash_uint2((uint)hit_object, (uint)probe_isect.prim);
+        const float2 per_vertex_offset = make_float2(
+            fractf(roughness_offset.x + hash_uint2_to_float(rough_seed, 0x12a35d91u)),
+            fractf(roughness_offset.y + hash_uint2_to_float(rough_seed, 0x7f4a7c15u)));
         h = mnee_sample_bsdf_dh(bsdf->type,
                                 microfacet_bsdf->alpha_x,
                                 microfacet_bsdf->alpha_y,
-                                roughness_offset.x,
-                                roughness_offset.y);
+                                per_vertex_offset.x,
+                                per_vertex_offset.y);
+        *out_offset_pdf *= sms_bsdf_offset_normal_pdf(
+          bsdf->type, microfacet_bsdf->alpha_x, microfacet_bsdf->alpha_y, h);
       }
 
       mnee_setup_manifold_vertex(kg, &mv, bsdf, eta, h, &probe_ray, &probe_isect, sd_mnee);
@@ -296,13 +342,7 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
     surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
         kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
 
-    float best_alignment = -FLT_MAX;
-    float3 best_direction = zero_float3();
-    ccl_private ShaderClosure *best_bsdf = nullptr;
-    float best_eta = 1.0f;
-
-    const float3 incoming = probe_ray.D;
-    const float3 normal = sd_mnee->N;
+    ccl_private ShaderClosure *selected_bsdf = nullptr;
 
     for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
       ccl_private ShaderClosure *bsdf = &sd_mnee->closure[ci];
@@ -310,37 +350,11 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
         continue;
       }
 
-      ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)bsdf;
-      float3 candidate_direction = zero_float3();
-      float eta = 1.0f;
-
-      if (CLOSURE_IS_REFLECTION(bsdf->type)) {
-        candidate_direction = reflect(incoming, normal);
-      }
-      else {
-        const float eta_ratio = (sd_mnee->flag & SD_BACKFACING) ? microfacet_bsdf->ior :
-                                                                  1.0f / microfacet_bsdf->ior;
-        candidate_direction = refract(incoming, normal, eta_ratio);
-        if (is_zero(candidate_direction)) {
-          continue;
-        }
-
-        eta = (sd_mnee->flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior : microfacet_bsdf->ior;
-      }
-
-      candidate_direction = safe_normalize(candidate_direction);
-      const float3 to_target = safe_normalize(sampled_P - sd_mnee->P);
-      const float alignment = dot(candidate_direction, to_target);
-
-      if (alignment > best_alignment) {
-        best_alignment = alignment;
-        best_direction = candidate_direction;
-        best_bsdf = bsdf;
-        best_eta = eta;
-      }
+      selected_bsdf = bsdf;
+      break;
     }
 
-    if (best_bsdf == nullptr) {
+    if (selected_bsdf == nullptr) {
       return false;
     }
 
@@ -348,11 +362,17 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
       return false;
     }
 
-    ccl_private MicrofacetBsdf *best_microfacet_bsdf = (ccl_private MicrofacetBsdf *)best_bsdf;
+    ccl_private MicrofacetBsdf *selected_microfacet_bsdf = (ccl_private MicrofacetBsdf *)selected_bsdf;
     ccl_private ManifoldVertex &mv = vertices[vertex_count++];
 
-    if (CLOSURE_IS_REFLECTION(best_bsdf->type)) {
+    if (CLOSURE_IS_REFLECTION(selected_bsdf->type)) {
       *out_has_reflection = true;
+    }
+
+    float eta = 1.0f;
+    if (!CLOSURE_IS_REFLECTION(selected_bsdf->type)) {
+      eta = (sd_mnee->flag & SD_BACKFACING) ? 1.0f / selected_microfacet_bsdf->ior :
+                                              selected_microfacet_bsdf->ior;
     }
 
     /* Tie roughness offsets to the actual visited specular surface. */
@@ -362,15 +382,37 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
         fractf(roughness_offset.y + hash_uint2_to_float(rough_seed, 0x7f4a7c15u)));
 
     float2 h = zero_float2();
-    if (best_microfacet_bsdf->alpha_x > 0.f && best_microfacet_bsdf->alpha_y > 0.f) {
-      h = mnee_sample_bsdf_dh(best_bsdf->type,
-                              best_microfacet_bsdf->alpha_x,
-                              best_microfacet_bsdf->alpha_y,
+    if (selected_microfacet_bsdf->alpha_x > 0.f && selected_microfacet_bsdf->alpha_y > 0.f) {
+      h = mnee_sample_bsdf_dh(selected_bsdf->type,
+                              selected_microfacet_bsdf->alpha_x,
+                              selected_microfacet_bsdf->alpha_y,
                               per_vertex_offset.x,
                               per_vertex_offset.y);
+      *out_offset_pdf *= sms_bsdf_offset_normal_pdf(
+        selected_bsdf->type, selected_microfacet_bsdf->alpha_x, selected_microfacet_bsdf->alpha_y, h);
     }
 
-    mnee_setup_manifold_vertex(kg, &mv, best_bsdf, best_eta, h, &probe_ray, &probe_isect, sd_mnee);
+    mnee_setup_manifold_vertex(kg, &mv, selected_bsdf, eta, h, &probe_ray, &probe_isect, sd_mnee);
+
+    /* Build outgoing direction using the selected closure and sampled offset normal,
+     * following the same reflect/refract transport transform used by the SMS solver. */
+    const float3 wi = -probe_ray.D;
+    const float3 n_offset = safe_normalize(mv.n + h.x * mv.dp_du + h.y * mv.dp_dv);
+    float3 outgoing = zero_float3();
+    bool valid_outgoing = false;
+
+    if (CLOSURE_IS_REFLECTION(selected_bsdf->type)) {
+      outgoing = sms_ad_reflect(wi, n_offset);
+      valid_outgoing = true;
+    }
+    else {
+      valid_outgoing = sms_ad_refract(wi, n_offset, eta, outgoing);
+    }
+
+    if (!valid_outgoing) {
+      return false;
+    }
+    outgoing = safe_normalize(outgoing);
 
     if (hit_object == target_object) {
       reached_target = true;
@@ -380,7 +422,7 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
     probe_ray.self.object = probe_isect.object;
     probe_ray.self.prim = probe_isect.prim;
     probe_ray.P = sd_mnee->P;
-    probe_ray.D = best_direction;
+    probe_ray.D = outgoing;
     probe_ray.tmin = MNEE_MIN_DISTANCE;
     probe_ray.tmax = FLT_MAX;
   }
@@ -509,6 +551,7 @@ ccl_device_forceinline Spectrum integrate_sms_biased(KernelGlobals kg,
       ManifoldVertex vertices[MNEE_MAX_CAUSTIC_CASTERS];
       bool has_reflection = false;
       int vertex_count = 0;
+      float offset_pdf = 1.0f;
 
       /* Sample a path via the target caster shape. */
       if (!sms_sample_path(kg,
@@ -523,7 +566,8 @@ ccl_device_forceinline Spectrum integrate_sms_biased(KernelGlobals kg,
                            rng_state,
                            vertices,
                            &vertex_count,
-                           &has_reflection))
+                           &has_reflection,
+                           &offset_pdf))
       {
         continue;
       }
@@ -580,7 +624,7 @@ ccl_device_forceinline Spectrum integrate_sms_biased(KernelGlobals kg,
                                 &throughput,
                                 has_reflection))
       {
-        result += bsdf_eval_sum(&throughput);
+        result += bsdf_eval_sum(&throughput) / max(offset_pdf, 1e-20f);
       }
     }
   }
@@ -618,11 +662,11 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
     RNGState offset_rng_state = *rng_state;
     path_state_rng_scramble(&offset_rng_state, (int)hash_uint2(caster_idx, 0x6e624eb7));
     const float2 roughness_offset = path_state_rng_2D(kg, &offset_rng_state, PRNG_SURFACE_BSDF);
-    const float p_offset = 1.0f;
     /* Sample initial path via this caster shape. */
     ManifoldVertex ref_vertices[MNEE_MAX_CAUSTIC_CASTERS];
     bool ref_has_reflection = false;
     int ref_vertex_count = 0;
+    float ref_offset_pdf = 1.0f;
 
     if (!sms_sample_path(kg,
                          state,
@@ -636,7 +680,8 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
                          rng_state,
                          ref_vertices,
                          &ref_vertex_count,
-                         &ref_has_reflection))
+                         &ref_has_reflection,
+                         &ref_offset_pdf))
     {
       continue;
     }
@@ -702,6 +747,7 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
       ManifoldVertex trial_vertices[MNEE_MAX_CAUSTIC_CASTERS];
       bool trial_has_reflection = false;
       int trial_vertex_count = 0;
+      float trial_offset_pdf = 1.0f;
 
       if (!sms_sample_path(kg,
                            state,
@@ -715,7 +761,9 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
                            rng_state,
                            trial_vertices,
                            &trial_vertex_count,
-                           &trial_has_reflection))
+                           &trial_has_reflection,
+                           &trial_offset_pdf) ||
+          trial_offset_pdf <= 0.0f)
       {
         inv_prob_estimate += 1.0f;
         iterations++;
@@ -771,7 +819,7 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
       inv_prob_estimate = 0.0f;
     }
 
-    result += ref_contrib * inv_prob_estimate / p_offset;
+    result += ref_contrib * inv_prob_estimate / max(ref_offset_pdf, 1e-20f);
   }
 
   return result;
