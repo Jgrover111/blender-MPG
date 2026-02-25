@@ -406,9 +406,8 @@ ccl_device
       /* Write SMS contribution directly to film (no shadow ray needed). */
       film_write_direct_light_sms(kg, state, render_buffer, sms_contribution);
     }
-    return;
   }
-  else if (mnee_vertex_count > 0) {
+  if (mnee_vertex_count > 0) {
     /* Create shadow ray after successful manifold walk:
      * emission_sd contains the last interface intersection and
      * the light sample ls has been updated */

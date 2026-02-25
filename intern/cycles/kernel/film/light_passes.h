@@ -693,7 +693,7 @@ ccl_device_inline void film_write_direct_light_sms(KernelGlobals kg,
                                                     const Spectrum contribution)
 {
   /* Clamp contribution. */
-  Spectrum clamped_contribution = contribution;
+  Spectrum clamped_contribution = INTEGRATOR_STATE(state, path, throughput) * contribution;
   const int bounce = INTEGRATOR_STATE(state, path, bounce);
   film_clamp_light(kg, &clamped_contribution, bounce);
 

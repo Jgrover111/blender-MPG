@@ -58,9 +58,43 @@ ccl_device_forceinline void sms_sample_surface_point(KernelGlobals kg,
   const int prim_offset = kernel_data_fetch(caustic_caster_prim_offset, caster_idx);
   const int num_prims = kernel_data_fetch(caustic_caster_num_prims, caster_idx);
 
-  /* Select a random triangle (uniform by index, not area-weighted). */
-  const int tri_idx = min((int)(rand_tri * (float)num_prims), num_prims - 1);
-  const int prim = prim_offset + tri_idx;
+  /* Select a random triangle weighted by surface area, matching Mitsuba's
+   * shape->sample_position() behavior. */
+  int prim = prim_offset;
+  float total_area = 0.0f;
+
+  for (int i = 0; i < num_prims; i++) {
+    const int area_prim = prim_offset + i;
+    const packed_uint3 area_vindex = kernel_data_fetch(tri_vindex, area_prim);
+    const float3 area_a = kernel_data_fetch(tri_verts, area_vindex.x);
+    const float3 area_b = kernel_data_fetch(tri_verts, area_vindex.y);
+    const float3 area_c = kernel_data_fetch(tri_verts, area_vindex.z);
+    total_area += 0.5f * len(cross(area_b - area_a, area_c - area_a));
+  }
+
+  if (total_area > 0.0f) {
+    const float target_area = rand_tri * total_area;
+    float cumulative_area = 0.0f;
+
+    prim = prim_offset + num_prims - 1;
+    for (int i = 0; i < num_prims; i++) {
+      const int area_prim = prim_offset + i;
+      const packed_uint3 area_vindex = kernel_data_fetch(tri_vindex, area_prim);
+      const float3 area_a = kernel_data_fetch(tri_verts, area_vindex.x);
+      const float3 area_b = kernel_data_fetch(tri_verts, area_vindex.y);
+      const float3 area_c = kernel_data_fetch(tri_verts, area_vindex.z);
+      cumulative_area += 0.5f * len(cross(area_b - area_a, area_c - area_a));
+      if (target_area <= cumulative_area) {
+        prim = area_prim;
+        break;
+      }
+    }
+  }
+  else {
+    /* Fallback for degenerate meshes: uniform by triangle index. */
+    const int tri_idx = min((int)(rand_tri * (float)num_prims), num_prims - 1);
+    prim = prim_offset + tri_idx;
+  }
 
   /* Sample uniform barycentrics on the selected triangle. */
   const float sqrt_u = sqrtf(rand_bary.x);
@@ -107,6 +141,7 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
                                              ccl_private ShaderData *sd_mnee,
                                              const ccl_private LightSample *ls,
                                              const int caster_idx,
+                                             const int rng_seed,
                                              const ccl_private RNGState *rng_state,
                                              ccl_private ManifoldVertex *vertices,
                                              ccl_private int *out_vertex_count,
@@ -119,8 +154,11 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
   float3 sampled_P, sampled_Ng;
   int target_object, target_prim;
 
-  const float rand_tri = path_state_rng_1D(kg, rng_state, PRNG_SURFACE_BSDF);
-  const float3 rand_light = path_state_rng_3D(kg, rng_state, PRNG_LIGHT);
+  RNGState local_rng_state = *rng_state;
+  path_state_rng_scramble(&local_rng_state, rng_seed);
+
+  const float rand_tri = path_state_rng_1D(kg, &local_rng_state, PRNG_SURFACE_BSDF);
+  const float3 rand_light = path_state_rng_3D(kg, &local_rng_state, PRNG_LIGHT);
   const float2 rand_bary = make_float2(rand_light.x, rand_light.y);
 
   sms_sample_surface_point(
@@ -217,7 +255,7 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
           /* Sample microfacet normal offset based on roughness. */
           float2 h = zero_float2();
           if (microfacet_bsdf->alpha_x > 0.f && microfacet_bsdf->alpha_y > 0.f) {
-            const float2 bsdf_uv = path_state_rng_2D(kg, rng_state, PRNG_SURFACE_BSDF);
+            const float2 bsdf_uv = path_state_rng_2D(kg, &local_rng_state, PRNG_SURFACE_BSDF);
             h = mnee_sample_bsdf_dh(bsdf->type,
                                     microfacet_bsdf->alpha_x,
                                     microfacet_bsdf->alpha_y,
@@ -327,6 +365,7 @@ ccl_device_forceinline Spectrum integrate_sms_biased(KernelGlobals kg,
                            sd_mnee,
                            ls,
                            caster_idx,
+                           (int)hash_uint2(caster_idx, trial),
                            rng_state,
                            vertices,
                            &vertex_count,
@@ -430,6 +469,7 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
                          sd_mnee,
                          ls,
                          caster_idx,
+                         (int)hash_uint2(caster_idx, 0),
                          rng_state,
                          ref_vertices,
                          &ref_vertex_count,
@@ -496,6 +536,7 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
                            sd_mnee,
                            ls,
                            caster_idx,
+                           (int)hash_uint2(caster_idx, trial),
                            rng_state,
                            trial_vertices,
                            &trial_vertex_count,
