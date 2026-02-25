@@ -120,7 +120,8 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
   int target_object, target_prim;
 
   const float rand_tri = path_state_rng_1D(kg, rng_state, PRNG_SURFACE_BSDF);
-  const float2 rand_bary = path_state_rng_2D(kg, rng_state, PRNG_LIGHT_U);
+  const float3 rand_light = path_state_rng_3D(kg, rng_state, PRNG_LIGHT);
+  const float2 rand_bary = make_float2(rand_light.x, rand_light.y);
 
   sms_sample_surface_point(
       kg, caster_idx, rand_tri, rand_bary, sampled_P, sampled_Ng, target_object, target_prim);
