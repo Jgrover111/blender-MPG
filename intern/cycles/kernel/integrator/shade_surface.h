@@ -379,16 +379,10 @@ ccl_device
 
           const int sampling_strategy = kernel_data.integrator.caustics_sampling_strategy;
 
-          if (sampling_strategy == CAUSTICS_SAMPLING_STRATEGY_SMS_UNBIASED) {
-            /* Unbiased SMS. */
+          if (sampling_strategy == CAUSTICS_SAMPLING_STRATEGY_SMS) {
+            /* Specular Manifold Sampling. */
             use_sms = true;
-            sms_contribution = integrate_sms_unbiased(
-                kg, state, sd, emission_sd, rng_state, &ls, light_fixed_direction);
-          }
-          else if (sampling_strategy == CAUSTICS_SAMPLING_STRATEGY_SMS_BIASED) {
-            /* Biased SMS. */
-            use_sms = true;
-            sms_contribution = integrate_sms_biased(
+            sms_contribution = integrate_sms(
                 kg, state, sd, emission_sd, rng_state, &ls, light_fixed_direction);
           }
           else {

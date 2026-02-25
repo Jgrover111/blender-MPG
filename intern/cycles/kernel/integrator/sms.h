@@ -16,15 +16,12 @@
  * - Iterates over ALL caustic caster shapes in the scene.
  * - For each shape, samples a uniformly random point on its surface.
  * - Traces from receiver toward that sampled point to initialize the manifold vertex.
- * - Runs Newton iteration to find a valid specular path.
+ * - Runs Newton iteration (with angle-difference constraints) to find a valid specular path.
+ * - Uses Bernoulli trials to estimate the inverse probability of finding each solution.
  * - Accumulates contributions from all shapes.
  *
  * This differs from MNEE's topology-local approach which traces a single deterministic
  * ray from receiver toward light and only finds caustic casters along that fixed axis.
- *
- * Two modes are supported:
- * - Biased: Fixed trial budget per shape, tracks unique solutions via direction comparison.
- * - Unbiased: Geometric series probability estimator with Bernoulli trials per shape.
  *
  * Reference:
  * "Specular Manifold Sampling for Rendering High-Frequency Caustics and Glints"
@@ -37,7 +34,6 @@ CCL_NAMESPACE_BEGIN
 
 /* SMS algorithm constants. */
 #define SMS_MAX_TRIALS 64
-#define SMS_BIASED_BUDGET 4
 #define SMS_UNIQUENESS_THRESHOLD 1e-4f
 
 /* Sample a uniformly random point on a caustic caster shape.
@@ -515,131 +511,14 @@ ccl_device_forceinline bool sms_check_depth_limits(KernelGlobals kg,
   return true;
 }
 
-/* Biased SMS: For each caustic caster shape, run a fixed trial budget,
- * collect unique solutions, and accumulate contributions.
- *
- * Matches Mitsuba's biased mode:
- *   for each shape:
- *     for each trial in budget:
- *       sample_path -> newton_solver -> check uniqueness -> evaluate */
-ccl_device_forceinline Spectrum integrate_sms_biased(KernelGlobals kg,
-                                                     IntegratorState state,
-                                                     ccl_private ShaderData *sd,
-                                                     ccl_private ShaderData *sd_mnee,
-                                                     const ccl_private RNGState *rng_state,
-                                                     ccl_private LightSample *ls,
-                                                     const bool light_fixed_direction)
-{
-  const int num_casters = kernel_data.integrator.caustics_num_casters;
-  if (num_casters == 0) {
-    return zero_spectrum();
-  }
-
-  Spectrum result = zero_spectrum();
-
-  /* Iterate over all caustic caster shapes in the scene. */
-  for (int caster_idx = 0; caster_idx < num_casters; caster_idx++) {
-    const int sms_num_branches = num_casters * SMS_BIASED_BUDGET;
-    /* Track unique solution directions for this shape. */
-    float3 solution_dirs[SMS_BIASED_BUDGET];
-    int num_unique = 0;
-
-    for (int trial = 0; trial < SMS_BIASED_BUDGET; trial++) {
-      RNGState offset_rng_state = *rng_state;
-      path_state_rng_scramble(&offset_rng_state, (int)hash_uint2(caster_idx, 0x6e624eb7 ^ trial));
-      const float2 roughness_offset = path_state_rng_2D(kg, &offset_rng_state, PRNG_SURFACE_BSDF);
-      ManifoldVertex vertices[MNEE_MAX_CAUSTIC_CASTERS];
-      bool has_reflection = false;
-      int vertex_count = 0;
-      float offset_pdf = 1.0f;
-
-      /* Sample a path via the target caster shape. */
-      if (!sms_sample_path(kg,
-                           state,
-                           sd,
-                           sd_mnee,
-                           ls,
-                           caster_idx,
-                           roughness_offset,
-                           trial + caster_idx * SMS_BIASED_BUDGET,
-                           sms_num_branches,
-                           rng_state,
-                           vertices,
-                           &vertex_count,
-                           &has_reflection,
-                           &offset_pdf))
-      {
-        continue;
-      }
-
-      /* Check depth limits. */
-      if (!sms_check_depth_limits(kg, state, vertex_count)) {
-        continue;
-      }
-
-      /* Newton solver: walk on specular manifold. */
-      if (!mnee_newton_solver_sms(kg,
-                                  sd,
-                                  sd_mnee,
-                                  ls,
-                                  light_fixed_direction,
-                                  vertex_count,
-                                  vertices,
-                                  has_reflection,
-                                  kernel_data.integrator.caustics_constraint_derivatives))
-      {
-        continue;
-      }
-
-      /* Check uniqueness: compare direction from receiver to first vertex
-       * against previously found solutions for this shape. */
-      const float3 direction = normalize(vertices[0].p - sd->P);
-      bool duplicate = false;
-      for (int k = 0; k < num_unique; k++) {
-        if (fabsf(dot(direction, solution_dirs[k]) - 1.0f) < SMS_UNIQUENESS_THRESHOLD) {
-          duplicate = true;
-          break;
-        }
-      }
-      if (duplicate) {
-        continue;
-      }
-
-      /* Record unique solution direction. */
-      if (num_unique < SMS_BIASED_BUDGET) {
-        solution_dirs[num_unique] = direction;
-        num_unique++;
-      }
-
-      /* Evaluate path contribution. */
-      BsdfEval throughput;
-      if (sms_path_contribution(kg,
-                                state,
-                                sd,
-                                sd_mnee,
-                                ls,
-                                light_fixed_direction,
-                                vertex_count,
-                                vertices,
-                                &throughput,
-                                has_reflection))
-      {
-        result += bsdf_eval_sum(&throughput) / max(offset_pdf, 1e-20f);
-      }
-    }
-  }
-
-  return result;
-}
-
-/* Unbiased SMS: For each caustic caster shape, find one solution then use
+/* SMS: For each caustic caster shape, find one solution then use
  * Bernoulli trials to estimate the inverse probability of finding that solution.
  *
  * Matches Mitsuba's unbiased mode:
  *   for each shape:
  *     sample_path -> newton_solver -> evaluate_contribution
  *     estimate inverse probability via repeated sample_path trials */
-ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
+ccl_device_forceinline Spectrum integrate_sms(KernelGlobals kg,
                                                        IntegratorState state,
                                                        ccl_private ShaderData *sd,
                                                        ccl_private ShaderData *sd_mnee,
@@ -699,8 +578,7 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
                                 light_fixed_direction,
                                 ref_vertex_count,
                                 ref_vertices,
-                                ref_has_reflection,
-                                kernel_data.integrator.caustics_constraint_derivatives))
+                                ref_has_reflection))
     {
       continue;
     }
@@ -794,8 +672,7 @@ ccl_device_forceinline Spectrum integrate_sms_unbiased(KernelGlobals kg,
                                   light_fixed_direction,
                                   trial_vertex_count,
                                   trial_vertices,
-                                  trial_has_reflection,
-                                  kernel_data.integrator.caustics_constraint_derivatives))
+                                  trial_has_reflection))
       {
         inv_prob_estimate += 1.0f;
         iterations++;

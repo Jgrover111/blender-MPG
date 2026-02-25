@@ -1061,7 +1061,7 @@ ccl_device_forceinline bool mnee_newton_solver(KernelGlobals kg,
   return false;
 }
 
-/* Newton solver for SMS with configurable constraint method and reflection support. */
+/* Newton solver for SMS with angle-difference constraints and reflection support. */
 ccl_device_forceinline bool mnee_newton_solver_sms(
     KernelGlobals kg,
     const ccl_private ShaderData *sd,
@@ -1070,8 +1070,7 @@ ccl_device_forceinline bool mnee_newton_solver_sms(
     const bool light_fixed_direction,
     const int vertex_count,
     ccl_private ManifoldVertex *vertices,
-    bool reflection,
-    int caustics_constraint_derivatives)
+    bool reflection)
 {
   float2 dx[MNEE_MAX_CAUSTIC_CASTERS];
   ManifoldVertex tentative[MNEE_MAX_CAUSTIC_CASTERS];
@@ -1093,18 +1092,10 @@ ccl_device_forceinline bool mnee_newton_solver_sms(
   bool resolve_constraint = true;
   for (int iteration = 0; iteration < MNEE_MAX_ITERATIONS; iteration++) {
     if (resolve_constraint) {
-      /* Calculate constraint and its derivatives using the selected method. */
-      bool derivatives_ok;
-      if (caustics_constraint_derivatives == CAUSTICS_CONSTRAINT_DERIVATIVES_AD) {
-        derivatives_ok = mnee_compute_ad_constraint_derivatives(
-            vertex_count, vertices, sd->P, light_fixed_direction, light_sample, reflection);
-      }
-      else {
-        derivatives_ok = mnee_compute_hv_constraint_derivatives(
-            vertex_count, vertices, sd->P, light_fixed_direction, light_sample, reflection);
-      }
-
-      if (!derivatives_ok) {
+      /* Calculate constraint and its derivatives using angle-difference method. */
+      if (!mnee_compute_ad_constraint_derivatives(
+              vertex_count, vertices, sd->P, light_fixed_direction, light_sample, reflection))
+      {
         return false;
       }
 

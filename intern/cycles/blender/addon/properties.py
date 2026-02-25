@@ -370,24 +370,9 @@ enum_caustics_sampling_strategy = (
      "MNEE",
      "Manifold Next Event Estimation - Original caustics sampling method",
      0),
-    ('SMS_UNBIASED',
-     "SMS (Unbiased)",
-     "Specular Manifold Sampling - Unbiased mode with geometric series estimator",
-     1),
-    ('SMS_BIASED',
-     "SMS (Biased)",
-     "Specular Manifold Sampling - Biased mode with fixed trial budget",
-     2),
-)
-
-enum_caustics_constraint_derivatives = (
-    ('HALF_VECTOR',
-     "Half-Vector",
-     "Half-vector constraint derivatives (original MNEE method)",
-     0),
-    ('ANGLE_DIFFERENCE',
-     "Angle-Difference",
-     "Angle-difference constraint derivatives (SMS paper method)",
+    ('SMS',
+     "SMS",
+     "Specular Manifold Sampling - Unbiased caustics with global seeding",
      1),
 )
 
@@ -695,13 +680,6 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         description="Sampling strategy for rendering caustics",
         items=enum_caustics_sampling_strategy,
         default='MNEE',
-    )
-
-    caustics_constraint_derivatives: EnumProperty(
-        name="Constraint Derivatives",
-        description="Method for computing constraint derivatives in manifold walking",
-        items=enum_caustics_constraint_derivatives,
-        default='HALF_VECTOR',
     )
 
     blur_glossy: FloatProperty(

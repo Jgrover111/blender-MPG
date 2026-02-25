@@ -708,14 +708,7 @@ enum DirectLightSamplingType {
 /* Caustics Sampling Strategy (SMS vs MNEE) */
 enum CausticsSamplingStrategy {
   CAUSTICS_SAMPLING_STRATEGY_MNEE = 0,
-  CAUSTICS_SAMPLING_STRATEGY_SMS_UNBIASED = 1,
-  CAUSTICS_SAMPLING_STRATEGY_SMS_BIASED = 2,
-};
-
-/* Caustics Constraint Derivatives Method */
-enum CausticsConstraintDerivatives {
-  CAUSTICS_CONSTRAINT_DERIVATIVES_HV = 0, /* Half-Vector (original MNEE) */
-  CAUSTICS_CONSTRAINT_DERIVATIVES_AD = 1, /* Angle-Difference (SMS paper) */
+  CAUSTICS_SAMPLING_STRATEGY_SMS = 1,
 };
 
 /* Differential */
