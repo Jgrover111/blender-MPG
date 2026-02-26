@@ -395,15 +395,13 @@ ccl_device
     }
   }
   if (use_sms) {
-    /* SMS handles caustic paths through specular casters for this light.
-     * If SMS found valid caustic paths (non-zero contribution), write and return.
-     * If SMS found no paths (zero contribution), fall through to direct lighting
-     * since the light might be directly visible without going through a caster. */
+    /* SMS computes caustic paths through specular casters. This is separate from
+     * direct lighting which handles paths that don't go through casters. Both
+     * can contribute to the same receiver point and should be summed. */
     if (!is_zero(sms_contribution)) {
       film_write_direct_light_sms(kg, state, render_buffer, sms_contribution);
-      return;
     }
-    /* SMS found no caustic paths - continue to direct lighting evaluation. */
+    /* Continue to direct lighting - it handles the non-caustic path. */
   }
   if (mnee_vertex_count > 0) {
     /* Create shadow ray after successful manifold walk:
