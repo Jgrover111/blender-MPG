@@ -679,11 +679,6 @@ ccl_device_forceinline Spectrum integrate_sms(KernelGlobals kg,
       inv_prob_estimate = 0.0f;
     }
 
-    /* DEBUG: Clamp inv_prob_estimate to diagnose brightness issues.
-     * If this fixes "too bright" areas, the issue is with Bernoulli trial convergence.
-     * TODO: Remove or make configurable after debugging. */
-    inv_prob_estimate = fminf(inv_prob_estimate, 4.0f);
-
     result += ref_contrib * inv_prob_estimate / max(ref_offset_pdf, 1e-20f);
   }
 

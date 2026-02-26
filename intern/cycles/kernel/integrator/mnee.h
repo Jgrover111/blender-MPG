@@ -1555,7 +1555,10 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
   INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce + vertex_count;
 
   const Spectrum light_eval = light_sample_shader_eval(kg, state, sd_mnee, ls, sd->time);
-  bsdf_eval_mul(throughput, light_eval / ls->pdf);
+  /* Clamp PDF to prevent extreme amplification for edge caustic paths where
+   * the specular vertex has unfavorable geometry relative to the light. */
+  const float pdf_clamped = fmaxf(ls->pdf, 0.01f);
+  bsdf_eval_mul(throughput, light_eval / pdf_clamped);
 
   /* Generalized geometry term. */
 
