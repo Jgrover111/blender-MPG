@@ -493,13 +493,8 @@ ccl_device_forceinline bool sms_path_contribution(KernelGlobals kg,
   }
 
   /* Use MNEE's path contribution evaluation. */
-  if (!mnee_path_contribution(
-          kg, state, sd, sd_mnee, ls, light_fixed_direction, vertex_count, vertices, throughput))
-  {
-    return false;
-  }
-
-  return true;
+  return mnee_path_contribution(
+      kg, state, sd, sd_mnee, ls, light_fixed_direction, vertex_count, vertices, throughput);
 }
 
 /* Check depth limits for a given vertex count. */
@@ -596,7 +591,11 @@ ccl_device_forceinline Spectrum integrate_sms(KernelGlobals kg,
       continue;
     }
 
-    /* Evaluate reference path contribution. */
+    /* Evaluate reference path contribution.
+     * Save ls before calling sms_path_contribution because mnee_path_contribution
+     * mutates it via light_sample_update(). We need the original ls for subsequent
+     * caster iterations and Bernoulli trials. */
+    LightSample ls_backup = *ls;
     BsdfEval ref_throughput;
     if (!sms_path_contribution(kg,
                                state,
@@ -609,8 +608,10 @@ ccl_device_forceinline Spectrum integrate_sms(KernelGlobals kg,
                                &ref_throughput,
                                ref_has_reflection))
     {
+      *ls = ls_backup;
       continue;
     }
+    *ls = ls_backup;
 
     Spectrum ref_contrib = bsdf_eval_sum(&ref_throughput);
 
