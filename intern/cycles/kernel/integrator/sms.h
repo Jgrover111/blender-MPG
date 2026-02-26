@@ -493,8 +493,23 @@ ccl_device_forceinline bool sms_path_contribution(KernelGlobals kg,
   }
 
   /* Use MNEE's path contribution evaluation. */
-  return mnee_path_contribution(
-      kg, state, sd, sd_mnee, ls, light_fixed_direction, vertex_count, vertices, throughput);
+  if (!mnee_path_contribution(
+          kg, state, sd, sd_mnee, ls, light_fixed_direction, vertex_count, vertices, throughput))
+  {
+    return false;
+  }
+
+  /* Cancel out the PDF division that mnee_path_contribution does.
+   * Mitsuba's SMS does NOT divide by emitter PDF in the final contribution - they only
+   * multiply by ei.weight which has the radiance. The Bernoulli trial inverse probability
+   * estimate already accounts for the sampling probability, so dividing by ls->pdf
+   * is incorrect and causes brightness issues.
+   *
+   * mnee_path_contribution divided by ls->pdf (after light_sample_update).
+   * We multiply it back to cancel that division. */
+  bsdf_eval_mul(throughput, ls->pdf);
+
+  return true;
 }
 
 /* Check depth limits for a given vertex count. */
