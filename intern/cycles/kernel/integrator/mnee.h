@@ -42,13 +42,12 @@
  */
 
 // NOLINTBEGIN
-#define MNEE_MAX_ITERATIONS 64
+#define MNEE_MAX_ITERATIONS 20
 #define MNEE_MAX_INTERSECTION_COUNT 10
-#define MNEE_SOLVER_THRESHOLD 0.001f
+#define MNEE_SOLVER_THRESHOLD 0.00001f
 #define MNEE_MINIMUM_STEP_SIZE 0.0001f
 #define MNEE_MAX_CAUSTIC_CASTERS 6
 #define MNEE_MIN_DISTANCE 0.001f
-#define MNEE_MIN_PROGRESS_DISTANCE 0.0001f
 #define MNEE_MIN_DETERMINANT 0.0001f
 #define MNEE_PROJECTION_DISTANCE_MULTIPLIER 2.f
 // NOLINTEND
@@ -284,8 +283,16 @@ bool mnee_compute_hv_constraint_derivatives(
     ilo = 1.f / ilo;
     wo *= ilo;
 
-    /* Check if this vertex is reflection or refraction. */
-    bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(v.bsdf->type);
+    /* Check if this vertex is reflection or refraction.
+     * For Glass closures, determine from actual geometry (same side of normal = reflection)
+     * since CLOSURE_IS_REFLECTION is always false for Glass types. */
+    bool reflection_vi;
+    if (CLOSURE_IS_GLASS(v.bsdf->type)) {
+      reflection_vi = dot(v.n, wi) * dot(v.n, wo) > 0.0f;
+    }
+    else {
+      reflection_vi = reflection && CLOSURE_IS_REFLECTION(v.bsdf->type);
+    }
     float eta = 1.0f;
     float3 H;
 
@@ -614,8 +621,16 @@ bool mnee_compute_ad_constraint_derivatives(const int vertex_count,
     float3 dwi_du_cur = -ili * (v_cur.dp_du - wi * dot(wi, v_cur.dp_du));
     float3 dwi_dv_cur = -ili * (v_cur.dp_dv - wi * dot(wi, v_cur.dp_dv));
 
-    /* Determine if this is reflection or refraction. */
-    bool reflection_vi = reflection && CLOSURE_IS_REFLECTION(v_cur.bsdf->type);
+    /* Determine if this is reflection or refraction.
+     * For Glass closures, determine from actual geometry (same side of normal = reflection)
+     * since CLOSURE_IS_REFLECTION is always false for Glass types. */
+    bool reflection_vi;
+    if (CLOSURE_IS_GLASS(v_cur.bsdf->type)) {
+      reflection_vi = dot(v_cur.n, wi) * dot(v_cur.n, wo) > 0.0f;
+    }
+    else {
+      reflection_vi = reflection && CLOSURE_IS_REFLECTION(v_cur.bsdf->type);
+    }
 
     const float3 n_surf = v_cur.n;
     const float3 dn_surf_du = v_cur.dn_du;
@@ -1007,13 +1022,6 @@ ccl_device_forceinline bool mnee_newton_solver(KernelGlobals kg,
       /* Setup corrected manifold vertex. */
       mnee_setup_manifold_vertex(
           kg, &tv, mv.bsdf, mv.eta, mv.n_offset, &projection_ray, &projection_isect, sd_vtx);
-
-      /* Fail newton solve if we are not making progress, probably stuck trying to move off the
-       * edge of the mesh. */
-      const float distance = len(tv.p - mv.p);
-      if (distance < MNEE_MIN_PROGRESS_DISTANCE) {
-        return false;
-      }
     }
 
     /* Check that tentative path is still transmissive. */
@@ -1122,6 +1130,13 @@ ccl_device_forceinline bool mnee_newton_solver_sms(
           const bool is_refraction = cos_theta_i * cos_theta_o < 0.0f;
           const bool is_reflection = !is_refraction;
 
+          /* Glass closures can produce both reflection and refraction caustics.
+           * Accept both types of solutions and let the evaluation function apply
+           * the correct Fresnel weighting based on the final geometry. */
+          if (CLOSURE_IS_GLASS(v.bsdf->type)) {
+            continue;
+          }
+
           const bool vertex_is_reflective = (v.eta == 1.0f) ||
                                             (reflection && CLOSURE_IS_REFLECTION(v.bsdf->type));
 
@@ -1201,12 +1216,6 @@ ccl_device_forceinline bool mnee_newton_solver_sms(
       /* Setup corrected manifold vertex. */
       mnee_setup_manifold_vertex(
           kg, &tv, mv.bsdf, mv.eta, mv.n_offset, &projection_ray, &projection_isect, sd_vtx);
-
-      /* Fail if not making progress. */
-      const float distance = len(tv.p - mv.p);
-      if (distance < MNEE_MIN_PROGRESS_DISTANCE) {
-        return false;
-      }
     }
 
     /* Handle projection failure by reducing step size.
@@ -1348,15 +1357,15 @@ ccl_device_forceinline Spectrum mnee_eval_reflection_bsdf_contribution(
   microfacet_fresnel(kg, bsdf, cosHI, nullptr, &reflectance, &transmittance);
 
   /*
-   * Reflection event uses a different Jacobian chain than refraction:
-   * bsdf_do = F * D_do * G / (4 * n.wi)
-   *  pdf_dh = D_dh * cosThetaM
-   *    D_do = D_dh * |dh/do|
+   * Reflection uses the same MNEE Eq.6 derivation as refraction:
+   *   f_r = F * G * D / (4 * |n.wi| * |n.wo|)
+   *   |do/dh| = 4 * |h.wi|          (reflection Jacobian)
+   *   pdf_dh  = D * cosThetaM
    *
-   * contribution = bsdf_do * |do/dh| * |n.wo / n.h| / pdf_dh
-   *              = F * G * |n.wo| / (4 * |n.wi| * n.h^2)
+   * contribution = f_r * |do/dh| * |n.wo / n.h| / pdf_dh
+   *              = F * G * |h.wi| / (|n.wi| * n.h^2)
    */
-  return bsdf->weight * reflectance * G * fabsf(cosNO / (4.0f * cosNI * sqr(cosThetaM)));
+  return bsdf->weight * reflectance * G * fabsf(cosHI / (cosNI * sqr(cosThetaM)));
 }
 
 ccl_device_forceinline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
@@ -1389,7 +1398,8 @@ ccl_device_forceinline bool mnee_compute_transfer_matrix(const ccl_private Shade
                                                          const int vertex_count,
                                                          ccl_private ManifoldVertex *vertices,
                                                          ccl_private float *dx1_dxlight,
-                                                         ccl_private float *dh_dx)
+                                                         ccl_private float *dh_dx,
+                                                         bool reflection = false)
 {
   /* Simplified block tridiagonal LU factorization. */
   float4 Li;
@@ -1434,10 +1444,28 @@ ccl_device_forceinline bool mnee_compute_transfer_matrix(const ccl_private Shade
   const float ili = 1.f / len(wi);
   wi *= ili;
 
-  /* Invert ior if coming from inside. */
-  float eta = m.eta;
-  if (dot(wi, m.ng) < .0f) {
-    eta = 1.f / eta;
+  /* Determine if the last vertex is reflective.
+   * For Glass closures, check actual geometry (same side of normal = reflection). */
+  bool last_vertex_reflective;
+  if (CLOSURE_IS_GLASS(m.bsdf->type)) {
+    const float3 wo_check = light_fixed_direction ? ls->D : normalize(ls->P - m.p);
+    last_vertex_reflective = dot(m.n, wi) * dot(m.n, wo_check) > 0.0f;
+  }
+  else {
+    last_vertex_reflective = reflection &&
+                             (CLOSURE_IS_REFLECTION(m.bsdf->type) || m.eta == 1.0f);
+  }
+
+  float eta;
+  if (last_vertex_reflective) {
+    eta = 1.0f;
+  }
+  else {
+    /* Invert ior if coming from inside. */
+    eta = m.eta;
+    if (dot(wi, m.ng) < .0f) {
+      eta = 1.f / eta;
+    }
   }
 
   float dxn_dwn;
@@ -1448,11 +1476,20 @@ ccl_device_forceinline bool mnee_compute_transfer_matrix(const ccl_private Shade
     const float3 wo = ls->D;
 
     /* Half vector. */
-    float3 H = -(wi + eta * wo);
-    const float ilh = 1.f / len(H);
-    H *= ilh;
-
-    const float ilo = -eta * ilh;
+    float3 H;
+    float ilo;
+    if (last_vertex_reflective) {
+      H = wi + wo;
+      const float ilh = 1.f / len(H);
+      H *= ilh;
+      ilo = ilh;
+    }
+    else {
+      H = -(wi + eta * wo);
+      const float ilh = 1.f / len(H);
+      H *= ilh;
+      ilo = -eta * ilh;
+    }
 
     const float cos_theta = dot(wo, m.n);
     const float sin_theta = sin_from_cos(cos_theta);
@@ -1480,18 +1517,29 @@ ccl_device_forceinline bool mnee_compute_transfer_matrix(const ccl_private Shade
     wo *= ilo;
 
     /* Half vector. */
-    float3 H = -(wi + eta * wo);
-    const float ilh = 1.f / len(H);
-    H *= ilh;
-
-    ilo *= eta * ilh;
+    float3 H;
+    if (last_vertex_reflective) {
+      H = wi + wo;
+      const float ilh = 1.f / len(H);
+      H *= ilh;
+      ilo *= ilh;
+    }
+    else {
+      H = -(wi + eta * wo);
+      const float ilh = 1.f / len(H);
+      H *= ilh;
+      ilo *= eta * ilh;
+    }
 
     float3 dH_du = (dp_du - wo * dot(wo, dp_du)) * ilo;
     float3 dH_dv = (dp_dv - wo * dot(wo, dp_dv)) * ilo;
     dH_du -= H * dot(dH_du, H);
     dH_dv -= H * dot(dH_dv, H);
-    dH_du = -dH_du;
-    dH_dv = -dH_dv;
+    /* Sign flip for refraction only. */
+    if (!last_vertex_reflective) {
+      dH_du = -dH_du;
+      dH_dv = -dH_dv;
+    }
 
     dc_dlight = make_float4(dot(dH_du, s), dot(dH_dv, s), dot(dH_du, t), dot(dH_dv, t));
 
@@ -1519,7 +1567,8 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
                                                    const bool light_fixed_direction,
                                                    const int vertex_count,
                                                    ccl_private ManifoldVertex *vertices,
-                                                   ccl_private BsdfEval *throughput)
+                                                   ccl_private BsdfEval *throughput,
+                                                   bool reflection = false)
 {
   float wo_len;
   float3 wo = normalize_len(vertices[0].p - sd->P, &wo_len);
@@ -1562,7 +1611,7 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
   float dh_dx;
   float dx1_dxlight;
   if (!mnee_compute_transfer_matrix(
-          sd, ls, light_fixed_direction, vertex_count, vertices, &dx1_dxlight, &dh_dx))
+          sd, ls, light_fixed_direction, vertex_count, vertices, &dx1_dxlight, &dh_dx, reflection))
   {
     return false;
   }
@@ -1570,8 +1619,10 @@ ccl_device_forceinline bool mnee_path_contribution(KernelGlobals kg,
   /* Receiver bsdf eval above already contains |n.wo|. */
   const float dw0_dx1 = fabsf(dot(wo, vertices[0].n)) / sqr(wo_len);
 
-  /* Clamp since it has a tendency to be unstable. */
-  const float G = fminf(dw0_dx1 * dx1_dxlight, 2.f);
+  /* Clamp since it has a tendency to be unstable.
+   * Use a high clamp to allow bright reflective caustics from curved surfaces
+   * while still preventing extreme fireflies. */
+  const float G = fminf(dw0_dx1 * dx1_dxlight, 2e5f);
   bsdf_eval_mul(throughput, G);
 
   /* Specular reflectance. */

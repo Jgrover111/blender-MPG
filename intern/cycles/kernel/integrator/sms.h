@@ -164,11 +164,16 @@ ccl_device_forceinline float sms_bsdf_offset_normal_pdf(const ClosureType type,
   return d * hz;
 }
 
-/* Try to initialize a manifold vertex on a specific caustic caster shape
- * by sampling a random surface point, tracing toward it from the receiver,
- * and setting up the vertex if we hit the target shape.
+/* Sample a seed path through specular surfaces, matching Mitsuba's sample_seed_path().
  *
- * This matches Mitsuba's sample_path() function. */
+ * Samples a random point on the designated caster shape to get an initial direction,
+ * then traces through all specular surfaces encountered, building the manifold vertex
+ * chain. Does NOT require reaching a specific target - accepts whatever specular chain
+ * the ray produces.
+ *
+ * For Bernoulli trials (seed_vertex_count > 0), verifies that trial paths hit the same
+ * sequence of shapes as the reference path, which is required for offset normals to
+ * remain valid across trials. */
 ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
                                             IntegratorState state,
                                             ccl_private ShaderData *sd,
@@ -182,15 +187,20 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
                                             ccl_private ManifoldVertex *vertices,
                                             ccl_private int *out_vertex_count,
                                             ccl_private bool *out_has_reflection,
-                                            ccl_private float *out_offset_pdf)
+                                            ccl_private float *out_offset_pdf,
+                                            ccl_private int *vertex_objects,
+                                            const int seed_vertex_count,
+                                            const ccl_private int *seed_objects)
 {
   *out_vertex_count = 0;
   *out_has_reflection = false;
   *out_offset_pdf = 1.0f;
 
-  /* Sample a random point on the target caustic caster surface. */
+  /* Sample a random point on the designated caustic caster surface.
+   * This provides the initial tracing direction, matching Mitsuba's
+   * shape->sample_position(). */
   float3 sampled_P, sampled_Ng;
-  int target_object, target_prim;
+  int sampled_object, sampled_prim;
 
   /* SMS consumes RNG dimensions as follows:
    * - PRNG_SURFACE_BSDF: 1D for caster triangle selection, and 2D per rough vertex for dh.
@@ -204,12 +214,12 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
   const float2 rand_bary = make_float2(rand_light.x, rand_light.y);
 
   sms_sample_surface_point(
-      kg, caster_idx, rand_tri, rand_bary, sampled_P, sampled_Ng, target_object, target_prim);
+      kg, caster_idx, rand_tri, rand_bary, sampled_P, sampled_Ng, sampled_object, sampled_prim);
 
-  /* Trace from receiver toward the sampled point on the caster surface. */
-  float3 target_direction = sampled_P - sd->P;
-  float target_distance;
-  target_direction = normalize_len(target_direction, &target_distance);
+  /* Trace from receiver toward the sampled point on the caster surface.
+   * The sampled point provides the initial direction; we accept whatever
+   * specular surfaces the ray encounters (matching Mitsuba). */
+  float3 wo = normalize(sampled_P - sd->P);
 
   Ray probe_ray;
   probe_ray.self.object = sd->object;
@@ -217,9 +227,9 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
   probe_ray.self.light_object = ls->object;
   probe_ray.self.light_prim = ls->prim;
   probe_ray.P = sd->P;
-  probe_ray.D = target_direction;
+  probe_ray.D = wo;
   probe_ray.tmin = 0.0f;
-  probe_ray.tmax = target_distance * 2.0f;
+  probe_ray.tmax = FLT_MAX;
   probe_ray.dP = differential_make_compact(sd->dP);
   probe_ray.dD = differential_zero_compact();
   probe_ray.time = sd->time;
@@ -227,92 +237,15 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
   Intersection probe_isect;
   int vertex_count = 0;
 
-  /* Single-bounce initialization path: if the first caster hit is the sampled target, we can
-   * initialize directly without constructing a longer topology chain. */
-  bool single_bounce = false;
-  Intersection single_isect;
-  if (scene_intersect(kg, &probe_ray, PATH_RAY_TRANSMIT, &single_isect)) {
-    const int single_hit_object = (single_isect.object == OBJECT_NONE) ?
-                                      kernel_data_fetch(prim_object, single_isect.prim) :
-                                      single_isect.object;
-    const int single_object_flags = intersection_get_object_flags(kg, &single_isect);
-    single_bounce = ((single_object_flags & SD_OBJECT_CAUSTICS_CASTER) &&
-                     single_hit_object == target_object);
-  }
+  /* Target bounce count: for the first path (seed), trace until we run out of
+   * specular surfaces. For Bernoulli trials, match the seed path's vertex count. */
+  const int max_bounces = (seed_vertex_count > 0) ? seed_vertex_count :
+                                                     MNEE_MAX_CAUSTIC_CASTERS;
 
-  if (single_bounce) {
-    probe_isect = single_isect;
-
-    const int hit_object = (probe_isect.object == OBJECT_NONE) ?
-                               kernel_data_fetch(prim_object, probe_isect.prim) :
-                               probe_isect.object;
-    const int object_flags = intersection_get_object_flags(kg, &probe_isect);
-    if (!(object_flags & SD_OBJECT_CAUSTICS_CASTER) || hit_object != target_object) {
-      return false;
-    }
-
-    if (!(probe_isect.type & PRIMITIVE_TRIANGLE)) {
-      return false;
-    }
-
-    shader_setup_from_ray(kg, sd_mnee, &probe_ray, &probe_isect);
-    if (!(sd_mnee->shader & SHADER_SMOOTH_NORMAL)) {
-      return false;
-    }
-
-    surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
-        kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
-
-    bool found_compatible_bsdf = false;
-    for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
-      ccl_private ShaderClosure *bsdf = &sd_mnee->closure[ci];
-      if (!CLOSURE_IS_SMS_COMPATIBLE(bsdf->type)) {
-        continue;
-      }
-
-      found_compatible_bsdf = true;
-      ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)bsdf;
-      ccl_private ManifoldVertex &mv = vertices[vertex_count++];
-
-      if (CLOSURE_IS_REFLECTION(bsdf->type)) {
-        *out_has_reflection = true;
-      }
-
-      float eta = 1.0f;
-      if (!CLOSURE_IS_REFLECTION(bsdf->type)) {
-        eta = (sd_mnee->flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior : microfacet_bsdf->ior;
-      }
-
-      float2 h = zero_float2();
-      if (microfacet_bsdf->alpha_x > 0.f && microfacet_bsdf->alpha_y > 0.f) {
-        const uint rough_seed = hash_uint2((uint)hit_object, (uint)probe_isect.prim);
-        const float2 per_vertex_offset = make_float2(
-            fractf(roughness_offset.x + hash_uint2_to_float(rough_seed, 0x12a35d91u)),
-            fractf(roughness_offset.y + hash_uint2_to_float(rough_seed, 0x7f4a7c15u)));
-        h = mnee_sample_bsdf_dh(bsdf->type,
-                                microfacet_bsdf->alpha_x,
-                                microfacet_bsdf->alpha_y,
-                                per_vertex_offset.x,
-                                per_vertex_offset.y);
-        *out_offset_pdf *= sms_bsdf_offset_normal_pdf(
-          bsdf->type, microfacet_bsdf->alpha_x, microfacet_bsdf->alpha_y, h);
-      }
-
-      mnee_setup_manifold_vertex(kg, &mv, bsdf, eta, h, &probe_ray, &probe_isect, sd_mnee);
-      break;
-    }
-
-    if (!found_compatible_bsdf) {
-      return false;
-    }
-
-    *out_vertex_count = vertex_count;
-    return true;
-  }
-
-  /* Multi-bounce initialization: build topology via per-bounce specular transport. */
-  bool reached_target = false;
-  for (int bounce = 0; bounce < MNEE_MAX_CAUSTIC_CASTERS; bounce++) {
+  /* Build seed path by tracing through specular surfaces.
+   * Matches Mitsuba's sample_seed_path: trace from receiver, accumulate
+   * specular bounces, scatter (reflect/refract) at each vertex, continue. */
+  for (int bounce = 0; bounce < max_bounces; bounce++) {
     if (!scene_intersect(kg, &probe_ray, PATH_RAY_TRANSMIT, &probe_isect)) {
       break;
     }
@@ -330,6 +263,15 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
                                kernel_data_fetch(prim_object, probe_isect.prim) :
                                probe_isect.object;
 
+    /* For Bernoulli trials, verify shape consistency with reference path.
+     * Matching Mitsuba: "only allow paths that intersect the same shapes again"
+     * so that the sampled offset normals remain valid. */
+    if (seed_vertex_count > 0 && seed_objects != nullptr) {
+      if (hit_object != seed_objects[bounce]) {
+        return false;
+      }
+    }
+
     shader_setup_from_ray(kg, sd_mnee, &probe_ray, &probe_isect);
     if (!(sd_mnee->shader & SHADER_SMOOTH_NORMAL)) {
       return false;
@@ -339,13 +281,11 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
         kg, state, sd_mnee, nullptr, PATH_RAY_DIFFUSE, true);
 
     ccl_private ShaderClosure *selected_bsdf = nullptr;
-
     for (int ci = 0; ci < sd_mnee->num_closure; ci++) {
       ccl_private ShaderClosure *bsdf = &sd_mnee->closure[ci];
       if (!CLOSURE_IS_SMS_COMPATIBLE(bsdf->type)) {
         continue;
       }
-
       selected_bsdf = bsdf;
       break;
     }
@@ -358,17 +298,16 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
       return false;
     }
 
-    ccl_private MicrofacetBsdf *selected_microfacet_bsdf = (ccl_private MicrofacetBsdf *)selected_bsdf;
-    ccl_private ManifoldVertex &mv = vertices[vertex_count++];
+    ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)selected_bsdf;
+    ccl_private ManifoldVertex &mv = vertices[vertex_count];
 
-    if (CLOSURE_IS_REFLECTION(selected_bsdf->type)) {
+    if (CLOSURE_IS_REFLECTION(selected_bsdf->type) || CLOSURE_IS_GLASS(selected_bsdf->type)) {
       *out_has_reflection = true;
     }
 
     float eta = 1.0f;
     if (!CLOSURE_IS_REFLECTION(selected_bsdf->type)) {
-      eta = (sd_mnee->flag & SD_BACKFACING) ? 1.0f / selected_microfacet_bsdf->ior :
-                                              selected_microfacet_bsdf->ior;
+      eta = (sd_mnee->flag & SD_BACKFACING) ? 1.0f / microfacet_bsdf->ior : microfacet_bsdf->ior;
     }
 
     /* Tie roughness offsets to the actual visited specular surface. */
@@ -378,20 +317,30 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
         fractf(roughness_offset.y + hash_uint2_to_float(rough_seed, 0x7f4a7c15u)));
 
     float2 h = zero_float2();
-    if (selected_microfacet_bsdf->alpha_x > 0.f && selected_microfacet_bsdf->alpha_y > 0.f) {
+    if (microfacet_bsdf->alpha_x > 0.f && microfacet_bsdf->alpha_y > 0.f) {
       h = mnee_sample_bsdf_dh(selected_bsdf->type,
-                              selected_microfacet_bsdf->alpha_x,
-                              selected_microfacet_bsdf->alpha_y,
+                              microfacet_bsdf->alpha_x,
+                              microfacet_bsdf->alpha_y,
                               per_vertex_offset.x,
                               per_vertex_offset.y);
       *out_offset_pdf *= sms_bsdf_offset_normal_pdf(
-        selected_bsdf->type, selected_microfacet_bsdf->alpha_x, selected_microfacet_bsdf->alpha_y, h);
+          selected_bsdf->type, microfacet_bsdf->alpha_x, microfacet_bsdf->alpha_y, h);
     }
 
     mnee_setup_manifold_vertex(kg, &mv, selected_bsdf, eta, h, &probe_ray, &probe_isect, sd_mnee);
 
-    /* Build outgoing direction using the selected closure and sampled offset normal,
-     * following the same reflect/refract transport transform used by the SMS solver. */
+    /* Store hit object for Bernoulli trial shape consistency checking. */
+    vertex_objects[vertex_count] = hit_object;
+    vertex_count++;
+
+    /* If this is the last bounce we need, don't scatter - just connect to light.
+     * Matching Mitsuba: "connect to the light source now by terminating". */
+    if (bounce == max_bounces - 1) {
+      break;
+    }
+
+    /* Build outgoing direction by scattering at this vertex.
+     * Matching Mitsuba: reflect if eta==1, refract otherwise. */
     const float3 wi = -probe_ray.D;
     const float3 n_offset = safe_normalize(mv.n + h.x * mv.dp_du + h.y * mv.dp_dv);
     float3 outgoing = zero_float3();
@@ -400,6 +349,15 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
     if (CLOSURE_IS_REFLECTION(selected_bsdf->type)) {
       outgoing = sms_ad_reflect(wi, n_offset);
       valid_outgoing = true;
+    }
+    else if (CLOSURE_IS_GLASS(selected_bsdf->type)) {
+      /* Glass can both refract and reflect. Try refraction first;
+       * fall back to reflection on total internal reflection. */
+      valid_outgoing = sms_ad_refract(wi, n_offset, eta, outgoing);
+      if (!valid_outgoing) {
+        outgoing = sms_ad_reflect(wi, n_offset);
+        valid_outgoing = true;
+      }
     }
     else {
       valid_outgoing = sms_ad_refract(wi, n_offset, eta, outgoing);
@@ -410,11 +368,6 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
     }
     outgoing = safe_normalize(outgoing);
 
-    if (hit_object == target_object) {
-      reached_target = true;
-      break;
-    }
-
     probe_ray.self.object = probe_isect.object;
     probe_ray.self.prim = probe_isect.prim;
     probe_ray.P = sd_mnee->P;
@@ -423,7 +376,12 @@ ccl_device_forceinline bool sms_sample_path(KernelGlobals kg,
     probe_ray.tmax = FLT_MAX;
   }
 
-  if (!reached_target || vertex_count == 0) {
+  if (vertex_count == 0) {
+    return false;
+  }
+
+  /* For Bernoulli trials, require matching vertex count. */
+  if (seed_vertex_count > 0 && vertex_count != seed_vertex_count) {
     return false;
   }
 
@@ -494,7 +452,8 @@ ccl_device_forceinline bool sms_path_contribution(KernelGlobals kg,
 
   /* Use MNEE's path contribution evaluation. */
   return mnee_path_contribution(
-      kg, state, sd, sd_mnee, ls, light_fixed_direction, vertex_count, vertices, throughput);
+      kg, state, sd, sd_mnee, ls, light_fixed_direction, vertex_count, vertices, throughput,
+      reflection);
 }
 
 /* Check depth limits for a given vertex count. */
@@ -549,8 +508,9 @@ ccl_device_forceinline Spectrum integrate_sms(KernelGlobals kg,
     RNGState offset_rng_state = *rng_state;
     path_state_rng_scramble(&offset_rng_state, (int)hash_uint2(caster_idx, 0x6e624eb7));
     const float2 roughness_offset = path_state_rng_2D(kg, &offset_rng_state, PRNG_SURFACE_BSDF);
-    /* Sample initial path via this caster shape. */
+    /* Sample initial seed path via this caster shape. */
     ManifoldVertex ref_vertices[MNEE_MAX_CAUSTIC_CASTERS];
+    int ref_objects[MNEE_MAX_CAUSTIC_CASTERS];
     bool ref_has_reflection = false;
     int ref_vertex_count = 0;
     float ref_offset_pdf = 1.0f;
@@ -568,7 +528,10 @@ ccl_device_forceinline Spectrum integrate_sms(KernelGlobals kg,
                          ref_vertices,
                          &ref_vertex_count,
                          &ref_has_reflection,
-                         &ref_offset_pdf))
+                         &ref_offset_pdf,
+                         ref_objects,
+                         0,
+                         nullptr))
     {
       continue;
     }
@@ -628,6 +591,7 @@ ccl_device_forceinline Spectrum integrate_sms(KernelGlobals kg,
 
     for (int trial = 1; trial < SMS_MAX_TRIALS; trial++) {
       ManifoldVertex trial_vertices[MNEE_MAX_CAUSTIC_CASTERS];
+      int trial_objects[MNEE_MAX_CAUSTIC_CASTERS];
       bool trial_has_reflection = false;
       int trial_vertex_count = 0;
       float trial_offset_pdf = 1.0f;
@@ -645,7 +609,10 @@ ccl_device_forceinline Spectrum integrate_sms(KernelGlobals kg,
                            trial_vertices,
                            &trial_vertex_count,
                            &trial_has_reflection,
-                           &trial_offset_pdf) ||
+                           &trial_offset_pdf,
+                           trial_objects,
+                           ref_vertex_count,
+                           ref_objects) ||
           trial_offset_pdf <= 0.0f)
       {
         inv_prob_estimate += 1.0f;
